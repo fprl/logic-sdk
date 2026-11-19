@@ -10,7 +10,7 @@ type ProcedureOf<S extends object, F> =
     ? Procedure<ORPCContext<S>, ORPCContext<S>, StandardSchemaV1<I, I>, StandardSchemaV1<O, O>, {}>
     : never;
 
-/** `{ bookings: { confirm, cancel, … } }`: only functions with `expose`. */
+/** `{ bookings: { confirm, cancel, … } }`: only functions with `expose: true`. */
 export type ORPCRouterOf<S extends object, Mods> = {
   [M in keyof Mods as {} extends ExposedOf<Mods[M]> ? never : M]: {
     [N in keyof ExposedOf<Mods[M]>]: ProcedureOf<S, Mods[M][N & keyof Mods[M]]>;

@@ -25,9 +25,8 @@ app.all("/api/*", (c) => api(c.req.raw));
 |---|---|
 | `POST /api/bookings.confirm` | Runs it with the JSON body as input |
 | `GET /api/availability.check?input={...}` | Queries only |
-| `GET /api/` | Lists the exposed functions |
 
-- Only exposed functions are published.
+- Only functions with `expose: true` are published. Anything else is a 404, and there's no route that lists them.
 - POST needs `content-type: application/json`. That blocks cross-site form posts (CSRF).
 - Success is `{ "data": ... }`.
 
@@ -46,6 +45,26 @@ Failures are `{ "error": { "kind", "code", "details" } }`, with a status from th
 | anything unexpected | 500, without details |
 
 Unexpected errors go to `onError` (default: `console.error`). The map is exported as `statusOf`.
+
+## Signed out
+
+`resolveScope` decides what a request without a session means:
+
+- **This mount also serves public functions:** return a scope with no actor. Functions whose `authorize` needs one answer 403.
+- **This mount is entirely session-only:** throw `unauthenticated()` and the client gets a 401.
+
+```ts
+import { toFetchHandler, unauthenticated } from "logic-sdk/fetch";
+
+const admin = toFetchHandler(registry, {
+  basePath: "/admin/api/",
+  resolveScope: async (request) => {
+    const session = await auth.getSession(request);
+    if (!session) throw unauthenticated();
+    return scopeFrom(session);
+  },
+});
+```
 
 ## Serverless
 

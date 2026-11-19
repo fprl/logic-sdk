@@ -28,19 +28,42 @@ export const prepareStay = on(
 - **`on` takes the event lazily** (`() => bookings.confirmed`), so two modules can import each other's index without an import-cycle crash.
 - **What you emit is what's delivered.** `emit` takes a snapshot of the payload.
 - **Listeners must be idempotent.** They may run again; `ctx.event.id` is the key to dedupe on.
+- **Listeners run with the emitter's scope.** Have them run internal functions, not exposed ones. See [Authorization](/docs/concepts/authorization#nested-calls-and-listeners).
 
 ## Serverless
 
-On Workers or Vercel, give the registry `waitUntil` so the response returns right after commit and listeners finish afterwards. Set it once, where you create the registry:
+On serverless platforms, give the registry `waitUntil` so the response returns right after commit and listeners finish afterwards. Without it, `run` waits for the listeners, which is what you want in tests and long-lived servers.
+
+**Next.js:** create the registry once, and hand delivery to `after`:
 
 ```ts
-import { waitUntil } from "@vercel/functions";       // Vercel
-// import { waitUntil } from "cloudflare:workers";   // Cloudflare Workers
+import { after } from "next/server";
 
-createRegistry({ modules, database, waitUntil });
+export const registry = createRegistry({
+  modules,
+  database,
+  waitUntil: (p) => after(() => p),
+});
 ```
 
-Without it, `run` waits for the listeners, which is what you want in tests and long-lived servers.
+**Cloudflare Workers:** with Hyperdrive, the database client is per request, so the registry is too. Take `waitUntil` from the execution context:
+
+```ts
+export default {
+  async fetch(request, env, ctx) {
+    // Hyperdrive pools connections: a client per request is the recommended setup
+    const sql = postgres(env.HYPERDRIVE.connectionString, { max: 5 });
+    const registry = createRegistry({
+      modules,
+      database: drizzleAdapter(drizzle({ client: sql })),
+      waitUntil: (p) => ctx.waitUntil(p),
+    });
+    ...
+  },
+};
+```
+
+**Node:** create the registry once at startup. No `waitUntil` needed.
 
 ## Loops
 

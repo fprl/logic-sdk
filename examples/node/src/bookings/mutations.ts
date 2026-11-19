@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { mutation } from "../logic";
+import { anyone, staff } from "../policies";
 import * as availability from "../availability";
 import * as pricing from "../pricing";
-import { findBooking, setStatus } from "./data";
+import { canCancel, confirmBooking, findBooking, setStatus } from "./data";
 import { cancelled, confirmed } from "./events";
 import { Booking, bookings } from "./schema";
 
@@ -15,12 +16,13 @@ export const request = mutation({
     guestEmail: z.email(),
     enquiryId: z.uuid().optional(),
   }),
-  expose: "public",
+  authorize: anyone,
+  expose: true,
   outputSchema: Booking,
-  async execute(input, { db, scope, run, conflict }) {
+  async execute(input, { db, scope, run, errors }) {
     const range = { propertyId: input.propertyId, from: input.checkIn, to: input.checkOut };
     const { available } = await run(availability.check, range);
-    if (!available) throw conflict("dates_unavailable"); // "bookings.dates_unavailable": our code, our module
+    if (!available) throw errors.conflict("dates_unavailable"); // "bookings.dates_unavailable": our code, our module
     const price = await run(pricing.priceStay, range);
 
     const [b] = await db
@@ -34,35 +36,44 @@ export const request = mutation({
 export const confirm = mutation({
   description: "Confirm a pending booking: holds its dates and tells the other modules",
   inputSchema: z.object({ bookingId: z.uuid() }),
-  expose: "staff",
+  authorize: staff,
+  expose: true,
   outputSchema: Booking,
   async execute({ bookingId }, ctx) {
-    const { run, emit } = ctx;
-    const b = await findBooking(ctx, bookingId);
-    if (b.status !== "pending") throw ctx.reject("not_pending", { status: b.status });
+    const b = await confirmBooking(ctx, bookingId);
+    ctx.emit(confirmed, { bookingId: b.id, enquiryId: b.enquiryId, guestEmail: b.guestEmail });
+    return b;
+  },
+});
 
-    await run(availability.hold, {
-      propertyId: b.propertyId, from: b.checkIn, to: b.checkOut, reason: "booking", sourceId: b.id,
-    });
-    const updated = await setStatus(ctx, b.id, "confirmed");
-
-    emit(confirmed, { bookingId: b.id, enquiryId: b.enquiryId, guestEmail: b.guestEmail });
-    return updated;
+/**
+ * Internal (no authorize, no expose): `checkout` runs it once the guest has paid. Not reachable from
+ * any adapter, so the gate is the action that runs it.
+ */
+export const confirmPaid = mutation({
+  description: "Confirm a booking the guest has just paid for",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  outputSchema: Booking,
+  async execute({ bookingId }, ctx) {
+    const b = await confirmBooking(ctx, bookingId);
+    ctx.emit(confirmed, { bookingId: b.id, enquiryId: b.enquiryId, guestEmail: b.guestEmail });
+    return b;
   },
 });
 
 export const cancel = mutation({
   description: "Cancel a booking and free its dates",
   inputSchema: z.object({ bookingId: z.uuid() }),
-  expose: "staff",
+  authorize: staff,
+  expose: true,
   outputSchema: Booking,
   async execute({ bookingId }, ctx) {
-    const { run, emit } = ctx;
     const b = await findBooking(ctx, bookingId);
-    if (b.status === "cancelled") throw ctx.reject("already_cancelled");
-    await run(availability.release, { sourceId: b.id });
+    if (!canCancel(ctx.scope.actor, b)) throw ctx.errors.deny(); // "bookings.cancel.forbidden"
+    if (b.status === "cancelled") throw ctx.errors.reject("already_cancelled");
+    await ctx.run(availability.release, { sourceId: b.id });
     const updated = await setStatus(ctx, b.id, "cancelled");
-    emit(cancelled, { bookingId: b.id });
+    ctx.emit(cancelled, { bookingId: b.id });
     return updated;
   },
 });

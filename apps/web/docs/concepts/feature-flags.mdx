@@ -1,0 +1,84 @@
+---
+title: Feature flags
+description: Three places a flag can live, and what each one costs.
+---
+
+A flag is just data your code reads. What matters is where it lives, because that decides who can read it and when it's read.
+
+| Where | Read by | Pick it when |
+|---|---|---|
+| **In scope** | Everything, including policies | The flag is per user or account and cheap to resolve per request |
+| **Behind a service** | Actions and listeners | You already use a flag provider (a network call) |
+| **In your database** | Queries and mutations | The flag changes what your data means, or you want it in the same transaction |
+
+## In scope, resolved at the edge
+
+Resolve the flags once, where you build the scope, and every function sees them:
+
+```ts
+resolveScope: async (request) => {
+  const session = await auth.getSession(request);
+  return {
+    ...scopeFrom(session),
+    flags: { newCheckout: await flagsFor(session, "new-checkout") },
+  };
+},
+```
+
+Policies read only the scope, so this is the one place a flag can gate `authorize`:
+
+```ts
+// src/policies.ts
+export const betaCheckout = (s: Scope): s is MemberScope =>
+  s.actor !== null && s.flags.newCheckout;
+```
+
+- **Cheap.** One lookup per request, then plain property reads.
+- **Frozen into events.** The scope is copied into every event envelope, so a listener sees the flag as it was when the event was emitted, not as it is when the listener runs. Usually that's what you want (finish what was started); if it isn't, read the flag from a service or the database in the listener.
+- **Keep it JSON**, like the rest of the scope.
+
+## Behind a service, from an action
+
+When the flag comes from a provider over the network, it's a service. Services reach actions and listeners only, so read it there and pass the answer down as input:
+
+```ts
+export const checkout = action({
+  description: "Charge the guest and confirm the booking",
+  ...
+  async execute(input, ctx) {
+    const useNewPricing = await ctx.services.flags.enabled("new-pricing", ctx.scope.accountId);
+    const quote = await ctx.run(pricing.quote, { ...input, useNewPricing });
+    ...
+  },
+});
+```
+
+Queries and mutations can't call it on purpose: a mutation may roll back and retry, and a network call inside it can't. If you pass the flag into an exposed function as input, a client can set it too, so pass it only to internal ones.
+
+## In your database, read by queries
+
+The Convex way: a flag is a row, and a query reads it.
+
+```ts
+// src/flags/queries.ts
+export const enabled = query({
+  description: "Is this flag on for the current account?",
+  inputSchema: z.object({ name: z.string() }),
+  async execute({ name }, ctx) {
+    const [row] = await ctx.db
+      .select()
+      .from(flags)
+      .where(and(eq(flags.accountId, ctx.scope.accountId), eq(flags.name, name)));
+    return row?.enabled ?? false;
+  },
+});
+
+// any mutation
+if (await ctx.run(flags.enabled, { name: "deposits" })) {
+  ...
+}
+```
+
+- **Transactional.** Read inside a mutation, the flag is read in the same transaction as the rest of your data, and turning it on is itself a mutation (with an event, a test, an audit trail).
+- **Current in listeners**, since they read it when they run.
+- **Costs a query** per read. Not available to policies, which never touch the database.

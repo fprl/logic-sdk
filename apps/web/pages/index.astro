@@ -7,10 +7,12 @@ const { config } = data;
 const example = `export const confirm = mutation({
   description: "Confirm a pending booking",
   inputSchema: z.object({ bookingId: z.uuid() }),
-  expose: "staff",
+  outputSchema: Booking,
+  authorize: staff,                                  // on every call, nested ones too
+  expose: true,                                      // HTTP, oRPC and AI tools may publish it
   async execute({ bookingId }, ctx) {
-    const b = await findBooking(ctx, bookingId);
-    if (b.status !== "pending") throw reject("bookings.not_pending");
+    const b = await findBooking(ctx, bookingId);     // other accounts' bookings: 404
+    if (b.status !== "pending") throw ctx.errors.reject("not_pending");
     await ctx.run(availability.hold, { bookingId }); // same transaction
     ctx.emit(confirmed, { bookingId });              // delivered after commit
     return setStatus(ctx, b.id, "confirmed");
@@ -23,7 +25,7 @@ await caller.run(confirm, { bookingId });`;
 const points = [
   { title: "One transaction", body: "A mutation and every mutation it runs commit together, across modules. A nested failure rolls back everything." },
   { title: "Side effects after commit", body: "Mutations emit events. Listeners send the email once the data is safe, never from a transaction that might roll back." },
-  { title: "Who is calling, everywhere", body: "Bind the scope once per request, job or test. Every nested call and listener sees it. Policies narrow its type." },
+  { title: "Authorization on every call", body: "Bind who is calling once. Each function's policy runs on every call, from HTTP, an agent, a job or another function, and narrows the scope's type." },
   { title: "Tests without mocks", body: "Each test is a real transaction on a real database, always rolled back. Swap services for memory ones, freeze time." },
 ];
 ---

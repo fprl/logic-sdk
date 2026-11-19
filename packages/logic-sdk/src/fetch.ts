@@ -1,4 +1,11 @@
-import { isDomainError, type CallerOptions, type ErrorKind, type Registry } from "./index.ts";
+import { DomainError, isDomainError, type CallerOptions, type ErrorKind, type Registry } from "./index.ts";
+
+/**
+ * Throw from `resolveScope` when this mount is session-only and there's no valid session: the client gets 401.
+ * For mounts that also serve public functions, return a scope with no actor instead, and let policies answer 403.
+ */
+export const unauthenticated = (code = "unauthenticated", details?: unknown) =>
+  new DomainError("unauthenticated", code, details);
 
 /** Error kind → HTTP status. The only place statuses exist: core errors know nothing about HTTP. */
 export const statusOf: Record<ErrorKind, number> = {
@@ -26,9 +33,8 @@ const json = (body: unknown, status = 200) =>
 
 /**
  * A web-standard handler (Workers, Bun, Node via Hono or srvx, SvelteKit, Next route handlers...).
- * Publishes only functions with `expose`. POST `{base}{id}` with a JSON body (`content-type: application/json` required);
+ * Publishes only functions with `expose: true`. POST `{base}{id}` with a JSON body (`content-type: application/json` required);
  * queries also accept GET `?input=<json>`.
- * GET `{base}` lists what's exposed.
  */
 export function toFetchHandler<S extends object>(registry: Registry<S, any>, options: FetchOptions<S>) {
   const base = (options.basePath ?? "/").replace(/\/?$/, "/");
@@ -39,11 +45,6 @@ export function toFetchHandler<S extends object>(registry: Registry<S, any>, opt
     const path = new URL(request.url).pathname;
     if (!path.startsWith(base)) return json({ error: { kind: "not_found", code: "route_not_found" } }, 404);
     const id = path.slice(base.length);
-
-    if (id === "" && request.method === "GET")
-      return json({
-        functions: [...exposed.values()].map((f) => ({ id: f.id, kind: f.kind, description: f.fn.description })),
-      });
 
     const entry = exposed.get(id);
     if (!entry) return json({ error: { kind: "not_found", code: "function_not_found" } }, 404);

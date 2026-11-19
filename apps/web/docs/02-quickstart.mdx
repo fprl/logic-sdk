@@ -4,9 +4,9 @@ description: Declare your types once, write a module, register it, and call it.
 ---
 
 <Steps>
-  <Step title="Declare your types and policies in logic.ts">
+  <Step title="Declare your types in logic.ts">
 
-`init` returns the definers, typed with your config. Policies are the names you'll use in `expose`.
+`init` returns the definers, typed with your config.
 
 ```ts
 import {
@@ -15,6 +15,7 @@ import {
   type QueryCtx as Query,
 } from "logic-sdk";
 import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+import type { Scope } from "./policies";
 
 type Tx = DrizzleTx<typeof db>;
 
@@ -33,16 +34,24 @@ type Config = {
 export type QueryCtx = Query<Config>;
 export type MutationCtx = Mutation<Config>;
 
-export const { query, mutation, action, event, on, createRegistry } =
-  init<Config>()({
-    policies: {
-      public: () => true,
-      staff: (scope) => is(scope, "agent", "owner", "admin"),
-    },
-  });
+export const { query, mutation, action, event, on, createRegistry } = init<Config>();
 ```
 
-`init<Config>()({ policies })` is called twice because TypeScript can't infer the policy names while `Config` is written out by hand.
+  </Step>
+  <Step title="Write your policies in policies.ts">
+
+A policy is a plain, sync function over the scope that says who may call a function. Write them as type guards, and they narrow `ctx.scope`:
+
+```ts
+export type Scope = SignedOutScope | MemberScope;
+
+export const anyone = () => true;
+export const member = (s: Scope): s is MemberScope => s.actor !== null;
+export const staff = (s: Scope): s is StaffScope =>
+  s.actor !== null && s.actor.role !== "guest";
+```
+
+[Authorization](/docs/concepts/authorization) has the full file and the rules for records.
 
   </Step>
   <Step title="Write a module">
@@ -67,12 +76,15 @@ export const cancel = mutation({
   description: "Cancel a booking and free its dates",
   inputSchema: z.object({ bookingId: z.uuid() }),
   outputSchema: Booking,
-  expose: "staff",
+  // Who may call it, on every call
+  authorize: staff,
+  // Adapters (HTTP, oRPC, AI) may publish it
+  expose: true,
 
   async execute({ bookingId }, ctx) {
     const booking = await findBooking(ctx, bookingId);
     if (booking.status === "cancelled") {
-      throw ctx.reject("already_cancelled");
+      throw ctx.errors.reject("already_cancelled");
     }
 
     await ctx.run(availability.release, { sourceId: booking.id });
@@ -119,4 +131,4 @@ await caller.run(bookings.cancel, { bookingId });
   </Step>
 </Steps>
 
-From here, publish exposed functions over [HTTP](/docs/adapters/fetch) or [oRPC](/docs/adapters/orpc), or read how [transactions](/docs/concepts/transactions) work.
+From here, publish exposed functions over [HTTP](/docs/adapters/fetch) or [oRPC](/docs/adapters/orpc), or read how [authorization](/docs/concepts/authorization) and [transactions](/docs/concepts/transactions) work.

@@ -1,12 +1,25 @@
 import { z } from "zod";
 import { query } from "../logic";
+import { staff } from "../policies";
 import { findBooking } from "./data";
 import { Booking } from "./schema";
 
 export const get = query({
   description: "Get a booking",
   inputSchema: z.object({ bookingId: z.uuid() }),
-  expose: "staff",
+  authorize: staff,
+  expose: true,
   outputSchema: Booking,
   execute: ({ bookingId }, ctx) => findBooking(ctx, bookingId),
+});
+
+/** Internal: what `checkout` charges. Guests can't `get` a booking, so the action reads only this. */
+export const amountDue = query({
+  description: "What the guest owes for a pending booking",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  async execute({ bookingId }, ctx) {
+    const b = await findBooking(ctx, bookingId);
+    if (b.status !== "pending") throw ctx.errors.reject("not_pending", { status: b.status });
+    return { total: b.total };
+  },
 });

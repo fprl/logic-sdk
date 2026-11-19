@@ -10,12 +10,13 @@ export const confirm = mutation({
   description: "Confirm a pending booking",
   inputSchema: z.object({ bookingId: z.uuid() }),
   outputSchema: Booking,
-  expose: "staff",
+  authorize: staff,
+  expose: true,
 
   async execute({ bookingId }, ctx) {
     const booking = await findBooking(ctx, bookingId);
     if (booking.status !== "pending") {
-      throw ctx.reject("not_pending");
+      throw ctx.errors.reject("not_pending");
     }
 
     // Another module, in the same transaction
@@ -42,7 +43,8 @@ await caller.run(bookings.confirm, { bookingId });
 - **One transaction across modules.** A mutation and every mutation it runs commit together. A failure anywhere rolls back everything.
 - **Side effects after commit.** Mutations emit events, and listeners send the email once the data is safe.
 - **Who is calling, everywhere.** The scope you bind reaches every nested call and listener. Policies narrow its type.
-- **Internal by default.** Only functions you `expose` reach HTTP, RPC or AI tools, and their policy runs on every call.
+- **Authorization on every call.** A function's `authorize` policy runs whoever calls it: HTTP, an agent, a job or another function.
+- **Internal by default.** Only functions with `expose: true` reach HTTP, RPC or AI tools.
 - **Tests without mocks.** Each test is a real transaction on a real database, always rolled back.
 - **Any runtime.** Node, Bun and Cloudflare Workers, under any framework. No decorators, classes, codegen or build step.
 

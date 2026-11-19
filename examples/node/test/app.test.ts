@@ -124,6 +124,24 @@ test("cancel releases the dates", async () => {
   });
 });
 
+test("record rule: owners may drop a pending request, but a confirmed stay needs an agent", async () => {
+  await withServices(registry).t.transaction(async (tx) => {
+    const guest = tx.as(scopeAs(null));
+    const owner = tx.as(scopeAs("owner"));
+    const p = await seedProperty(guest);
+    const req = (checkIn: string, checkOut: string) => guest.run(bookings.request, { propertyId: p.id, checkIn, checkOut, guestEmail: "g@x.com" });
+
+    const pending = await req("2026-11-01", "2026-11-03");
+    expect((await owner.run(bookings.cancel, { bookingId: pending.id })).status).toEqual("cancelled");
+
+    const stay = await req("2026-11-10", "2026-11-12");
+    await tx.as(scopeAs("agent")).run(bookings.confirm, { bookingId: stay.id });
+    await expect(owner.run(bookings.cancel, { bookingId: stay.id })).rejects.toMatchObject({ kind: "forbidden", code: "bookings.cancel.forbidden" });
+    // the policy (staff) runs first: a guest never reaches the record rule
+    await expect(guest.run(bookings.cancel, { bookingId: stay.id })).rejects.toMatchObject({ kind: "forbidden" });
+  });
+});
+
 test("owner blocks go through availability's rules", async () => {
   await withServices(registry).t.transaction(async (tx) => {
     const owner = tx.as(scopeAs("owner"));
@@ -150,6 +168,13 @@ test("checkout action: charges, confirms, refunds when confirming fails", async 
     await expect(guest.run(bookings.checkout, { bookingId: b2.id })).rejects.toThrow(/calendar service down/);
     expect(payments.charges.get("ch_2")).toEqual({ amount: 420_00, refunded: true });
     expect((await tx.as(scopeAs("agent")).run(bookings.get, { bookingId: b2.id })).status).toEqual("pending");
+
+    // no forged admin: the guest can pay, but still can't read or confirm bookings directly
+    await expect(guest.run(bookings.get, { bookingId: b.id })).rejects.toMatchObject({ kind: "forbidden" });
+    await expect(guest.run(bookings.confirm, { bookingId: b2.id })).rejects.toMatchObject({ kind: "forbidden" });
+    // paying for a confirmed booking is refused before any charge
+    await expect(guest.run(bookings.checkout, { bookingId: b.id })).rejects.toMatchObject({ code: "bookings.not_pending" });
+    expect(payments.charges.size).toEqual(2);
   });
 });
 
@@ -189,9 +214,10 @@ test("fetch adapter: only exposed functions are published, errors map to statuse
       return [res.status, await res.json()] as const;
     };
 
-    const manifest = (await (await handler(new Request("http://x/api/"))).json()) as any;
-    const ids = manifest.functions.map((f: any) => f.id);
-    expect(ids.includes("bookings.confirm") && !ids.includes("availability.hold") && !ids.includes("enquiries.markWon")).toBe(true);
+    // internal functions don't exist over HTTP, and there's no listing of what does
+    expect((await call("enquiries.markWon", {}))[0]).toEqual(404);
+    expect((await call("bookings.confirmPaid", {}))[0]).toEqual(404);
+    expect((await handler(new Request("http://x/api/"))).status).toEqual(404);
 
     const [s1, r1] = await call("bookings.request", { propertyId: p.id, checkIn: "2026-07-01", checkOut: "2026-07-04", guestEmail: "g@x.com" });
     expect(s1).toEqual(200);
@@ -207,8 +233,7 @@ test("fetch adapter: only exposed functions are published, errors map to statuse
     expect([del.status, del.headers.get("allow")]).toEqual([405, "POST"]);
     // basePath without a trailing slash works too
     const noSlash = toFetchHandler(tx.registry, { basePath: "/api", resolveScope: () => scopeAs(null) });
-    expect((await noSlash(new Request("http://x/api/"))).status).toEqual(200);
-    const res = await handler(new Request(`http://x/api/availability.check?input=${encodeURIComponent(JSON.stringify({ propertyId: p.id, from: "2026-07-02", to: "2026-07-03" }))}`));
-    expect(await res.json()).toEqual({ data: { available: false } });
+    const check = `/api/availability.check?input=${encodeURIComponent(JSON.stringify({ propertyId: p.id, from: "2026-07-02", to: "2026-07-03" }))}`;
+    expect(await (await noSlash(new Request(`http://x${check}`))).json()).toEqual({ data: { available: false } });
   });
 });

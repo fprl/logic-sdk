@@ -2,17 +2,18 @@
 
 import { anthropic } from "@ai-sdk/anthropic";
 import { isDomainError } from "logic-sdk";
-import { toAITools } from "logic-sdk/ai";
+import { toAITool } from "logic-sdk/ai";
 import { generateText, isStepCount } from "ai";
 import * as bookings from "example-node/bookings";
 import * as properties from "example-node/properties";
-import { registry, staffCaller } from "@/lib/caller";
+import { staffCaller } from "@/lib/caller";
 
 export type Result = { ok: boolean; text: string };
 
 /** Demo data: a property and a pending booking. */
 export async function seed(): Promise<Result> {
   const caller = staffCaller();
+  // Seeding acts as other people on purpose: an owner lists the property, a guest requests the stay.
   const owner = caller.with({ actor: { id: "owner_1", role: "owner" } });
   const property = await owner.run(properties.create, {
     name: "Casa Azul",
@@ -48,10 +49,14 @@ export async function askAgent(_: Result | null, form: FormData): Promise<Result
     return { ok: false, text: "Set ANTHROPIC_API_KEY to talk to the agent." };
   }
 
-  const tools = toAITools(registry, staffCaller(), {
-    // Agents may read and confirm, but never charge a card
-    filter: (f) => f.id !== "bookings.checkout",
-  });
+  // The agent gets exactly these tools, named by you. Opt-in: nothing else the UI can call is reachable,
+  // and `bookings.checkout` (charging a card) is simply not on the list.
+  const caller = staffCaller();
+  const tools = {
+    getBooking: toAITool(caller, bookings.get),
+    confirmBooking: toAITool(caller, bookings.confirm),
+    cancelBooking: toAITool(caller, bookings.cancel),
+  };
 
   const result = await generateText({
     model: anthropic("claude-opus-5-5"),

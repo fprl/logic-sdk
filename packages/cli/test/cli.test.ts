@@ -15,8 +15,8 @@ function cli(cwd: string, ...args: string[]) {
 
 test("list: every function and listener, with kind and policy", () => {
   const rows = cli(app, "list", "--json").json();
-  expect(rows).toContainEqual(expect.objectContaining({ id: "bookings.confirm", kind: "mutation", expose: "staff" }));
-  expect(rows).toContainEqual(expect.objectContaining({ id: "availability.hold", kind: "mutation", expose: null }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "bookings.confirm", kind: "mutation", authorize: "staff", exposed: true }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "availability.hold", kind: "mutation", authorize: null, exposed: false }));
   expect(rows).toContainEqual(expect.objectContaining({ id: "tasks.prepareStay", kind: "listener", event: "bookings.confirmed" }));
 });
 
@@ -25,27 +25,28 @@ test("list filters by module, kind and exposure", () => {
   expect(ids.sort()).toEqual(["bookings.cancel", "bookings.checkout", "bookings.confirm", "bookings.get", "bookings.request"]);
 });
 
-test("show: schemas from the registry, edges from the source", () => {
+test("show: schemas from the registry, edges from the source (through this module's helpers too)", () => {
   const fn = cli(app, "show", "bookings.confirm", "--json").json();
   expect(fn.input.properties.bookingId).toMatchObject({ type: "string", format: "uuid" });
   expect(fn.output.properties).not.toHaveProperty("accountId");
-  expect(fn.runs).toEqual(["availability.hold"]);
+  expect(fn.runs).toEqual(["availability.hold"]); // in confirmBooking(ctx, id), a data.ts helper
   expect(fn.emits).toEqual(["bookings.confirmed"]);
-  expect(fn.calledBy).toEqual(["bookings.checkout"]);
+  expect(fn.calledBy).toEqual([]);
+  expect(cli(app, "show", "bookings.confirmPaid", "--json").json().calledBy).toEqual(["bookings.checkout"]);
   expect(fn.at).toMatchObject({ file: "src/bookings/mutations.ts" });
 });
 
 test("show an event: who emits it and who listens", () => {
   expect(cli(app, "show", "bookings.confirmed", "--json").json()).toEqual({
     id: "bookings.confirmed",
-    emittedBy: ["bookings.confirm"],
+    emittedBy: ["bookings.confirm", "bookings.confirmPaid"],
     listeners: ["enquiries.winOnBooking", "tasks.prepareStay"],
   });
 });
 
 test("graph: runs, emits and triggers, as JSON or Mermaid", () => {
   const { edges } = cli(app, "graph", "--format", "json").json();
-  expect(edges).toContainEqual({ from: "bookings.checkout", to: "bookings.confirm", type: "runs" });
+  expect(edges).toContainEqual({ from: "bookings.checkout", to: "bookings.confirmPaid", type: "runs" });
   expect(edges).toContainEqual({ from: "bookings.confirm", to: "bookings.confirmed", type: "emits" });
   expect(edges).toContainEqual({ from: "bookings.confirmed", to: "tasks.prepareStay", type: "triggers" });
   const mermaid = cli(app, "graph", "--format", "mermaid").out;
@@ -132,4 +133,89 @@ test("without @logic-sdk/cli installed, the command says how to add it", async (
   const r = spawnSync("node", [join(dir, "logic-sdk.js"), "list"], { encoding: "utf8" });
   expect(r.status).toBe(1);
   expect(r.stderr).toContain("npm i -D @logic-sdk/cli");
+});
+
+// ── 0.2: authorize, expose: true, record checks ─────────────────────────────
+
+const policies = fixture("policies");
+const holes = fixture("holes");
+const problem = (r: ReturnType<typeof cli>, code: string, file: string, line: number) =>
+  r.json().problems.find((p: { code: string; at: Loc | null }) => p.code === code && p.at?.file === file && p.at.line === line);
+type Loc = { file: string; line: number; column: number };
+
+test("list and show: the policy as written (or inline) and whether it's exposed", () => {
+  const rows = cli(policies, "list", "--json").json();
+  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.cancel", authorize: "member", exposed: true }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.refund", authorize: "inline", exposed: false }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "stock.release", authorize: null, exposed: false }));
+  expect(cli(policies, "list", "--exposed", "--json").json().map((r: { id: string }) => r.id)).toEqual(["orders.cancel"]);
+  const text = cli(policies, "show", "orders.cancel").out;
+  expect(text).toMatch(/policy\s+member/);
+  expect(text).toMatch(/exposed\s+yes/);
+  expect(text).not.toContain("\u2014"); // no em dashes in output
+  const { nodes } = cli(policies, "graph", "--format", "json").json();
+  expect(nodes).toContainEqual({ id: "orders.cancel", kind: "mutation", authorize: "member", exposed: true });
+});
+
+test("show lists record checks, in the body or through this module's helpers", () => {
+  expect(cli(policies, "show", "orders.cancel", "--json").json().checks).toEqual(["canCancel"]); // via loadForCancel
+  expect(cli(policies, "show", "orders.refund", "--json").json().checks).toEqual(["canRefund"]);
+  expect(cli(policies, "show", "stock.release", "--json").json().checks).toEqual([]);
+});
+
+test("runs count only on ctx: ctx.run, ctx.with(...).run, a destructured run; never db.run", () => {
+  expect(cli(policies, "show", "orders.cancel", "--json").json().runs).toEqual(["stock.release"]);
+  expect(cli(policies, "show", "orders.refund", "--json").json().runs).toEqual(["stock.release"]);
+  expect(cli(policies, "check", "--json").json()).toEqual({ errors: 0, warnings: 0, problems: [] });
+});
+
+test("check: every boundary hole, both record check rules, and runs it can't name", () => {
+  const r = cli(holes, "check", "--json");
+  expect(r.code).toBe(1);
+  expect(codes(r)).toEqual([
+    "async-can",
+    "async-can",
+    "cross-module-import",
+    "cross-module-import",
+    "cross-module-import",
+    "cross-module-import",
+    "cross-module-import",
+    "dynamic-run",
+    "unused-can",
+  ]);
+});
+
+test("check resolves tsconfig paths (@/) and package.json imports (#)", () => {
+  const r = cli(holes, "check", "--json");
+  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 2)).toMatchObject({ message: expect.stringContaining('"@/stock/data"'), fix: expect.stringContaining('from "@/stock"') });
+  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 3)).toMatchObject({ message: expect.stringContaining('"#stock/data"'), fix: expect.stringContaining('from "../stock"') });
+});
+
+test("check treats re-exports and import() like imports", () => {
+  const r = cli(holes, "check", "--json");
+  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 8)).toBeDefined(); // export { reserved } from
+  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 9)).toBeDefined(); // import("../stock/data")
+});
+
+test("check scans code outside the modules (routes, pages): only a module's index", () => {
+  const p = problem(cli(holes, "check", "--json"), "cross-module-import", "src/routes/orders.ts", 3);
+  expect(p.message).toContain("outside the modules");
+  expect(p.fix).toContain('import * as stock from "../stock"');
+});
+
+test("check warns about runs it can't name, instead of dropping them from cycle detection", () => {
+  const p = problem(cli(holes, "check", "--json"), "dynamic-run", "src/orders/mutations.ts", 20);
+  expect(p).toMatchObject({ severity: "warning", message: expect.stringContaining("orders.place") });
+  expect(cli(holes, "show", "orders.place", "--json").json().runs).toEqual(["(dynamic)"]); // ctx.db.run isn't one
+});
+
+test("async-can: a can* declared async, or awaited", () => {
+  const r = cli(holes, "check", "--json");
+  expect(problem(r, "async-can", "src/orders/rules.ts", 2)).toMatchObject({ severity: "error", message: expect.stringContaining("canShip is async") });
+  expect(problem(r, "async-can", "src/orders/mutations.ts", 16)).toMatchObject({ message: expect.stringContaining("canShip is awaited") });
+});
+
+test("unused-can: a can* call whose result is thrown away", () => {
+  const p = problem(cli(holes, "check", "--json"), "unused-can", "src/orders/mutations.ts", 17);
+  expect(p).toMatchObject({ severity: "error", message: expect.stringContaining("canHold"), fix: expect.stringContaining("ctx.errors.deny()") });
 });

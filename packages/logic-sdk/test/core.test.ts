@@ -1,15 +1,15 @@
 import { z } from "zod";
 import {
-  createRegistry, init, isDomainError, unauthenticated, type Call, type DomainError, type Envelope,
+  createRegistry, init, isDomainError, type Call, type DomainError, type Envelope,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; locale: string };
-const { query, mutation, action, event, on } = init<{ scope: Scope; db: Store; services: { log: string[] } }>()({
-  policies: { anyone: () => true, signedIn: (s) => s.actor !== null },
-});
+const { query, mutation, action, event, on } = init<{ scope: Scope; db: Store; services: { log: string[] } }>();
+const anyone = () => true;
+const signedIn = (s: Scope): s is Scope & { actor: string } => s.actor !== null;
 
 // ── a tiny two-module registry (separate consts, like real module files) ─────
 const added = event({ schema: z.object({ name: z.string() }) });
@@ -17,17 +17,21 @@ const added = event({ schema: z.object({ name: z.string() }) });
 const list = query({
   description: "list",
   inputSchema: z.object({}).optional(),
-  expose: "anyone",
+  authorize: anyone,
+  expose: true,
   outputSchema: z.array(z.string()),
   execute: async (_, { db }) => (db.rows.items ?? []).map((r) => r.name as string),
 });
 const add = mutation({
   description: "add",
   inputSchema: z.object({ name: z.string().min(1) }),
-  expose: "signedIn",
+  authorize: signedIn,
+  expose: true,
   outputSchema: z.object({ name: z.string() }),
-  async execute({ name }, { db, emit, reject }) {
-    if (name === "boom") throw reject("boom");
+  async execute({ name }, { db, emit, errors, scope }) {
+    const actor: string = scope.actor; // narrowed by the policy
+    if (name === "boom") throw errors.reject("boom");
+    void actor;
     (db.rows.items ??= []).push({ name });
     emit(added, { name });
     return { name };
@@ -138,11 +142,42 @@ test("ctx.with changes who is calling, and checks see it", async () => {
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
 });
 
-test("unknown policy names fail when the function is defined", () => {
-  let msg = "";
-  // @ts-expect-error unknown policy
-  try { query({ description: "x", inputSchema: z.undefined(), expose: "nope", execute: async () => 1 }); } catch (e) { msg = (e as Error).message; }
-  expect(/Unknown policy "nope"/.test(msg)).toBe(true);
+test("expose: true without authorize or outputSchema fails when the function is defined", () => {
+  const msg = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
+  // @ts-expect-error expose without authorize
+  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), outputSchema: z.number(), expose: true, execute: async () => 1 }))).toMatch(/no authorize/);
+  // @ts-expect-error expose without outputSchema
+  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), authorize: anyone, expose: true, execute: async () => 1 }))).toMatch(/no outputSchema/);
+  // @ts-expect-error a policy name is not a policy
+  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), authorize: "staff", execute: async () => 1 }))).toMatch(/must be a policy function/);
+});
+
+test("a policy must return exactly true, and must be sync", async () => {
+  const truthy = query({ description: "truthy policy", inputSchema: z.undefined(), authorize: (() => "yes") as any, execute: async () => 1 });
+  const asyncy = query({ description: "async policy", inputSchema: z.undefined(), authorize: (async () => true) as any, execute: async () => 1 });
+  const r = createRegistry<Scope>({ modules: { p: { truthy, asyncy } }, database: memoryDatabase() });
+  const app = r.as({ actor: "a", locale: "es" });
+  await expect(app.run(truthy, undefined)).rejects.toMatchObject({ kind: "forbidden", code: "p.truthy.forbidden" });
+  const err = await app.run(asyncy, undefined).catch((e: unknown) => e);
+  expect(isDomainError(err)).toBe(false);
+  expect(err).toHaveProperty("message", expect.stringMatching(/returned a Promise/));
+});
+
+test("an internal function with authorize is checked too, even when your own code runs it", async () => {
+  const purge = mutation({ description: "admin only", inputSchema: z.object({}), authorize: signedIn, execute: async () => "purged" });
+  const job = action({ description: "a job", inputSchema: z.object({}), execute: async (_, { run }) => run(purge, {}) });
+  const r = createRegistry<Scope>({ modules: { j: { purge, job } }, database: memoryDatabase(), services: { log: [] } });
+  expect(r.functions.find((f) => f.id === "j.purge")!.exposed).toBe(false);
+  await expect(r.as({ actor: null, locale: "es" }).run(job, {})).rejects.toMatchObject({ kind: "forbidden", code: "j.purge.forbidden" });
+  expect(await r.as({ actor: "a", locale: "es" }).run(job, {})).toEqual("purged");
+});
+
+test("bad input on a nested run is a bug in your code (plain Error), not the caller's 400", async () => {
+  const outer = mutation({ description: "passes bad input on", inputSchema: z.object({}), execute: async (_, { run }) => run(add, { name: "" }) });
+  const r = createRegistry<Scope>({ modules: { items, log, o: { outer } }, database: memoryDatabase(), services: { log: [] } });
+  const err = await r.as({ actor: "a", locale: "es" }).run(outer, {}).catch((e: unknown) => e);
+  expect(isDomainError(err)).toBe(false);
+  expect(err).toHaveProperty("message", expect.stringMatching(/items\.add was run with invalid input/));
 });
 
 test("output schema is enforced", async () => {
@@ -245,10 +280,10 @@ test("ctx errors are namespaced to the module they're thrown from", async () => 
     description: "throws the kind it's asked for",
     inputSchema: z.object({ kind: z.enum(["reject", "conflict", "notFound", "deny"]) }),
     async execute({ kind }, ctx) {
-      if (kind === "reject") throw ctx.reject("not_pending", { status: "done" });
-      if (kind === "conflict") throw ctx.conflict("slug_taken");
-      if (kind === "notFound") throw ctx.notFound();
-      throw ctx.deny();
+      if (kind === "reject") throw ctx.errors.reject("not_pending", { status: "done" });
+      if (kind === "conflict") throw ctx.errors.conflict("slug_taken");
+      if (kind === "notFound") throw ctx.errors.notFound();
+      throw ctx.errors.deny();
     },
   });
   const app = createRegistry<Scope>({ modules: { bookings: { fails } } }).as({ actor: "a", locale: "es" });
@@ -257,12 +292,11 @@ test("ctx errors are namespaced to the module they're thrown from", async () => 
   expect(await err("conflict")).toEqual(["conflict", "bookings.slug_taken", undefined]);
   expect(await err("notFound")).toEqual(["not_found", "bookings.not_found", undefined]);
   expect(await err("deny")).toEqual(["forbidden", "bookings.fails.forbidden", undefined]);
-  expect(unauthenticated().kind).toEqual("unauthenticated");
   expect(isDomainError(await app.run(fails, { kind: "conflict" }).catch((e) => e), "bookings.slug_taken")).toBe(true);
 });
 
 test("another module's error passes through run unchanged, and an action can catch it", async () => {
-  const take = mutation({ description: "always taken", inputSchema: z.object({}), execute: async (_, { conflict }) => { throw conflict("taken"); } });
+  const take = mutation({ description: "always taken", inputSchema: z.object({}), execute: async (_, { errors }) => { throw errors.conflict("taken"); } });
   const tryTake = action({
     description: "falls back when taken",
     inputSchema: z.object({}),
@@ -342,9 +376,9 @@ const reg = {
   badEmitThenThrow: mutation({
     description: "emit an invalid payload, then throw",
     inputSchema: z.object({}),
-    async execute(_, { emit, reject }) {
+    async execute(_, { emit, errors }) {
       emit(stamped, { at: 42 as unknown as string });
-      throw reject("boom");
+      throw errors.reject("boom");
     },
   }),
   stamp: mutation({
@@ -419,7 +453,7 @@ test("review #4: a caught nested `throw undefined` still dooms the transaction",
 
 test("review #6: a caught nested invalid-input failure dooms the transaction too", async () => {
   const { app, db } = regSetup();
-  await expect(app.run(reg.swallowsBadInput, {})).rejects.toMatchObject({ kind: "invalid" });
+  await expect(app.run(reg.swallowsBadInput, {})).rejects.toThrow(/run with invalid input/);
   expect(db.store.rows.t).toEqual(undefined);
 });
 
@@ -444,11 +478,16 @@ test("listener loops stop at maxEventDepth and are reported, not thrown", async 
 test("wrap sees calls that fail validation or authorization (audit trails include denials)", async () => {
   const calls: string[] = [];
   const { d } = regSetup({ wrap: async (c, next) => { try { return await next(); } catch (e) { calls.push(`${c.id}:${(e as DomainError).kind}`); throw e; } } });
-  const anon = d.as({ actor: null, locale: "es" });
-  await expect(anon.run(add, { name: "x" })).rejects.toThrow();
+  await expect(d.as({ actor: null, locale: "es" }).run(add, { name: "x" })).rejects.toThrow();
   // @ts-expect-error invalid on purpose
-  await expect(anon.run(add, { name: 1 })).rejects.toThrow();
+  await expect(d.as({ actor: "a", locale: "es" }).run(add, { name: 1 })).rejects.toThrow();
   expect(calls).toEqual(["items.add:forbidden", "items.add:invalid"]);
+});
+
+test("authorize runs before validation: anonymous callers never see a protected function's schema errors", async () => {
+  const { d } = regSetup();
+  // @ts-expect-error invalid on purpose
+  await expect(d.as({ actor: null, locale: "es" }).run(add, { name: 1 })).rejects.toMatchObject({ kind: "forbidden" });
 });
 
 test("adapters without interactive transactions are refused", () => {
@@ -530,7 +569,7 @@ test("the default listener-loop limit is 8 hops", async () => {
 });
 
 test("meta is set per function and visible in wrap and the registry", async () => {
-  const m = init<{ scope: Scope; meta: { tags: string[] } }>()();
+  const m = init<{ scope: Scope; meta: { tags: string[] } }>();
   const tagged = m.query({ description: "tagged", inputSchema: z.undefined(), meta: { tags: ["billing"] }, execute: async () => 1 });
   const seen: unknown[] = [];
   const r = m.createRegistry({ modules: { billing: { tagged } }, wrap: async (call, next) => { seen.push(call.meta?.tags); return next(); } });

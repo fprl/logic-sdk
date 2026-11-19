@@ -10,6 +10,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    # the packages support Node 24 and 26; the repo develops on 26
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
     # A real Postgres: examples/node runs its whole suite on it (including the concurrency race) when DATABASE_URL is set.
     services:
       postgres:
@@ -31,7 +36,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version: ${{ matrix.node }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.4

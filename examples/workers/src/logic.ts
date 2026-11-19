@@ -11,9 +11,9 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 export type Db = PostgresJsDatabase;
 type Tx = DrizzleTx<Db>;
 
-/** Who is calling: your own type, the library only passes it along. */
-export type Scope = { user: string | null };
-type SignedIn = Scope & { user: string };
+/** Who is calling: your own type, the library only passes it along. A union, so policies can narrow it. */
+export type Scope = { user: null } | SignedIn;
+type SignedIn = { user: string };
 
 type Config = {
   scope: Scope;
@@ -29,9 +29,8 @@ export type MutationCtx = Mutation<Config>;
 export type ActionCtx = Action<Config>;
 export type ListenerCtx<Payload> = Listener<Config, Payload>;
 
-export const { query, mutation, event, on, createRegistry } = init<Config>()({
-  policies: {
-    public: () => true,
-    signedIn: (scope): scope is SignedIn => scope.user !== null,
-  },
-});
+export const { query, mutation, event, on, createRegistry } = init<Config>();
+
+// Policies: who may call a function at all. Plain sync functions over the scope, used as `authorize: signedIn`.
+export const anyone = () => true;
+export const signedIn = (scope: Scope): scope is SignedIn => scope.user !== null;

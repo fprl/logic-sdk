@@ -31,7 +31,9 @@ function guarded<F extends object, A extends unknown[]>(func: (this: Context, fl
   };
 }
 
-const exposure = (f: { expose: string | null }) => (f.expose ? f.expose : dim("internal"));
+/** "member exposed", "member internal", or "internal" with no policy. */
+const access = (f: { authorize: string | null; exposed: boolean }) =>
+  [f.authorize, f.exposed ? paint("green", "exposed") : dim("internal")].filter(Boolean).join(" ");
 const plainFn = (f: FnInfo) => ({ ...f, runs: f.runs.map((e) => e.to), emits: f.emits.map((e) => e.to) });
 
 // ── list ─────────────────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ const list = buildCommand({
     flags: {
       module: { kind: "parsed", parse: String, brief: "Only this module", optional: true },
       kind: { kind: "enum", values: ["query", "mutation", "action", "listener"], brief: "Only this kind", optional: true },
-      exposed: { kind: "boolean", brief: "Only functions with expose", optional: true },
+      exposed: { kind: "boolean", brief: "Only functions with expose: true", optional: true },
       json,
     },
   },
@@ -49,12 +51,12 @@ const list = buildCommand({
     const p = await loadProject(this.cwd);
     const rows = [
       ...p.functions.map((f) => ({ ...plainFn(f), kind: f.kind as FnInfo["kind"] | "listener" })),
-      ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, expose: null, description: l.description ?? `on ${l.event}`, event: l.event })),
+      ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, authorize: null, exposed: false, description: l.description ?? `on ${l.event}`, event: l.event })),
     ].filter(
-      (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind) && (!flags.exposed || r.expose),
+      (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind) && (!flags.exposed || r.exposed),
     );
     if (flags.json) return print(this, rows);
-    out(this, table(["NAME", "KIND", "EXPOSE", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" ? dim("—") : exposure(r), r.description])));
+    out(this, table(["NAME", "KIND", "ACCESS", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" ? dim("-") : access(r), r.description])));
     out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length} · logic-sdk show <name> for details`));
   }),
 });
@@ -80,10 +82,13 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const listenersOf = (eventId: string) => p.events.find((e) => e.id === eventId)?.listeners ?? [];
 
     if (fn) {
-      lines.push(`${bold(fn.id)}  ${kind(fn.kind)} ${dim("·")} ${fn.expose ? `expose ${paint("green", fn.expose)}` : dim("internal")}`);
+      lines.push(`${bold(fn.id)}  ${kind(fn.kind)} ${dim("·")} ${fn.exposed ? paint("green", "exposed") : dim("internal")}`);
       lines.push(fn.description, dim(where(fn.at)), "");
+      row("policy", fn.authorize ?? dim("none (no authorize)"));
+      row("exposed", fn.exposed ? "yes (adapters may publish it)" : dim("no"));
       row("input", shape(fn.input));
-      row("output", fn.output ? shape(fn.output) : dim(fn.expose ? "unknown" : "not declared (internal)"));
+      row("output", fn.output ? shape(fn.output) : dim(fn.exposed ? "unknown" : "not declared (internal)"));
+      if (fn.checks.length) row("checks", fn.checks.join(", "));
       if (fn.runs.length) row("runs", fn.runs.map((e) => e.to).join(", "));
       for (const e of fn.emits) row("emits", `${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
       row("called by", fn.calledBy.join(", ") || dim("nothing in this app (an entry point)"));
@@ -125,7 +130,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
 
     if (flags.format === "json")
       return print(this, {
-        nodes: [...p.functions.map((f) => ({ id: f.id, kind: f.kind })), ...p.listeners.map((l) => ({ id: l.id, kind: "listener" })), ...p.events.map((e) => ({ id: e.id, kind: "event" }))].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
+        nodes: [...p.functions.map((f) => ({ id: f.id, kind: f.kind, authorize: f.authorize, exposed: f.exposed })), ...p.listeners.map((l) => ({ id: l.id, kind: "listener" })), ...p.events.map((e) => ({ id: e.id, kind: "event" }))].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
         edges: shown,
       });
 
@@ -174,7 +179,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
 
 // ── check ────────────────────────────────────────────────────────────────────
 const checkCommand = buildCommand({
-  docs: { brief: "Check the rules: module boundaries, run cycles, side effects in transactions" },
+  docs: { brief: "Check the rules: module boundaries, run cycles, side effects in transactions, record checks" },
   parameters: { flags: { json } },
   func: guarded(async function (this: Context, flags: { json?: boolean }) {
     const p = await loadProject(this.cwd);

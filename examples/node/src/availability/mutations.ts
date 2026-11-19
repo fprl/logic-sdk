@@ -1,7 +1,8 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { mutation } from "../logic";
-import { overlapping } from "./data";
+import { owner } from "../policies";
+import { insertHold } from "./data";
 import { Range } from "./queries";
 import { Hold, holds } from "./schema";
 
@@ -16,15 +17,7 @@ const HoldInput = Range.and(
 export const hold = mutation({
   description: "Reserve a date range on a property's calendar",
   inputSchema: HoldInput,
-  async execute(input, ctx) {
-    // One hold at a time per property: a concurrent confirm waits here, then sees the committed hold below.
-    // Without it, two overlapping inserts deadlock inside the exclusion constraint instead of failing cleanly.
-    await ctx.db.execute(sql`select pg_advisory_xact_lock(hashtext(${input.propertyId}))`);
-    if ((await overlapping(ctx, input.propertyId, input.from, input.to)).length)
-      throw ctx.conflict("dates_unavailable", { from: input.from, to: input.to });
-    const [h] = await ctx.db.insert(holds).values(input).returning(); // the exclusion constraint stays the final guarantee
-    return h!;
-  },
+  execute: (input, ctx) => insertHold(ctx, input),
 });
 
 export const release = mutation({
@@ -36,11 +29,12 @@ export const release = mutation({
   },
 });
 
-/** Exposed: owners block their own calendar. Same rules, via `hold`. */
+/** Exposed: owners block their own calendar. Same rules as `hold`, through the same helper. */
 export const block = mutation({
   description: "Block dates as the owner (personal use, maintenance)",
   inputSchema: Range.and(z.object({ reason: z.enum(["owner_block", "maintenance"]) })),
-  expose: "owner",
+  authorize: owner,
+  expose: true,
   outputSchema: Hold,
-  execute: (input, { run, scope }) => run(hold, { ...input, sourceId: `${input.reason}:${scope.actor.id}` }),
+  execute: (input, ctx) => insertHold(ctx, { ...input, sourceId: `${input.reason}:${ctx.scope.actor.id}` }),
 });

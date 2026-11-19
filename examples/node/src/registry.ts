@@ -8,12 +8,13 @@ import * as pricing from "./pricing";
 import * as properties from "./properties";
 import * as tasks from "./tasks";
 
-/** The only file that imports every module. */
-export const makeRegistry = (db: Db, services: Services) =>
+/** The only file that imports every module. `waitUntil` for serverless hosts (see examples/nextjs). */
+export const makeRegistry = (db: Db, services: Services, options: { waitUntil?: (p: Promise<unknown>) => void } = {}) =>
   createRegistry({
     modules: { properties, availability, pricing, enquiries, bookings, tasks },
     database: drizzleAdapter(db),
     services,
+    ...options,
   });
 
 export type AppRegistry = ReturnType<typeof makeRegistry>;
