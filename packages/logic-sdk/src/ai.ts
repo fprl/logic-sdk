@@ -51,9 +51,9 @@ export function toAITool<F extends Fn<any, any, any, true>>(
     description: fn.description,
     inputSchema: fn.inputSchema as FlexibleSchema,
     outputSchema: fn.outputSchema as FlexibleSchema,
-    async execute(input) {
+    async execute(input, { abortSignal }) {
       try {
-        return await caller.run(fn, input);
+        return await caller.run(fn, input, { signal: abortSignal });
       } catch (e) {
         if (isDomainError(e)) throw e;
         onError(e);

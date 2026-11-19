@@ -24,12 +24,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/logic-sdk/logic-sdk.git",
+    "url": "git+https://github.com/fprl/logic-sdk.git",
     "directory": "packages/logic-sdk"
   },
-  "homepage": "https://github.com/logic-sdk/logic-sdk#readme",
+  "homepage": "https://github.com/fprl/logic-sdk#readme",
   "bugs": {
-    "url": "https://github.com/logic-sdk/logic-sdk/issues"
+    "url": "https://github.com/fprl/logic-sdk/issues"
   },
   "type": "module",
   "sideEffects": false,

@@ -116,7 +116,19 @@ export function check(project: Project): Problem[] {
           },
     );
 
-  // 6. Listeners for events nothing emits
+  // 6. Settings come from ctx.config: modules (and the app files they import) never read the environment
+  for (const r of source.env)
+    problems.push({
+      code: "env-in-module",
+      severity: "error",
+      message: r.via
+        ? `${r.at.file} imports a file that reads the environment (${r.what} at ${r.via.file}:${r.via.line}). Modules don't read env, directly or through imports.`
+        : `${r.at.file} reads the environment (${r.what}). Modules don't read env, so tests can change settings and the CLI can load them.`,
+      at: r.at,
+      fix: "Read the value from ctx.config: declare it in Config's `config` in logic.ts, and fill it from your env at the entry, createRegistry({ config }). Clients built from secrets go in services.",
+    });
+
+  // 7. Listeners for events nothing emits
   for (const e of project.events)
     if (e.listeners.length && !e.emittedBy.length)
       problems.push({

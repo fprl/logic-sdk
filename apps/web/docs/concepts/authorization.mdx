@@ -138,12 +138,12 @@ Laravel's policies are the same shape: boolean methods on a user and a record.
 - **Nested calls keep the scope**, and each callee's `authorize` runs against it.
 - **Listeners run with the emitter's scope.** A booking confirmed by a guest reaches `tasks.prepareStay` as that guest.
 - So **listeners and jobs run internal functions**, which carry no `authorize` or one that fits the job. Keep exposed functions thin: check, then `run` the internal function that does the work.
-- **Acting as someone else on purpose** is a scope change, and every check after it sees the new one:
+- **Acting as someone else on purpose** is a scope change for one call, and every check inside it sees the new one. `logic-sdk show` lists it on that run: `tasks.create (scope: actor)`.
 
 ```ts
-const system = ctx.with({ actor: { id: "system", role: "admin" } });
+const system = { id: "system", role: "admin" } as const;
 
-await system.run(tasks.create, { bookingId, title: "Prepare the house" });
+await ctx.run(tasks.create, { bookingId, title: "Prepare the house" }, { scope: { actor: system } });
 ```
 
 ## Recipes

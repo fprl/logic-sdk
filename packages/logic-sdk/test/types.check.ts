@@ -72,7 +72,7 @@ async function check() {
   const w = await app.run(write, { id: "x" });
   const t: true = w.ok;
   // @ts-expect-error scope fields are typed
-  app.with({ nope: 1 });
+  app.run(getOne, { id: "x" }, { scope: { nope: 1 } });
   // @ts-expect-error scope must be complete
   registry.as({ actor: "a" });
   void n; void t;
@@ -149,3 +149,49 @@ void createTestRegistry(registry).transaction(async (tx) => {
 // a typo in the config is an error, not a silently ignored key
 // @ts-expect-error `servises` isn't a Config key
 init<{ scope: Scope; servises: { mail: () => void } }>();
+
+// config: typed from init, read-only, required when declared, and test overrides are checked
+{
+  type AppConfig = { app: { url: string }; orders: { maxItems: number } };
+  const c = init<{ scope: Scope; db: Store; config: AppConfig }>();
+  const q = c.query({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => {
+    const max: number = config.orders.maxItems;
+    // @ts-expect-error config is read-only, all the way down
+    config.orders.maxItems = 1;
+    // @ts-expect-error unknown keys are errors
+    config.orders.nope;
+    return max;
+  } });
+  c.mutation({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => config.app.url });
+  c.action({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => config.app.url });
+  c.on(() => ev, async (_, { config }) => { const u: string = config.app.url; void u; });
+  const reg = c.createRegistry({ modules: { m: { q } }, database: memoryDatabase(), config: { app: { url: "u" }, orders: { maxItems: 1 } } });
+  // @ts-expect-error config is required when the app declares it
+  c.createRegistry({ modules: {}, database: memoryDatabase() });
+  // @ts-expect-error a key you didn't declare is an error (picking secrets out stays explicit)
+  c.createRegistry({ modules: {}, database: memoryDatabase(), config: { app: { url: "u" }, orders: { maxItems: 1 }, stripeKey: "sk" } });
+  createTestRegistry(reg, { config: { orders: { maxItems: 2 } } }); // any part, at any depth
+  // @ts-expect-error a typo in a test override is a compile error
+  createTestRegistry(reg, { config: { orders: { maxItem: 2 } } });
+  // @ts-expect-error and so is a wrong type
+  createTestRegistry(reg, { config: { orders: { maxItems: "2" } } });
+}
+
+// config edge cases: branded strings stay strings, arrays are read-only, undeclared config can't be passed
+{
+  const Url = z.string().brand<"Url">();
+  type Brandy = { url: z.infer<typeof Url>; tags: string[] };
+  const b = init<{ scope: Scope; config: Brandy }>();
+  b.query({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => {
+    const s: string = config.url; // a branded string is still a string
+    // @ts-expect-error arrays in config are read-only
+    config.tags.push("x");
+    return s;
+  } });
+  const none = init<{ scope: Scope }>();
+  // @ts-expect-error without a declared config, passing one is an error, not silently ignored
+  none.createRegistry({ modules: {}, config: { url: "x" } });
+  const plainReg = none.createRegistry({ modules: {} });
+  // @ts-expect-error and so is overriding one in a test
+  createTestRegistry(plainReg, { config: { url: "x" } });
+}

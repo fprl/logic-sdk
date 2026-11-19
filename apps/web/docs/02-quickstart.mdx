@@ -28,6 +28,8 @@ type Config = {
   reader: DrizzleReader<Tx>;
   // What actions and listeners get
   services: { mailer: Mailer; payments: Payments };
+  // Settings every function reads as ctx.config: plain data
+  config: { app: { url: string } };
 };
 
 // For helpers like findBooking(ctx, id)
@@ -108,6 +110,8 @@ export const registry = createRegistry({
   modules: { bookings, availability },
   database: drizzleAdapter(db),
   services: { mailer, payments },
+  // Read env here, at the entry; modules read ctx.config
+  config: { app: { url: process.env.APP_URL! } },
 });
 ```
 

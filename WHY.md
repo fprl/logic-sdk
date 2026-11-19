@@ -35,7 +35,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **Policies are written once and narrow types.** A `staff` function gets a non-null `scope.actor`, because its policy runs on every call, nested ones too.
 - ✅ **Record rules the Rails way.** Load through a scoped helper (404 for other accounts), then a sync `can*` check (403), reused for UI flags. The CLI keeps `can*` checks sync and used.
 - ✅ **Scope is explicit and typed:** actor, tenant, locale. Row-level tenancy lives in `data.ts` helpers that take `scope.accountId`.
-- ✅ **Acting as someone else is explicit and greppable:** `ctx.with({ actor })`, and checks see the new scope.
+- ✅ **Acting as someone else is explicit, per call, and visible:** `ctx.run(fn, input, { scope: { actor } })`. Checks see the new scope, and `logic-sdk show` lists the change on that run.
 
 ## 4. Testing without mocks
 

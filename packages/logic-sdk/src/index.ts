@@ -18,6 +18,11 @@ export interface Config {
   reader?: unknown;
   /** Side-effecting services (mailer, payments...). Only actions and listeners receive them. */
   services?: object;
+  /**
+   * Your app's settings, read as `ctx.config` in every function: base URL, limits, switches. Plain data, read-only.
+   * Build it once from your env at the entry; clients built from secrets go in `services` instead.
+   */
+  config?: object;
   /** The shape of `meta` on your functions (tags, rate limits, "agent may call"...). Read by `wrap` and adapters. */
   meta?: object;
 }
@@ -26,6 +31,18 @@ type DbOf<C extends Config> = C extends { db: infer D } ? D : never;
 type ReaderOf<C extends Config> = C extends { reader: infer R } ? R : DbOf<C>;
 type ServicesOf<C extends Config> = C extends { services: infer S } ? S : {};
 type MetaOf<C extends Config> = C extends { meta: infer M } ? M : never;
+/** Without a declared `config`, nothing may be passed or read: no silently ignored settings. */
+type ConfigOf<C extends Config> = C extends { config: infer F } ? F : Record<string, never>;
+
+type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+/** Read-only all the way down: what `ctx.config` gives you. Primitives (branded ones too) stay as they are. */
+export type Frozen<T> = T extends Primitive
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly Frozen<U>[]
+    : { readonly [K in keyof T]: Frozen<T[K]> };
+/** Any part of `T`, at any depth: what a test may override in `config`. Arrays are replaced whole, like at runtime. */
+export type DeepPartial<T> = T extends Primitive | readonly unknown[] ? T : { [K in keyof T]?: DeepPartial<T[K]> };
 
 export type Kind = "query" | "mutation" | "action";
 
@@ -86,7 +103,20 @@ export interface Listener<O = any> {
   readonly execute: (payload: O, ctx: any) => Promise<unknown>;
 }
 
-type Run<Allowed extends Kind> = <F extends Fn<Allowed>>(fn: F, input: FnIn<F>) => Promise<FnOut<F>>;
+/** What a single call may change: who it runs as (part of the scope) and when to give up. Nothing else. */
+export interface RunOptions<S = object> {
+  /**
+   * Merged over the current scope for this call and everything it runs: `{ scope: { actor: system } }` to act as
+   * someone else on purpose, `{ scope: { locale: "es" } }` to render in another language. The callee's policy sees it.
+   */
+  scope?: Partial<S>;
+  /**
+   * Checked before this call starts. Inside, actions get it as `ctx.signal` to pass on (`fetch(url, { signal })`).
+   * Never checked between your steps, so a caller who gives up can't leave a workflow half done.
+   */
+  signal?: AbortSignal;
+}
+type Run<Allowed extends Kind, S> = <F extends Fn<Allowed>>(fn: F, input: FnIn<F>, options?: RunOptions<S>) => Promise<FnOut<F>>;
 
 /**
  * Expected failures, namespaced to the module you're in: inside `bookings`, `ctx.errors.reject("not_pending")` has
@@ -102,36 +132,37 @@ export interface Errors {
   /** The caller is known but may not do this. Code defaults to `"<module>.<function>.forbidden"`. */
   deny(code?: string, details?: unknown): DomainError;
 }
-interface BaseCtx<S> {
+interface BaseCtx<C extends Config, S> {
   scope: S;
+  /** Your settings from `createRegistry({ config })`. Read-only; tests override parts of it. */
+  config: Frozen<ConfigOf<C>>;
   /** Expected failures: `throw ctx.errors.reject("not_pending")`. */
   errors: Errors;
   /** Current time. Fixed in tests. */
   now: () => Date;
 }
 /** `S` is the scope, narrowed by the function's policy. Alias it in init.ts: `type QueryCtx = Core.QueryCtx<Config>`. */
-export interface QueryCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<S> {
+export interface QueryCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   db: ReaderOf<C>;
-  run: Run<"query">;
-  /** The caller's abort signal, if any. */
-  signal: AbortSignal | undefined;
-  with(patch: Partial<ScopeOf<C>>): QueryCtx<C>;
+  /** Call another query, with its policy, validation and output check: `await ctx.run(pricing.quote, { nights })`. */
+  run: Run<"query", ScopeOf<C>>;
 }
-export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<S> {
+export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   db: DbOf<C>;
-  run: Run<"query" | "mutation">;
+  /**
+   * Call a query or mutation inside this same transaction, with its policy and validation:
+   * `await ctx.run(availability.hold, { propertyId })`. If it fails, the whole transaction rolls back.
+   */
+  run: Run<"query" | "mutation", ScopeOf<C>>;
   /** Queue an event. Delivered to listeners only after the transaction commits. */
   emit<I>(event: EventDef<I, any>, payload: I): void;
-  signal: AbortSignal | undefined;
-  with(patch: Partial<ScopeOf<C>>): MutationCtx<C>;
 }
-export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<S> {
+export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
-  /** Each mutation you run here gets its own transaction. */
-  run: Run<Kind>;
-  /** The caller's abort signal. Always undefined in listeners (they outlive the request). */
+  /** Call any function: `await ctx.run(bookings.confirmPaid, { bookingId })`. Each mutation you run commits on its own. */
+  run: Run<Kind, ScopeOf<C>>;
+  /** The caller's abort signal: pass it on, `fetch(url, { signal: ctx.signal })`. Always undefined in listeners (they outlive the request). */
   signal: AbortSignal | undefined;
-  with(patch: Partial<ScopeOf<C>>): ActionCtx<C>;
 }
 export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C> {
   event: Envelope<unknown, ScopeOf<C>> & { payload: O };
@@ -267,6 +298,8 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   modules: Mods;
   database?: DatabaseAdapter<any, any>;
   services?: object;
+  /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
+  config?: object;
   events?: Dispatcher;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
@@ -289,16 +322,11 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   retry?: { attempts?: number };
 }
 
-export interface CallerOptions {
-  /** Aborts the call before it starts work. Listeners never get it: they outlive the request. */
-  signal?: AbortSignal;
-}
-
-/** A registry bound to a scope: `const caller = registry.as(scope)`. */
+/** A registry bound to who is calling: `const caller = registry.as(scope)`. */
 export interface Caller<S extends object = object> {
   readonly scope: S;
-  run<F extends Fn>(fn: F, input: FnIn<F>): Promise<FnOut<F>>;
-  with(patch: Partial<S>): Caller<S>;
+  /** Run any function as this caller: `await caller.run(bookings.cancel, input, { signal: request.signal })`. */
+  run<F extends Fn>(fn: F, input: FnIn<F>, options?: RunOptions<S>): Promise<FnOut<F>>;
 }
 
 export interface Registered {
@@ -322,6 +350,7 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>> = Omit<
   wrap?: (call: Call<MetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
 } &
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
+  ({} extends ConfigOf<C> ? { config?: ConfigOf<C> } : { config: ConfigOf<C> }) &
   ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<any, DbOf<C>> });
 
 /** Keys `Config` doesn't know are errors, so a typo like `servises` can't be silently ignored. */
@@ -357,7 +386,7 @@ function constructors<C extends Config>() {
   return {
     /** Create the registry once at startup: `createRegistry({ modules, database, services })`. */
     createRegistry: <const Mods extends Record<string, object>>(options: TypedOptions<C, Mods>) =>
-      build<ScopeOf<C>, Mods>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by MetaOf<C>; the values come from typed defs
+      build<ScopeOf<C>, Mods, ConfigOf<C>>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by MetaOf<C>; the values come from typed defs
     /** Reads data. Can run other queries. No writes, no events, no services. */
     query: make("query") as Constructor<C, "query">,
     /** Changes data inside one transaction. Can run queries and mutations (same transaction) and emit events. */
@@ -399,21 +428,27 @@ interface TxState {
 interface Frame {
   scope: object;
   depth: number;
-  opts: CallerOptions & { eventDepth?: number };
+  /** Inherited, for actions to pass on as ctx.signal. */
+  signal?: AbortSignal;
+  /** Passed to this very call: checked before it starts. */
+  abortOn?: AbortSignal;
+  eventDepth?: number;
   tx?: TxState;
 }
 
 export interface Overrides {
   database?: DatabaseAdapter<any, any>;
   services?: object;
+  /** Merged over the registry's config, section by section. */
+  config?: object;
   events?: Dispatcher;
   now?: () => Date;
   stubs?: Map<Fn, (input: any, ctx: any) => Promise<any>>;
   record?: (envelope: Envelope) => void;
 }
 
-export type Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>> = ReturnType<
-  typeof build<S, Mods>
+export type Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> = ReturnType<
+  typeof build<S, Mods, Cf>
 >;
 
 /** Create the registry once at startup. Prefer the `createRegistry` returned by `init()`: it's typed with your config. */
@@ -421,6 +456,33 @@ export function createRegistry<S extends object = object, const Mods extends Rec
   options: RegistryOptions<Mods>,
 ) {
   return build<S, Mods>(options, {});
+}
+
+const isPlain = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+
+/** Plain objects merge key by key; anything else (values, arrays, null) replaces. `undefined` keeps the base. */
+function mergeConfig(base: unknown, patch: unknown): unknown {
+  if (patch === undefined) return base;
+  if (!isPlain(base) || !isPlain(patch)) return patch;
+  const keys = new Set([...Object.keys(base), ...Object.keys(patch)]);
+  return Object.fromEntries([...keys].map((k) => [k, mergeConfig(base[k], patch[k])])); // fromEntries: `__proto__` stays a key
+}
+
+/**
+ * A frozen copy of plain data: strings, numbers, booleans, null, plain objects and arrays. Anything else (a Date, a Map,
+ * a client, a class) is rejected with its path, so settings can't change under everyone else or hide behavior.
+ */
+function freezeConfig(value: unknown, path = "config"): unknown {
+  if (value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)) return value;
+  if (Array.isArray(value)) return Object.freeze(value.map((v, i) => freezeConfig(v, `${path}[${i}]`)));
+  if (isPlain(value))
+    return Object.freeze(Object.fromEntries(Object.entries(value).map(([k, v]) => [k, freezeConfig(v, `${path}.${k}`)])));
+  const what = typeof value === "function" ? "a function" : (value as object).constructor?.name ?? typeof value;
+  throw new Error(
+    `[logic-sdk] ${path} is ${what}. config holds plain data (strings, numbers, booleans, null, objects, arrays): ` +
+      "pass a Date as an ISO string, and put clients in services.",
+  );
 }
 
 const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
@@ -452,11 +514,12 @@ export function describeModules(modules: Record<string, object>) {
   return { ids, functions, events, listeners };
 }
 
-function build<S extends object, Mods extends Record<string, object>>(options: RegistryOptions<Mods>, o: Overrides) {
+function build<S extends object, Mods extends Record<string, object>, Cf = unknown>(options: RegistryOptions<Mods>, o: Overrides) {
   const { ids, functions, events, listeners } = describeModules(options.modules);
 
   const database = o.database ?? options.database;
   const services = o.services ?? options.services ?? {};
+  const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
   const dispatcher = o.events ?? options.events ?? inProcess();
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
@@ -518,7 +581,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
     const failures: { listener: string; error: unknown }[] = [];
     const event = eventByName.get(envelope.name);
     for (const l of byEvent.get(envelope.name) ?? []) {
-      const frame: Frame = { scope: envelope.scope, depth: 0, opts: { eventDepth } };
+      const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth };
       try {
         await wrap({ id: l.id, kind: "listener", meta: undefined, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
           const payload = event ? await parseOwn(event.schema, envelope.payload, `${envelope.name} payload`) : envelope.payload;
@@ -547,18 +610,23 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
   }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
-  const child = (frame: Frame): Frame => ({ ...frame, depth: frame.depth + 1 });
-  const rescope = (frame: Frame, patch: object): Frame => ({ ...frame, scope: { ...frame.scope, ...patch } });
+  /** The frame a call runs in: one level deeper, with this call's scope patch and signal. */
+  const enter = (frame: Frame, options: RunOptions | undefined): Frame => ({
+    ...frame,
+    depth: frame.depth + 1,
+    scope: options?.scope ? { ...frame.scope, ...options.scope } : frame.scope,
+    signal: options?.signal ?? frame.signal,
+    abortOn: options?.signal,
+  });
 
   function queryCtx(frame: Frame, id: string): QueryCtx<any> {
     return {
       errors: errorsFor(id),
       scope: frame.scope,
+      config: config as any,
       now,
-      signal: frame.opts.signal,
       db: frame.tx ? frame.tx.db : database?.db,
-      run: (fn, input) => invoke(fn, input, child(frame), ["query"]),
-      with: (patch) => queryCtx(rescope(frame, patch), id),
+      run: (fn, input, options) => invoke(fn, input, enter(frame, options), ["query"]),
     };
   }
   function mutationCtx(frame: Frame, id: string): MutationCtx<any> {
@@ -566,10 +634,10 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
     return {
       errors: errorsFor(id),
       scope: frame.scope,
+      config: config as any,
       now,
-      signal: frame.opts.signal,
       db: tx.db,
-      run: (fn, input) => invoke(fn, input, child(frame), ["query", "mutation"]),
+      run: (fn, input, options) => invoke(fn, input, enter(frame, options), ["query", "mutation"]),
       emit: (event, payload) => {
         const name = idOf(event);
         payload = structuredClone(payload); // what was emitted is what gets delivered, even if the caller mutates it after
@@ -586,18 +654,17 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
         check.catch(() => {}); // surfaced at commit; never an unhandled rejection
         tx.pending.push(check);
       },
-      with: (patch) => mutationCtx(rescope(frame, patch), id),
     };
   }
   function actionCtx(frame: Frame, id: string): ActionCtx<any> {
     return {
       errors: errorsFor(id),
       scope: frame.scope,
+      config: config as any,
       now,
-      signal: frame.opts.signal,
+      signal: frame.signal,
       services,
-      run: (fn, input) => invoke(fn, input, child({ ...frame, tx: undefined }), ["query", "mutation", "action"]),
-      with: (patch) => actionCtx(rescope(frame, patch), id),
+      run: (fn, input, options) => invoke(fn, input, enter({ ...frame, tx: undefined }, options), ["query", "mutation", "action"]),
     };
   }
 
@@ -611,7 +678,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
 
     /** Authorize, then validate, before any transaction opens: denied or bad calls never touch the database. */
     const prepare = async () => {
-      frame.opts.signal?.throwIfAborted();
+      frame.abortOn?.throwIfAborted();
       if (fn.authorize) {
         const allowed: unknown = fn.authorize(frame.scope);
         if (allowed instanceof Promise || typeof (allowed as any)?.then === "function")
@@ -682,7 +749,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
   async function afterCommit(outbox: Envelope[], frame: Frame) {
     try {
       for (const e of outbox) o.record?.(e);
-      const eventDepth = (frame.opts.eventDepth ?? 0) + 1;
+      const eventDepth = (frame.eventDepth ?? 0) + 1;
       if (eventDepth > maxEventDepth) {
         report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), {
           listener: "(dispatcher)",
@@ -707,11 +774,11 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
     }
   }
 
-  function makeCaller(scope: S, opts: CallerOptions): Caller<S> {
+  function makeCaller(scope: S): Caller<S> {
     return {
       scope,
-      run: (fn, input) => invoke(fn, input, { scope, depth: 0, opts }, ["query", "mutation", "action"]),
-      with: (patch) => makeCaller({ ...scope, ...patch }, opts),
+      run: (fn, input, options) =>
+        invoke(fn, input, enter({ scope, depth: -1 }, options as RunOptions | undefined), ["query", "mutation", "action"]), // depth 0
     };
   }
 
@@ -719,7 +786,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
     /** The modules you registered (typed), for adapters that build typed routers. */
     modules: options.modules,
     /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
-    as: (scope: S, opts: CallerOptions = {}): Caller<S> => makeCaller(scope, opts),
+    as: (scope: S): Caller<S> => makeCaller(scope),
     /** Everything the registry can do. Adapters read this. */
     functions: functions as readonly RegisteredFn[],
     events: events as readonly (Registered & { event: EventDef })[],
@@ -728,9 +795,14 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
     /** Deliver one stored envelope to its listeners (durable dispatchers). Throws if any listener failed, so you can retry. */
     dispatch,
     /** @internal used by `logic-sdk/testing` */
-    [INTERNAL]: { options, overrides: o, derive: (more: Overrides) => build<S, Mods>(options, { ...o, ...more }) },
+    [INTERNAL]: {
+      options,
+      overrides: o,
+      config,
+      derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) as object | undefined }),
+    },
   };
 }
 
 /** @internal */
-export const internal = (registry: Registry<any, any>) => registry[INTERNAL];
+export const internal = (registry: Registry<any, any, any>) => registry[INTERNAL];

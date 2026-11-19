@@ -3,5 +3,6 @@
   "compilerOptions": { "types": ["node", "bun"], "allowImportingTsExtensions": true },
   "include": ["src", "test"],
   // its own tsconfig `paths` (@/*) are part of what it tests; the CLI resolves them, this config doesn't know them
-  "exclude": ["test/fixtures/holes"]
+  // workers-env imports cloudflare:workers on purpose: it only exists inside workerd
+  "exclude": ["test/fixtures/holes", "test/fixtures/workers-env"]
 }

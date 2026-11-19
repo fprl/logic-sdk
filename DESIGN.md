@@ -26,7 +26,7 @@ A Fable agent reviewed the first draft. Adopted from that review:
 - the envelope and dispatcher seam
 - `authorize` as both permission check and visibility (later replaced by `expose`)
 - `reject`/`deny`/`notFound` instead of error maps
-- `inputSchema`/`execute` naming, the `init` factory, `ctx.with`, and a single `wrap` hook
+- `inputSchema`/`execute` naming, the `init` factory, scope changes per call (was `ctx.with` until 0.3.0), and a single `wrap` hook
 
 Not adopted: `await using` in tests. It isn't safely portable across runtimes yet, so tests use a callback instead.
 
@@ -97,4 +97,11 @@ Reviewed against Laravel's current docs, 37signals' Fizzy source, Next.js, Conve
 - **No `anyone` export, no `ctx.can`, no policy cache.** One line in your app, a later non-breaking addition, and over-engineering, in that order.
 - **Errors moved to `ctx.errors`.** Destructured `reject` read like a Promise executor's. `throw` stays: a never-returning `ctx.errors.notFound()` wouldn't narrow, because `ctx` is contextually typed (tested on tsc 7.0.2).
 - **The agent door is opt-in.** `toAITools` requires a `filter`; `toAITool(caller, fn)` is the per-function form, like the AI SDK's own `tool()`. Approval stays the AI SDK's `toolApproval`.
+
+## 0.3.0: config and run options
+
+- **`ctx.config`** holds the settings your rules read (base URL, limits, switches), declared in `init<Config>()` and passed once to `createRegistry({ config })`. Plain data, copied and frozen; tests override parts of it. Why: 7 of 7 real apps we read (Fizzy, Campfire, Mastodon, Plausible, Firefly III, Documenso, Dub) read a few settings inside domain code, and their tests change them by mutating globals. Laravel's rule (`env()` only in config files, `config()` everywhere) made structural. Not scope (it's cloned into every event) and not services (queries and mutations can't see them).
+- **Env stays outside modules.** Read it however you like at the entry, in routes and scripts. `logic-sdk check` fails on env reads inside modules, directly or through app files they import (type-only imports don't count). A module importing the platform env (`cloudflare:workers`) can't even load outside the platform, so the CLI couldn't inspect it.
+- **Per-call options: `run(fn, input, { scope, signal })`.** `registry.as(scope)` only says who; `with` is gone. Why: one place for "this call is different", and the adapters can pass on the signal their handler gets (oRPC's `signal`, the AI SDK's `abortSignal`), which they couldn't with a caller already bound. Acting as someone else is visible to the CLI on every call (`runs tasks.assign (scope: actor)`), which a stored `ctx.with(...)` wasn't.
+- **A signal is checked only before the call it's passed to starts**, never between your steps, so a caller who disconnects can't leave a workflow half done. Actions get it as `ctx.signal` to pass on to `fetch` or an AI call. Rails, Laravel and Convex don't cancel on disconnect either.
 

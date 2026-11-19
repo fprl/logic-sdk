@@ -34,7 +34,10 @@ function guarded<F extends object, A extends unknown[]>(func: (this: Context, fl
 /** "member exposed", "member internal", or "internal" with no policy. */
 const access = (f: { authorize: string | null; exposed: boolean }) =>
   [f.authorize, f.exposed ? paint("green", "exposed") : dim("internal")].filter(Boolean).join(" ");
-const plainFn = (f: FnInfo) => ({ ...f, runs: f.runs.map((e) => e.to), emits: f.emits.map((e) => e.to) });
+/** "tasks.assign (scope: actor)": the run, and the scope keys it changes on purpose. */
+const runLabel = (e: { to: string; scope?: string[] }) => (e.scope ? `${e.to} (scope: ${e.scope.join(", ")})` : e.to);
+const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.filter((e) => e.scope).map((e) => ({ run: e.to, keys: e.scope! }));
+const plainFn = (f: FnInfo) => ({ ...f, runs: f.runs.map((e) => e.to), scopeChanges: scopeChanges(f.runs), emits: f.emits.map((e) => e.to) });
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
@@ -75,7 +78,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const event = p.events.find((e) => e.id === name);
     if (!fn && !listener && !event) throw unknownName(p, name);
 
-    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? { ...listener, runs: listener.runs.map((e) => e.to) } : event);
+    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? { ...listener, runs: listener.runs.map((e) => e.to), scopeChanges: scopeChanges(listener.runs) } : event);
 
     const lines: string[] = [];
     const row = (label: string, value: string) => lines.push(`${dim(label.padEnd(12))}${value}`);
@@ -89,14 +92,15 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       row("input", shape(fn.input));
       row("output", fn.output ? shape(fn.output) : dim(fn.exposed ? "unknown" : "not declared (internal)"));
       if (fn.checks.length) row("checks", fn.checks.join(", "));
-      if (fn.runs.length) row("runs", fn.runs.map((e) => e.to).join(", "));
+      if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));
+      if (fn.runs.length) row("runs", fn.runs.map(runLabel).join(", "));
       for (const e of fn.emits) row("emits", `${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
       row("called by", fn.calledBy.join(", ") || dim("nothing in this app (an entry point)"));
       if (fn.meta) row("meta", JSON.stringify(fn.meta));
     } else if (listener) {
       lines.push(`${bold(listener.id)}  ${kind("listener")}`, dim(where(listener.at)), "");
       row("on", listener.event);
-      if (listener.runs.length) row("runs", listener.runs.map((e) => e.to).join(", "));
+      if (listener.runs.length) row("runs", listener.runs.map(runLabel).join(", "));
     } else if (event) {
       lines.push(`${bold(event.id)}  ${dim("event")}`, "");
       row("emitted by", event.emittedBy.join(", ") || dim("nothing"));
@@ -166,7 +170,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         const head = `${f.id.slice(m.length + 1).padEnd(width)}  ${kind(k)}${" ".repeat(kindWidth - k.length)}`;
         const details: string[] = [];
         if ("event" in f) details.push(`${dim("on")} ${f.event}`);
-        if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map((e) => e.to).join(", ")}`);
+        if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
         if ("emits" in f) for (const e of f.emits) details.push(`${dim("emits")} ${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
         lines.push(`${branch}${head}${details.length ? "  " + details[0] : ""}`.trimEnd());
         for (const d of details.slice(1)) lines.push(`${rest}${" ".repeat(width + kindWidth + 4)}${d}`);

@@ -116,6 +116,7 @@ test("an app that throws while loading gets a diagnostic with the location, not 
   expect(r.err).toContain("app-load-failed");
   expect(r.err).toContain("ORDERS_API_URL is not set (src/orders/index.ts:3");
   expect(r.err).not.toContain("    at ");
+  expect(r.err).toContain("Fix that error first"); // the crash isn't about cloudflare:workers, so no env hint
 });
 
 test("modules can live anywhere, and package.json can point to the registry", () => {
@@ -163,8 +164,11 @@ test("show lists record checks, in the body or through this module's helpers", (
   expect(cli(policies, "show", "stock.release", "--json").json().checks).toEqual([]);
 });
 
-test("runs count only on ctx: ctx.run, ctx.with(...).run, a destructured run; never db.run", () => {
-  expect(cli(policies, "show", "orders.cancel", "--json").json().runs).toEqual(["stock.release"]);
+test("runs count only on ctx: ctx.run, a destructured run; never db.run. Scope changes are shown", () => {
+  const cancel = cli(policies, "show", "orders.cancel", "--json").json();
+  expect(cancel.runs).toEqual(["stock.release"]);
+  expect(cancel.scopeChanges).toEqual([{ run: "stock.release", keys: ["accountId"] }]);
+  expect(cli(policies, "show", "orders.cancel").out).toContain("stock.release (scope: accountId)");
   expect(cli(policies, "show", "orders.refund", "--json").json().runs).toEqual(["stock.release"]);
   expect(cli(policies, "check", "--json").json()).toEqual({ errors: 0, warnings: 0, problems: [] });
 });
@@ -218,4 +222,47 @@ test("async-can: a can* declared async, or awaited", () => {
 test("unused-can: a can* call whose result is thrown away", () => {
   const p = problem(cli(holes, "check", "--json"), "unused-can", "src/orders/mutations.ts", 17);
   expect(p).toMatchObject({ severity: "error", message: expect.stringContaining("canHold"), fix: expect.stringContaining("ctx.errors.deny()") });
+});
+
+// ctx.config: show lists the keys a function reads; modules never read the environment
+const configApp = fixture("config");
+
+test("show: config keys a function reads, through this module's helpers too", () => {
+  expect(cli(configApp, "show", "orders.place", "--json").json().config).toEqual(["app.url", "orders.maxItems"]); // app.url via orderLink(ctx)
+  expect(cli(configApp, "show", "orders.quote", "--json").json().config).toEqual(["orders.currency"]);
+  expect(cli(configApp, "show", "orders.place").out).toContain("app.url, orders.maxItems");
+  const keys = (id: string) => cli(configApp, "show", id, "--json").json().config;
+  expect(keys("orders.aliased")).toEqual(["orders.currency", "orders.maxItems"]); // const orders = ctx.config.orders
+  expect(keys("orders.destructured")).toEqual(["app.url"]); // { config: { app: { url } } }
+  expect(keys("orders.methods")).toEqual(["app.url", "orders.tags"]); // not url.startsWith, not tags.length
+  expect(keys("orders.whole")).toEqual(["*"]); // passed on whole: any key
+  expect(cli(configApp, "show", "orders.whole").out).toContain("all of it (passed on whole)");
+});
+
+test("check: env-in-module catches process.env, import.meta.env and env reached through an import", () => {
+  const r = cli(configApp, "check", "--json");
+  expect(r.code).toBe(1);
+  const env = r.json().problems.filter((p: { code: string }) => p.code === "env-in-module");
+  expect(env.map((p: { at: { file: string; line: number } }) => `${p.at.file}:${p.at.line}`)).toEqual([
+    "src/orders/mutations.ts:4", // import { linkFor } from "../lib/links", which imports ../env
+    "src/stock/more.ts:2", // import { env as nodeEnv } from "node:process"
+    "src/stock/more.ts:9", // process["env"]
+    "src/stock/more.ts:10", // globalThis.process.env
+    "src/stock/more.ts:11", // const { env } = process
+    "src/stock/more.ts:13", // process2.env, from `import process2 from "node:process"`
+    "src/stock/mutations.ts:9", // process.env (the type-only import on line 3 is not a read)
+    "src/stock/mutations.ts:10", // import.meta.env
+  ]);
+  expect(env[0].message).toContain("process.env at src/env.ts:3");
+  // outside the modules, env is yours to read: the entry passes process.env straight into config and services
+  expect(r.json().problems.some((p: { at: { file: string } | null }) => p.at?.file === "src/server.ts")).toBe(false);
+  expect(env[0].fix).toContain("ctx.config");
+});
+
+test("a module that reads the Worker's env fails to load, and the hint says why", () => {
+  const r = cli(fixture("workers-env"), "check");
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("app-load-failed");
+  expect(r.err).toContain('src/links/index.ts:1 reads the environment (env from "cloudflare:workers")');
+  expect(r.err).toContain("ctx.config");
 });

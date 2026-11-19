@@ -1,17 +1,19 @@
-import { internal, type Caller, type CallerOptions, type Envelope, type Fn, type FnIn, type FnOut, type Registry } from "./index.ts";
+import { internal, type Caller, type DeepPartial, type Envelope, type Fn, type FnIn, type FnOut, type Registry } from "./index.ts";
 
-export interface TestOptions {
+export interface TestOptions<Cf = unknown> {
   /** Replace services (e.g. `{ mailer: memoryMailer() }`). */
   services?: object;
+  /** Override parts of `config` (e.g. `{ orders: { maxItems: 1 } }`). Merged over the registry's, section by section. */
+  config?: DeepPartial<Cf>;
   /** Freeze time. */
   now?: Date | string | (() => Date);
   /** Run listeners inline after each mutation (default), or not at all to test one module in isolation. */
   listeners?: boolean;
 }
 
-export interface TestTransaction<S extends object, Mods extends Record<string, object> = Record<string, object>> {
+export interface TestTransaction<S extends object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> {
   /** Bind who is calling, exactly like `registry.as(...)`. */
-  as(scope: S, opts?: CallerOptions): Caller<S>;
+  as(scope: S): Caller<S>;
   /** Replace a function's implementation for this test. Matched by identity, so `run(availability.hold, …)` hits the stub. */
   stub<F extends Fn>(fn: F, impl: (input: FnIn<F>, ctx: any) => Promise<FnOut<F>>): void;
   /** Every event emitted (and committed) so far, in order. */
@@ -19,7 +21,7 @@ export interface TestTransaction<S extends object, Mods extends Record<string, o
   /** The test transaction itself: read rows to assert on them. */
   readonly db: any;
   /** The registry bound to this test transaction, for adapters: `toFetchHandler(tx.registry, …)`. */
-  readonly registry: Registry<S, Mods>;
+  readonly registry: Registry<S, Mods, Cf>;
 }
 
 class Rollback extends Error {}
@@ -29,9 +31,9 @@ class Rollback extends Error {}
  * Every top-level mutation inside becomes a savepoint, so a failing mutation rolls back just its own writes,
  * like it would in production. Run top-level mutations one at a time inside a test (one connection, nested savepoints).
  */
-export function createTestRegistry<S extends object, Mods extends Record<string, object>>(
-  registry: Registry<S, Mods>,
-  options: TestOptions = {},
+export function createTestRegistry<S extends object, Mods extends Record<string, object>, Cf>(
+  registry: Registry<S, Mods, Cf>,
+  options: TestOptions<Cf> = {},
 ) {
   const { options: registryOptions } = internal(registry);
   const now =
@@ -45,7 +47,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           })();
 
   return {
-    async transaction<T>(fn: (t: TestTransaction<S, Mods>) => Promise<T>): Promise<T> {
+    async transaction<T>(fn: (t: TestTransaction<S, Mods, Cf>) => Promise<T>): Promise<T> {
       const database = registryOptions.database;
       let result!: T;
 
@@ -55,13 +57,14 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const derived = internal(registry).derive({
           database: outer !== undefined && database?.nest ? database.nest(outer) : database,
           services: options.services,
+          config: options.config as object | undefined,
           now,
           stubs,
           record: (e) => events.push(e),
           events: options.listeners === false ? { deliver: async () => {} } : undefined,
-        }) as Registry<S, Mods>;
+        }) as Registry<S, Mods, Cf>;
         result = await fn({
-          as: (scope, opts) => derived.as(scope, opts),
+          as: (scope) => derived.as(scope),
           stub: (f, impl) => void stubs.set(f, impl as (input: any, ctx: any) => Promise<any>),
           events,
           db: outer,

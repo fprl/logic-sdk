@@ -25,6 +25,7 @@ test("confirm holds the dates and emails the guest", () =>
 - **Real database, no mocks.** Each test is a transaction that's always rolled back. Every top-level mutation inside it becomes a savepoint, so a failing mutation rolls back only its own writes, as in production.
 - **Arrange with real functions**, not inserts, so test data goes through the same rules.
 - **Swap services** for in-memory ones, and freeze time with `now`.
+- **Change settings** with `config: { orders: { maxItems: 1 } }`. It merges section by section over the registry's [config](/docs/concepts/config), for this test registry only.
 - **`tx.events`** records every event, delivered or not.
 - **`tx.stub(fn, impl)`** replaces one function, for example to simulate another module failing:
 

@@ -48,9 +48,9 @@ export function toORPCRouter<S extends object, Mods extends Record<string, objec
     if (!f.exposed) continue;
     let b = base.input(f.fn.inputSchema as StandardSchemaV1);
     if (f.fn.outputSchema) b = b.output(f.fn.outputSchema as StandardSchemaV1) as any;
-    (router[f.module] ??= {})[f.name] = b.handler(async ({ input, context }) => {
+    (router[f.module] ??= {})[f.name] = b.handler(async ({ input, context, signal }) => {
       try {
-        return await context.caller.run(f.fn, input);
+        return await context.caller.run(f.fn, input, { signal });
       } catch (e) {
         if (isDomainError(e))
           throw new ORPCError(orpcCodeOf[e.kind], {

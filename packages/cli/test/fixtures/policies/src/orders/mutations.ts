@@ -14,7 +14,7 @@ export const cancel = mutation({
   async execute({ id }, ctx) {
     const order = loadForCancel(ctx, ctx.scope.actor, id);
     ctx.db.run("update orders"); // a database call, not a run edge
-    await ctx.with({ accountId: "a1" }).run(stock.release, { sku: order.id });
+    await ctx.run(stock.release, { sku: order.id }, { scope: { accountId: "a1" } }); // acts in another account on purpose
     return order;
   },
 });

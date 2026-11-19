@@ -65,14 +65,19 @@ export const cancel = mutation({
 7. **Record rules are `can*` predicates.** Load through a scoped helper, then `if (!canX(ctx.scope.actor, record)) throw ctx.errors.deny();`. `can*` is sync, its result is always used, and the same predicate feeds UI flags in list queries: `can: { cancel: canCancel(actor, b) }`. A rule that must hold at commit goes in the write's `WHERE` or a `FOR UPDATE` re-select.
 8. **Errors:** `throw ctx.errors.reject("snake_reason", details?)` when a rule says no, `ctx.errors.conflict(...)` when someone got there first, `ctx.errors.notFound()`, `ctx.errors.deny()`. Codes are namespaced to your module for you. Never return error objects; never throw plain `Error` for expected cases. Catch only in actions; in a mutation, catch only to rethrow your own error.
 9. **Need the result? `run` it. Just a consequence? `emit`** and let the owning module react in its `listeners.ts`.
-10. **Listeners must be idempotent** (use `event.id` to dedupe when it matters). They run with the emitter's scope, so they run internal functions. To act as someone else on purpose: `ctx.with({ actor }).run(...)`.
+10. **Listeners must be idempotent** (use `event.id` to dedupe when it matters). They run with the emitter's scope, so they run internal functions. To act as someone else on purpose, change the scope for that call: `ctx.run(fn, input, { scope: { actor: system } })`.
 11. **Time** comes from `ctx.now()`, never `new Date()`, so tests can freeze it.
 12. **Use separate `export const`s**, not functions nested in an object. Name them by verb within the module (`bookings.confirm`, not `bookings.confirmBooking`). Names are unique per module.
+13. **Settings come from `ctx.config`**, never from env inside a module. Declare its shape in `init<Config>()` (`config: { orders: { maxItems: number } }`), fill it from your env at the entry (`createRegistry({ config })`), and read it in any function: `ctx.config.orders.maxItems`. Plain data only. Clients built from secrets go in `services`. Outside modules (the entry, routes, scripts), read env however you like; `logic-sdk check` fails on env reads inside modules, including through files they import.
 
 ## Tests
 
 ```ts
-const t = createTestRegistry(registry, { services: { mailer: memoryMailer() }, now: "2026-07-01T10:00:00Z" });
+const t = createTestRegistry(registry, {
+  services: { mailer: memoryMailer() },
+  now: "2026-07-01T10:00:00Z",
+  config: { orders: { maxItems: 1 } },          // any part of config; merged over the registry's
+});
 
 test("cancel frees the dates", () => t.transaction(async (tx) => {
   const agent = tx.as(scopeAs("agent"));

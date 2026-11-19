@@ -56,9 +56,9 @@ const locale = query({ description: "locale", inputSchema: z.undefined(), execut
 const whoami = query({
   description: "scope echo",
   inputSchema: z.undefined(),
-  execute: async (_, { scope, run, with: w }) => ({
+  execute: async (_, { scope, run }) => ({
     outer: scope.locale,
-    inner: await w({ locale: "en" }).run(locale, undefined),
+    inner: await run(locale, undefined, { scope: { locale: "en" } }),
     nested: await run(locale, undefined),
   }),
 });
@@ -132,11 +132,11 @@ test("an exposed function's check runs on every call, nested ones too", async ()
   expect(db.store.rows.items).toEqual(undefined);
 });
 
-test("ctx.with changes who is calling, and checks see it", async () => {
+test("run options: { scope } changes who is calling for that call, and checks see it", async () => {
   const asAdmin = action({
     description: "runs add as someone else",
     inputSchema: z.object({ name: z.string() }),
-    execute: async ({ name }, { with: as }) => as({ actor: "system" }).run(add, { name }),
+    execute: async ({ name }, { run }) => run(add, { name }, { scope: { actor: "system" } }),
   });
   const r = createRegistry<Scope>({ modules: { items, log, x: { asAdmin } }, database: memoryDatabase(), services: { log: [] } });
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
@@ -189,10 +189,11 @@ test("output schema is enforced", async () => {
   expect(err).toHaveProperty("message", expect.stringMatching(/items\.typed output is invalid/));
 });
 
-test("scope: nested calls inherit it, with() overrides it", async () => {
+test("scope: nested calls inherit it, a run's { scope } overrides it for that call only", async () => {
   const { app } = setup();
   expect(await app.run(items.whoami, undefined)).toEqual({ outer: "es", inner: "en", nested: "es" });
-  expect(await app.with({ locale: "fr" }).run(items.locale, undefined)).toEqual("fr");
+  expect(await app.run(items.locale, undefined, { scope: { locale: "fr" } })).toEqual("fr");
+  expect(await app.run(items.locale, undefined)).toEqual("es");
 });
 
 test("kinds: a query can't run a mutation (runtime guard behind the type)", async () => {
@@ -259,11 +260,48 @@ test("envelopes are JSON-serializable", async () => {
   expect(typeof e.id === "string" && e.name === "items.added" && e.scope.locale === "es" && e.payload.name === "j").toBe(true);
 });
 
-test("abort signal stops before running", async () => {
+test("abort signal: checked before the call starts, never between its steps", async () => {
   const { registry } = setup();
+  const app = registry.as({ actor: "a", locale: "es" });
+  const aborted = AbortSignal.abort();
+  await expect(app.run(items.list, undefined, { signal: aborted })).rejects.toThrow();
+
   const ctrl = new AbortController();
-  ctrl.abort();
-  await expect(registry.as({ actor: "a", locale: "es" }, { signal: ctrl.signal }).run(items.list, undefined)).rejects.toThrow();
+  const seen: (AbortSignal | undefined)[] = [];
+  const twoSteps = action({
+    description: "two steps; the caller gives up after the first",
+    inputSchema: z.undefined(),
+    async execute(_, { run, signal }) {
+      seen.push(signal);
+      await run(add, { name: "first" });
+      ctrl.abort(); // the caller disconnects mid-workflow
+      await run(add, { name: "second" }); // inherited signal: not checked, so the workflow finishes
+      await expect(run(add, { name: "third" }, { signal: ctrl.signal })).rejects.toThrow(); // passed explicitly: checked
+      return "done";
+    },
+  });
+  const r = createRegistry<Scope>({ modules: { items, log, x: { twoSteps } }, database: memoryDatabase(), services: { log: [] } });
+  expect(await r.as({ actor: "a", locale: "es" }).run(twoSteps, undefined, { signal: ctrl.signal })).toBe("done");
+  expect(seen).toEqual([ctrl.signal]); // actions get it as ctx.signal, to pass on to fetch
+});
+
+test("run options: events emitted by the callee carry its scope; the caller's own events don't", async () => {
+  const emits = mutation({
+    description: "add as the system",
+    inputSchema: z.object({ name: z.string() }),
+    async execute({ name }, { run }) {
+      return run(add, { name }, { scope: { actor: "system" } });
+    },
+  });
+  const seen: Envelope[] = [];
+  const r = createRegistry<Scope>({
+    modules: { items, log, x: { emits } },
+    database: memoryDatabase(),
+    services: { log: [] },
+    events: { deliver: async (envelopes: Envelope[]) => void seen.push(...envelopes) },
+  });
+  await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
+  expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
 });
 
 test("guards: unregistered functions and missing database", async () => {
