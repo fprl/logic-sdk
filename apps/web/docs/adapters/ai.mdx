@@ -1,0 +1,63 @@
+---
+title: AI tools
+description: Your exposed functions as AI SDK tools, run as the caller, with the same rules as your API.
+---
+
+```ts
+import { toAITools } from "logic-sdk/ai";
+import { generateText, isStepCount } from "ai";
+
+const caller = registry.as(await scopeFrom(request));
+
+const result = await generateText({
+  model,
+  tools: toAITools(registry, caller),
+  prompt: "Confirm Ana's booking for July",
+  stopWhen: isStepCount(5),
+});
+```
+
+Each exposed function becomes an [AI SDK](https://ai-sdk.dev) tool, named `module_function`: `bookings_confirm`, `pricing_priceStay`. The description, input schema and output schema are the ones you already wrote, and the tools are typed.
+
+## Same rules as everyone else
+
+Every tool call goes through `caller.run`. That means an agent gets exactly what a person with the same scope gets:
+
+- **The `expose` policy runs.** An agent bound to a guest can't confirm bookings.
+- **One transaction per call**, with retries on lost races.
+- **Events after commit**, so listeners send the email once the data is safe.
+- **Internal functions are never tools**, at the type level too.
+
+There's no separate "AI backend" to keep in sync with your API.
+
+## Choosing tools
+
+Keep functions away from agents with `filter`. It gets the registered function, including its [meta](/docs/concepts/meta):
+
+```ts
+const tools = toAITools(registry, caller, {
+  // Agents may read and confirm, but never charge a card
+  filter: (f) => f.id !== "bookings.checkout",
+});
+
+// or, with meta: { agent?: boolean } in your config
+const tools = toAITools(registry, caller, {
+  filter: (f) => f.fn.meta?.agent !== false,
+});
+```
+
+To tell agent calls apart in your audit log or policies, put it in the scope: `registry.as({ ...scope, via: "agent" })`.
+
+## What the model sees when a call fails
+
+| Failure | The model gets |
+|---|---|
+| A domain error (`ctx.reject`, a failed policy...) | Its code and details, e.g. `pricing.min_nights {"minNights":2,"nights":1}` |
+| Anything unexpected | `internal_error` only |
+
+Domain errors reach the model on purpose, so it can recover: suggest other dates, ask for a longer stay. Unexpected errors are reported to `onError` (default: `console.error`) and never reach the model's context, so database messages and stack traces stay private.
+
+## Requirements
+
+- `ai` 7 or newer, any provider.
+- A schema library that converts to JSON Schema, so the model can read it. Zod 4 does.

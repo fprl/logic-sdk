@@ -1,0 +1,63 @@
+---
+title: Framework recipes
+description: Hono, SvelteKit, Next.js and a queue worker.
+---
+
+The pattern is always the same: build the scope, bind a caller, `run`.
+
+## Hono
+
+```ts
+app.use(async (c, next) => {
+  c.set("caller", registry.as(await scopeFrom(c.req.raw)));
+  await next();
+});
+
+app.post("/bookings/:id/confirm", async (c) => {
+  const booking = await c.var.caller.run(bookings.confirm, {
+    bookingId: c.req.param("id"),
+  });
+  return c.json(booking);
+});
+```
+
+## SvelteKit
+
+```ts
+// hooks.server.ts
+export const handle = async ({ event, resolve }) => {
+  event.locals.caller = registry.as(await scopeFrom(event.request));
+  return resolve(event);
+};
+
+// +page.server.ts
+export const actions = {
+  confirm: ({ params, locals }) =>
+    locals.caller.run(bookings.confirm, { bookingId: params.id }),
+};
+```
+
+## Next.js Server Action
+
+```ts
+"use server";
+
+export async function confirmBooking(bookingId: string) {
+  const caller = registry.as(await scopeFromCookies());
+  return caller.run(bookings.confirm, { bookingId });
+}
+```
+
+## A queue worker
+
+Who is calling comes from the job:
+
+```ts
+boss.work("wake-tasks", async ([job]) => {
+  const caller = registry.as({
+    actor: null,
+    accountId: job.data.accountId,
+  });
+  await caller.run(tasks.wake, {});
+});
+```

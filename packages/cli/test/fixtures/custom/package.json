@@ -1,0 +1,1 @@
+{ "name": "fixture-custom", "private": true, "logic-sdk": { "registry": "lib/registry.ts" } }

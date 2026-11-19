@@ -1,0 +1,45 @@
+---
+title: oRPC
+description: A typed router and client for your exposed functions, through oRPC v2.
+---
+
+```ts
+import { RPCHandler } from "@orpc/server/fetch";
+import { toORPCRouter } from "logic-sdk/orpc";
+
+const router = toORPCRouter(registry);
+const rpc = new RPCHandler(router);
+
+export async function handle(request: Request) {
+  const { response } = await rpc.handle(request, {
+    prefix: "/rpc",
+    context: { caller: registry.as(await scopeFrom(request)) },
+  });
+  return response ?? new Response("Not found", { status: 404 });
+}
+```
+
+The router has one procedure per exposed function, grouped by module, fully typed. Internal functions aren't in it, at the type level either.
+
+```ts
+const client: RouterClient<typeof router> = createORPCClient(link);
+
+await client.bookings.confirm({ bookingId });
+```
+
+Your modules stay the core, and oRPC is the edge: you get its typed client, OpenAPI and MCP packages. Validation runs once, in the registry. Requires `@orpc/server` 2.0 beta.
+
+## Errors
+
+Domain errors become `ORPCError`s with `data: { kind, code, details }`:
+
+| Kind | oRPC code |
+|---|---|
+| `invalid` | `BAD_REQUEST` |
+| `unauthenticated` | `UNAUTHORIZED` |
+| `forbidden` | `FORBIDDEN` |
+| `not_found` | `NOT_FOUND` |
+| `conflict` | `CONFLICT` |
+| `rejected` | `UNPROCESSABLE_CONTENT` |
+
+The map is exported as `orpcCodeOf`.

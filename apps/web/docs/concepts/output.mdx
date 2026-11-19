@@ -1,0 +1,28 @@
+---
+title: Output
+description: outputSchema is the contract for what an exposed function returns.
+---
+
+```ts
+// What callers get back: the row without internal columns
+export const Booking = createSelectSchema(bookings).omit({
+  accountId: true,
+});
+
+export const get = query({
+  description: "Get a booking",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  outputSchema: Booking,
+  expose: "staff",
+
+  // Returns the whole row; accountId is stripped
+  execute: ({ bookingId }, ctx) => findBooking(ctx, bookingId),
+});
+```
+
+- **Exposed functions must declare `outputSchema`.** Leaving it out is a type error. What leaves your process, to a browser, an oRPC client or an AI agent, is a contract.
+- **The result is parsed against it.** Unknown keys are stripped (Zod objects strip by default), so returning a whole row can't leak a column.
+- **Invalid output is a bug in your code**, not a bad request. Clients get a generic failure, and the details go to `onError`.
+- **Internal functions may skip it.** Their result only reaches your own code.
+
+`createSelectSchema` comes from `drizzle-orm/zod`. Any Standard Schema works.

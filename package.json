@@ -1,0 +1,32 @@
+{
+  "name": "logic-sdk-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "examples/*"
+  ],
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "build": "bun run --filter logic-sdk build && bun run --filter @logic-sdk/cli build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "lint": "oxlint --deny-warnings",
+    "test": "bun run build && bun run typecheck && bun run lint && bun run check:package && bun run --filter '*' test",
+    "check:package": "cd packages/logic-sdk && publint --strict && attw --pack --profile esm-only && cd ../cli && publint --strict",
+    "changeset": "changeset",
+    "release": "bun run build && changeset publish"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@changesets/cli": "^3.0.3",
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.6",
+    "oxlint": "^1.94.0",
+    "publint": "^0.3.25",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}

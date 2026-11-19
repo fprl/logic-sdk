@@ -1,0 +1,122 @@
+---
+title: Quickstart
+description: Declare your types once, write a module, register it, and call it.
+---
+
+<Steps>
+  <Step title="Declare your types and policies in logic.ts">
+
+`init` returns the definers, typed with your config. Policies are the names you'll use in `expose`.
+
+```ts
+import {
+  init,
+  type MutationCtx as Mutation,
+  type QueryCtx as Query,
+} from "logic-sdk";
+import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+
+type Tx = DrizzleTx<typeof db>;
+
+type Config = {
+  // Who is calling: your own type, JSON only
+  scope: Scope;
+  // What mutations get
+  db: Tx;
+  // What queries get: no insert, update or delete
+  reader: DrizzleReader<Tx>;
+  // What actions and listeners get
+  services: { mailer: Mailer; payments: Payments };
+};
+
+// For helpers like findBooking(ctx, id)
+export type QueryCtx = Query<Config>;
+export type MutationCtx = Mutation<Config>;
+
+export const { query, mutation, action, event, on, createRegistry } =
+  init<Config>()({
+    policies: {
+      public: () => true,
+      staff: (scope) => is(scope, "agent", "owner", "admin"),
+    },
+  });
+```
+
+`init<Config>()({ policies })` is called twice because TypeScript can't infer the policy names while `Config` is written out by hand.
+
+  </Step>
+  <Step title="Write a module">
+
+A module is a folder. Other modules import only its `index.ts`.
+
+```txt
+src/bookings/
+  index.ts        export * from each public file
+  queries.ts
+  mutations.ts
+  actions.ts
+  events.ts
+  listeners.ts    reacting to other modules
+  data.ts         helpers that take ctx
+  schema.ts       tables this module owns
+```
+
+```ts
+// src/bookings/mutations.ts
+export const cancel = mutation({
+  description: "Cancel a booking and free its dates",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  outputSchema: Booking,
+  expose: "staff",
+
+  async execute({ bookingId }, ctx) {
+    const booking = await findBooking(ctx, bookingId);
+    if (booking.status === "cancelled") {
+      throw ctx.reject("already_cancelled");
+    }
+
+    await ctx.run(availability.release, { sourceId: booking.id });
+    ctx.emit(cancelled, { bookingId });
+
+    return setStatus(ctx, booking.id, "cancelled");
+  },
+});
+```
+
+  </Step>
+  <Step title="Register your modules in registry.ts">
+
+```ts
+import { drizzleAdapter } from "logic-sdk/drizzle";
+import * as availability from "./availability";
+import * as bookings from "./bookings";
+
+export const registry = createRegistry({
+  // Ids come from the keys: "bookings.cancel"
+  modules: { bookings, availability },
+  database: drizzleAdapter(db),
+  services: { mailer, payments },
+});
+```
+
+`createRegistry` walks each module's exports and picks up every query, mutation, action, event and listener. A new listener is live as soon as it's exported.
+
+  </Step>
+  <Step title="Call it from anywhere">
+
+Bind who is calling once per request, job or test. Every nested call inherits it.
+
+```ts
+const caller = registry.as({
+  actor,
+  accountId,
+  locale: "en",
+});
+
+await caller.run(bookings.cancel, { bookingId });
+```
+
+  </Step>
+</Steps>
+
+From here, publish exposed functions over [HTTP](/docs/adapters/fetch) or [oRPC](/docs/adapters/orpc), or read how [transactions](/docs/concepts/transactions) work.

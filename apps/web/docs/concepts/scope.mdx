@@ -1,0 +1,21 @@
+---
+title: Scope
+description: Who is calling and from where, bound once per request, job or test.
+---
+
+The scope answers "who and where": the actor, the account or tenant, the locale, a request id. It never holds "what": booking ids and form data are input.
+
+It's your own type. The library defines no fields.
+
+```ts
+export type Scope = {
+  actor: { id: string; role: Role } | null;
+  accountId: string;
+  locale: string;
+};
+```
+
+- **Bind it once** per request, job or test with `registry.as(scope)`. Every nested call inherits it.
+- **Change it** with `caller.with(patch)` or `ctx.with(patch)`.
+- **Listeners get the scope** of the call that emitted the event, so a confirmation email goes out in the guest's locale.
+- **Keep it JSON.** It travels with events, so it must be serializable. Write permission helpers as plain functions, like `is(scope, "agent")`, not methods.

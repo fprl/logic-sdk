@@ -1,0 +1,43 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "**/dist",
+    "**/.blume",
+    "**/.astro",
+    "**/.wrangler",
+    "**/worker-configuration.d.ts"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "examples/*/src/**"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../*/*",
+                  "!../*/index",
+                  "!../*/index.ts"
+                ],
+                "message": "Import other modules through their index (import * as bookings from \"../bookings\"), never their files."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "**/*.check.ts"
+      ],
+      "rules": {
+        "no-unused-vars": "off",
+        "no-unused-expressions": "off"
+      }
+    }
+  ]
+}

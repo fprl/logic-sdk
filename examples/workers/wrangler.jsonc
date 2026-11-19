@@ -1,0 +1,15 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "logic-links",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "logic-links-archive" }],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "<your-hyperdrive-id>", // npx wrangler hyperdrive create links --connection-string=...
+      "localConnectionString": "postgres://postgres:postgres@localhost:5440/postgres"
+    }
+  ]
+}

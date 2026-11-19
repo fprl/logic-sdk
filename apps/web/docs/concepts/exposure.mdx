@@ -1,0 +1,66 @@
+---
+title: Exposure and policies
+description: Functions are internal until you expose them, and an exposed function's policy runs on every call.
+---
+
+```ts
+// Anyone
+export const priceStay = query({ expose: "public", ... });
+
+// A named policy from logic.ts
+export const cancel = mutation({ expose: "staff", ... });
+
+// An inline check, which also sees the input
+export const cancelOwn = mutation({
+  expose: (scope, input) => scope.actor?.id === input.guestId,
+  ...
+});
+
+// No expose: internal
+export const release = mutation({ ... });
+```
+
+## Internal by default
+
+A function without `expose` is internal. Other functions can `run` it, and your own server code (jobs, webhooks, scripts) can `caller.run` it. No adapter publishes it: `toFetchHandler` and `toORPCRouter` skip it, at the type level too.
+
+## Exposed functions
+
+With `expose`, adapters publish the function, and its policy runs **on every call**, nested ones included.
+
+That's what makes narrowing safe. A policy written as a type guard narrows the scope inside `execute`:
+
+```ts
+// logic.ts
+policies: {
+  staff: (scope): scope is Staff => is(scope, "agent", "owner"),
+}
+
+// a module
+export const block = mutation({
+  expose: "staff",
+  async execute(input, ctx) {
+    // No null check: the policy guarantees an actor
+    const blockedBy = ctx.scope.actor.id;
+    ...
+  },
+});
+```
+
+- **Policy names are typed.** A typo is a compile error.
+- **Inline checks** see the input, but don't narrow the scope.
+- **Exposed functions must declare an [output schema](/docs/concepts/output).**
+
+## Acting as someone else
+
+Who is calling is just data in the scope. To run something as someone else, change the scope, and every check sees the new one:
+
+```ts
+const system = ctx.with({ actor: { id: "system", role: "admin" } });
+
+await system.run(bookings.confirm, { bookingId });
+```
+
+## Tenancy is yours
+
+The library guarantees the scope reaches every function and helper. Filtering by `ctx.scope.accountId` is your code's job, in your helpers.

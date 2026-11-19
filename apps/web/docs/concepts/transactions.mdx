@@ -1,0 +1,81 @@
+---
+title: Transactions
+description: One transaction per mutation, safe nesting, and retries when a transaction loses a race.
+---
+
+## One transaction per mutation
+
+A top-level mutation opens a transaction. Every mutation it runs joins that same transaction, across modules:
+
+```ts
+async execute({ bookingId }, ctx) {
+  const booking = await findBooking(ctx, bookingId);
+
+  // Joins this transaction
+  await ctx.run(availability.hold, rangeOf(booking));
+
+  // If this throws, the hold above rolls back too
+  return setStatus(ctx, booking.id, "confirmed");
+}
+```
+
+Input is validated and the policy checked **before** the transaction opens, so bad or denied calls never take a database connection.
+
+## A failure rolls back everything
+
+If a nested mutation throws, the whole transaction is doomed, even if the caller catches the error. Partial writes can't commit.
+
+```ts
+try {
+  await ctx.run(availability.hold, range);
+} catch {
+  // The transaction is already doomed: this write rolls back too
+  await ctx.run(notes.add, { text: "hold failed" });
+}
+```
+
+Postgres does the same after a failed statement. See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
+
+## Lost races are retried
+
+Sometimes Postgres aborts a transaction because it lost a race with another one: a deadlock (`40P01`) or a serialization failure (`40001`). The registry then runs the whole mutation again, in a fresh transaction.
+
+- Up to **3 attempts**, with a short random pause between them.
+- **Safe**, because mutations have no side effects and their events are rebuilt on each attempt.
+- **Familiar**: Laravel does the same with `DB::transaction(fn, attempts)`, and Convex re-runs every conflicting mutation automatically.
+
+```ts
+createRegistry({
+  modules,
+  database,
+  // 1 turns retries off
+  retry: { attempts: 5 },
+});
+```
+
+## Retries don't replace locks
+
+When a rule depends on rows that don't exist yet, like "no two bookings overlap", two transactions can both pass the check. Lock first, then check:
+
+```ts
+export const hold = mutation({
+  description: "Reserve a date range on a property's calendar",
+  inputSchema: HoldInput,
+
+  async execute(input, ctx) {
+    // One hold at a time per property. A concurrent confirm waits here,
+    // then sees the committed hold in the check below.
+    await ctx.db.execute(
+      sql`select pg_advisory_xact_lock(hashtext(${input.propertyId}))`,
+    );
+
+    const clashes = await overlapping(ctx, input);
+    if (clashes.length) throw ctx.conflict("dates_unavailable");
+
+    const [hold] = await ctx.db.insert(holds).values(input).returning();
+    return hold;
+  },
+});
+```
+
+The `examples/node` app races three agents confirming overlapping dates on real Postgres: one wins, and the others get a clean `conflict`.

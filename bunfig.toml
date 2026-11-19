@@ -1,0 +1,3 @@
+[install]
+# Flat node_modules: Astro and wrangler resolve hoisted deps most reliably.
+linker = "hoisted"

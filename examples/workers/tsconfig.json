@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // Workers globals come from worker-configuration.d.ts (`wrangler types`), so no "dom" lib here.
+  "compilerOptions": { "lib": ["es2025"], "types": ["@cloudflare/vitest-plugin/types"] },
+  "include": ["src", "test", "vitest.config.ts", "worker-configuration.d.ts"]
+}

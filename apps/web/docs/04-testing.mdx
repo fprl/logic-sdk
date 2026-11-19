@@ -1,0 +1,43 @@
+---
+title: Testing
+description: A real database, a rolled-back transaction per test, and no mocks.
+---
+
+```ts
+import { createTestRegistry } from "logic-sdk/testing";
+
+const t = createTestRegistry(registry, {
+  services: { mailer: memoryMailer() },
+  now: "2026-07-01T10:00:00Z",
+});
+
+test("confirm holds the dates and emails the guest", () =>
+  t.transaction(async (tx) => {
+    const agent = tx.as(scopeAs("agent"));
+
+    await agent.run(bookings.confirm, { bookingId });
+
+    expect(tx.events.map((e) => e.name)).toEqual(["bookings.confirmed"]);
+    expect(await tx.db.select().from(holds)).toHaveLength(1);
+  }));
+```
+
+- **Real database, no mocks.** Each test is a transaction that's always rolled back. Every top-level mutation inside it becomes a savepoint, so a failing mutation rolls back only its own writes, as in production.
+- **Arrange with real functions**, not inserts, so test data goes through the same rules.
+- **Swap services** for in-memory ones, and freeze time with `now`.
+- **`tx.events`** records every event, delivered or not.
+- **`tx.stub(fn, impl)`** replaces one function, for example to simulate another module failing:
+
+```ts
+tx.stub(availability.hold, async () => {
+  throw new Error("calendar service down");
+});
+```
+
+- **`{ listeners: false }`** tests one module without the others reacting.
+- **`tx.registry`** is bound to the test transaction, so adapters can be tested in the same rollback: `toFetchHandler(tx.registry, ...)`.
+- Run top-level mutations one at a time inside a test: they share one connection.
+
+## Which database
+
+`examples/node` runs its suite on PGlite by default: the real Postgres engine in WASM, in-process, no Docker. It runs one connection at a time, so it can't show concurrency bugs. With `DATABASE_URL` set, the same suite runs on real Postgres, through the production driver, including a race test. CI always sets it.

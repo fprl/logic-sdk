@@ -1,0 +1,40 @@
+---
+title: Examples
+description: A Node server, a Cloudflare Worker, and a Next.js app with an agent.
+---
+
+Two real projects live in the repository's `examples/` folder. Both are tested and run against real Postgres.
+
+## Node: bookings
+
+`examples/node` is a bookings app with six modules (properties, availability, pricing, enquiries, bookings, tasks): cross-module transactions, a payment action that refunds on failure, listeners that email guests in their locale, and a Postgres exclusion constraint that makes double-booking impossible under concurrency. A Hono server mounts the fetch and oRPC adapters.
+
+```bash
+cd examples/node
+bun run db          # Postgres in Docker on 127.0.0.1:5440
+bun run db:migrate
+bun run dev         # http://localhost:3000
+bun run test        # Vitest on Node, PGlite in-process: no Docker needed
+bun run test:pg     # the same suite on the Docker Postgres, plus the race
+```
+
+## Cloudflare Workers: links
+
+`examples/workers` is a link shortener on Hono with two modules: `links` emits `visited`, and a `stats` listener counts it after the redirect has been sent, kept alive by `ctx.waitUntil`. A middleware puts one caller per request in `c.var.caller`, `app.onError` maps error kinds to statuses in a `switch`, and an R2 bucket is a service behind a small interface. Postgres goes through Hyperdrive, with a client per request.
+
+```bash
+cd examples/workers
+bun run db && bun run db:migrate
+bun run dev         # wrangler dev, Hyperdrive → local Postgres
+bun run test        # Vitest inside workerd, against in-process PGlite
+```
+
+## Next.js: one function, two callers
+
+`examples/nextjs` runs the bookings domain from `examples/node`, imported as a workspace package, not copied. One page calls `bookings.confirm` two ways: a Server Action behind a staff form, and an agent (Claude Opus 5.5 through the AI SDK) with the same function as a tool. Both share the same policy, transaction and events.
+
+```bash
+cd examples/node && bun run db && bun run db:migrate
+cd ../nextjs
+ANTHROPIC_API_KEY=... bun run dev   # http://localhost:3100
+```

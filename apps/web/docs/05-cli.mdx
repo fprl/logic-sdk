@@ -1,0 +1,118 @@
+---
+title: CLI
+description: List, inspect, graph and check your app from the terminal, for people and agents.
+---
+
+```bash
+npm i -D @logic-sdk/cli
+npx logic-sdk check
+```
+
+Run it from your app's root. The `logic-sdk` command comes with the main package and hands off to `@logic-sdk/cli`, so apps that don't use the CLI never download its parser.
+
+Every command reads your code; none of them touch the database.
+
+## list
+
+Every function and listener, like a route list:
+
+```txt
+$ logic-sdk list
+NAME                  KIND       EXPOSE     DESCRIPTION
+bookings.confirm      mutation   staff      Confirm a pending booking: holds its dates…
+bookings.checkout     action     public     Charge the guest and confirm the booking…
+availability.hold     mutation   internal   Reserve a date range on a property's calendar
+tasks.prepareStay     listener   —          on bookings.confirmed
+```
+
+Filter with `--module bookings`, `--kind mutation` or `--exposed`.
+
+## show
+
+Everything about one function, listener or event:
+
+```txt
+$ logic-sdk show bookings.confirm
+bookings.confirm  mutation · expose staff
+Confirm a pending booking: holds its dates and tells the other modules
+src/bookings/mutations.ts:34:14
+
+input       { bookingId: uuid }
+output      { id: uuid, propertyId: uuid, status: "pending" | "confirmed" | … }
+runs        availability.hold
+emits       bookings.confirmed → enquiries.winOnBooking, tasks.prepareStay
+called by   bookings.checkout
+```
+
+## graph
+
+Who runs whom, and who reacts to which event:
+
+```txt
+$ logic-sdk graph --module bookings
+bookings
+├─ cancel    mutation  runs availability.release
+│                      emits bookings.cancelled → no listeners
+├─ confirm   mutation  runs availability.hold
+│                      emits bookings.confirmed → enquiries.winOnBooking, tasks.prepareStay
+└─ checkout  action    runs bookings.get, bookings.confirm
+```
+
+`--format mermaid` gives a diagram you can paste into a README or a pull request. `--format json` gives nodes and edges.
+
+## check
+
+The rules from AGENTS.md, checked against your code. It exits with 1 when a rule is broken, so it fits in CI:
+
+```txt
+$ logic-sdk check
+✗ cross-module-import  src/orders/mutations.ts:4:1
+  orders imports "../stock/data", a file inside stock. Other modules are reachable only through their index.
+  fix: Import it as `import * as stock from "../stock"` and call its functions with ctx.run(stock.fn, input).
+
+1 error, 0 warnings
+```
+
+| Code | Severity | What it catches |
+|---|---|---|
+| `cross-module-import` | error | Importing a file inside another module instead of its index |
+| `run-cycle` | error | Modules running each other in a circle |
+| `network-in-transaction` | error | `fetch()` inside a query or mutation |
+| `wall-clock` | warning | `new Date()` or `Date.now()` instead of `ctx.now()` |
+| `event-never-emitted` | warning | A listener for an event no function emits |
+| `source-not-found` | warning | A registered function whose definition couldn't be found, so its calls weren't checked |
+
+## The shape it expects
+
+A module is whatever your `createRegistry({ modules })` registers, wherever it lives: the CLI follows the imports in your registry file. A small module can be one file (`src/bookings.ts`); once it grows, make it a folder with an `index.ts`:
+
+```txt
+src/
+  registry.ts          createRegistry({ modules: { bookings, … } })
+  bookings/            or src/bookings.ts, src/modules/bookings/, …
+    index.ts           export * from each public file
+    mutations.ts       export const confirm = mutation({ … })
+```
+
+The registry file is `src/registry.ts` by default. If yours lives elsewhere, point to it in `package.json`:
+
+```json
+{ "logic-sdk": { "registry": "lib/registry.ts" } }
+```
+
+Name your definers however you like (`mutation: defineMutation` works): functions are matched by their registered names. If loading your app throws (a missing environment variable, say), you get `app-load-failed` with the file and line.
+
+## For scripts and agents
+
+- **`--json`** on `list`, `show` and `check` (`graph` has `--format json`). Errors come back as JSON too: `{ "error": { "code", "message", "fix" } }`.
+- **Exit codes:** 0 when it worked, 1 when a check failed or the app couldn't be read, 2 for a usage mistake like an unknown name or flag.
+- **No colors when piped.** Data goes to stdout, errors to stderr.
+
+## How it knows
+
+Two sources:
+
+1. **Your registry.** The CLI loads your modules (with [jiti](https://github.com/unjs/jiti), so TypeScript and extensionless imports just work) and asks your own `logic-sdk` what's registered: every function, its kind, schemas and listeners.
+2. **Your source.** It parses each module with [oxc](https://oxc.rs) and finds the `run(...)` and `emit(...)` calls inside each function, plus every import.
+
+Static reading has limits. A `run` hidden inside a helper function isn't followed yet, a computed call like `run(fns[name], ...)` shows as `(dynamic)`, and a `run` inside an `if` is a possible edge, not a guaranteed one.

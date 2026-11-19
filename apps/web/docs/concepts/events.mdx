@@ -1,0 +1,51 @@
+---
+title: Events
+description: Emitted inside a mutation, delivered to listeners only after commit.
+---
+
+```ts
+// bookings/events.ts
+export const confirmed = event({
+  schema: z.object({ bookingId: z.uuid() }),
+});
+
+// bookings/mutations.ts, inside a mutation
+ctx.emit(confirmed, { bookingId });
+
+// tasks/listeners.ts
+export const prepareStay = on(
+  () => bookings.confirmed,
+  async ({ bookingId }, ctx) => {
+    await ctx.run(tasks.create, { bookingId, title: "Prepare the house" });
+    await ctx.services.mailer.send(...);
+  },
+);
+```
+
+- **Delivered only after commit.** A rolled-back mutation emits nothing.
+- **Each listener runs like an action**, so every mutation it runs commits on its own.
+- **A failing listener never fails the caller.** The error goes to `onError`.
+- **`on` takes the event lazily** (`() => bookings.confirmed`), so two modules can import each other's index without an import-cycle crash.
+- **What you emit is what's delivered.** `emit` takes a snapshot of the payload.
+- **Listeners must be idempotent.** They may run again; `ctx.event.id` is the key to dedupe on.
+
+## Serverless
+
+On Workers or Vercel, give the registry `waitUntil` so the response returns right after commit and listeners finish afterwards. Set it once, where you create the registry:
+
+```ts
+import { waitUntil } from "@vercel/functions";       // Vercel
+// import { waitUntil } from "cloudflare:workers";   // Cloudflare Workers
+
+createRegistry({ modules, database, waitUntil });
+```
+
+Without it, `run` waits for the listeners, which is what you want in tests and long-lived servers.
+
+## Loops
+
+A listener whose mutation emits the event it listens to would loop forever. Delivery stops after **8** hops (`maxEventDepth`) and the loop is reported to `onError`. Real chains are 2 or 3 hops.
+
+## Durability
+
+The default dispatcher delivers in-process, right after commit. If the process crashes between commit and delivery, the events are lost. The seam for a durable outbox exists: `enqueue(tx, envelopes)` runs inside the transaction, and a worker calls `registry.dispatch(envelope)`, which throws if any listener failed, so the worker can retry.

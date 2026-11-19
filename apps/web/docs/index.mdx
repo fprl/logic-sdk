@@ -1,0 +1,67 @@
+---
+title: Introduction
+description: Business logic for TypeScript apps, as queries, mutations, actions and events.
+---
+
+Logic SDK is for the layer between your routes and your database: the business logic. You write it once, as plain declarations, and call it from anywhere: an HTTP route, a Server Action, a queue worker, a script, a test or an AI agent.
+
+```ts
+export const confirm = mutation({
+  description: "Confirm a pending booking",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  outputSchema: Booking,
+  expose: "staff",
+
+  async execute({ bookingId }, ctx) {
+    const booking = await findBooking(ctx, bookingId);
+    if (booking.status !== "pending") {
+      throw ctx.reject("not_pending");
+    }
+
+    // Another module, in the same transaction
+    await ctx.run(availability.hold, rangeOf(booking));
+
+    // Delivered to listeners only after commit
+    ctx.emit(confirmed, { bookingId });
+
+    return setStatus(ctx, booking.id, "confirmed");
+  },
+});
+```
+
+Bind who is calling once, then run anything:
+
+```ts
+const caller = registry.as({ actor, accountId });
+
+await caller.run(bookings.confirm, { bookingId });
+```
+
+## What you get
+
+- **One transaction across modules.** A mutation and every mutation it runs commit together. A failure anywhere rolls back everything.
+- **Side effects after commit.** Mutations emit events, and listeners send the email once the data is safe.
+- **Who is calling, everywhere.** The scope you bind reaches every nested call and listener. Policies narrow its type.
+- **Internal by default.** Only functions you `expose` reach HTTP, RPC or AI tools, and their policy runs on every call.
+- **Tests without mocks.** Each test is a real transaction on a real database, always rolled back.
+- **Any runtime.** Node, Bun and Cloudflare Workers, under any framework. No decorators, classes, codegen or build step.
+
+## Four kinds of functions
+
+| | Use it for | Transaction | Can run |
+|---|---|---|---|
+| `query` | Reading data | The caller's, if any | Queries |
+| `mutation` | Changing data | One, joined by nested mutations | Queries and mutations |
+| `action` | Payments, email, AI, any network call | None | Anything |
+| `on` | Reacting to another module's event | None, runs after commit | Anything |
+
+Services (a mailer, a payment client) only reach actions and listeners. A mutation can roll back, and an email sent from inside it can't be unsent.
+
+<CardGroup cols={2}>
+  <Card title="Installation" href="/docs/installation" icon="download">
+    Add the package and a database adapter.
+  </Card>
+  <Card title="Quickstart" href="/docs/quickstart" icon="rocket">
+    One module, from definition to call.
+  </Card>
+</CardGroup>

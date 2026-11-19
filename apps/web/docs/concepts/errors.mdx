@@ -1,0 +1,123 @@
+---
+title: Errors
+description: Six kinds, codes namespaced to your module, and when catching makes sense.
+---
+
+Throw expected failures from `ctx`. The code gets your module's name for you:
+
+```ts
+// Inside bookings.cancel
+
+// A rule said no, and trying again won't help: "bookings.not_pending"
+throw ctx.reject("not_pending", { status });
+
+// Someone got there first, or it already exists: "bookings.dates_taken"
+throw ctx.conflict("dates_taken");
+
+// It doesn't exist, or isn't visible here: "bookings.not_found"
+throw ctx.notFound();
+
+// The caller is known, but not allowed: "bookings.cancel.forbidden"
+throw ctx.deny();
+```
+
+Every expected failure is a `DomainError` with a `kind`, a `code` and optional `details`.
+
+## Kinds
+
+| Kind | Means | Thrown by |
+|---|---|---|
+| `invalid` | The input doesn't match the schema | The library |
+| `unauthenticated` | There's no valid session | Your edge: `unauthenticated()` |
+| `forbidden` | The caller may not do this | The library when a policy fails, or `ctx.deny()` |
+| `not_found` | It doesn't exist here | `ctx.notFound()` |
+| `conflict` | Someone got there first | `ctx.conflict(code)` |
+| `rejected` | A rule said no | `ctx.reject(code)` |
+
+Kinds are domain words, not status codes. Each adapter maps them: see [HTTP](/docs/adapters/fetch#errors) and [oRPC](/docs/adapters/orpc#errors). It's the same split as Rails, where `RecordNotFound` knows nothing about HTTP and `rescue_responses` maps it at the edge.
+
+Anything else that's thrown is a bug: a plain `Error`, invalid output, an invalid event payload. Clients get a generic failure without details, and the error goes to `onError`.
+
+## Authentication lives at the edge
+
+Whether there's a valid session is decided before any function runs. Throw `unauthenticated()` from the code that builds the scope:
+
+```ts
+resolveScope: async (request) => {
+  const session = await auth.getSession(request);
+  if (!session) throw unauthenticated();
+  return scopeFrom(session);
+},
+```
+
+Inside modules, the caller is always known. When they're not allowed, it's `ctx.deny()`.
+
+## Whose code is it?
+
+A module only creates codes in its own namespace. Another module's error passes through `run` unchanged:
+
+```ts
+// bookings.confirm runs availability.hold, which throws.
+// The caller sees availability's code, untouched:
+// "availability.dates_unavailable"
+await caller.run(bookings.confirm, { bookingId });
+```
+
+## Why codes aren't typed
+
+The six kinds are a fixed, typed set. Codes are plain strings, on purpose.
+
+Functions call each other. The honest list of codes `bookings.confirm` can fail with includes every code from every function it runs, and a typed list per function would have to repeat them all to stay true. tRPC and Convex don't type them either. oRPC does, per procedure, at the cost of declaring each one.
+
+Test the codes that matter, and branch on one with `isDomainError`:
+
+```ts
+if (isDomainError(error, "bookings.not_pending")) {
+  // ...
+}
+```
+
+## Catching
+
+Errors bubble up to the edge by default, and most code never catches them. When you do, where you catch decides what you can do.
+
+**In an action, catch and recover.** Each mutation the action ran committed (or failed) on its own.
+
+```ts
+try {
+  await ctx.run(bookings.confirm, { bookingId });
+} catch (error) {
+  if (isDomainError(error, "availability.dates_unavailable")) {
+    return suggestOtherDates();
+  }
+  throw error;
+}
+```
+
+**In a mutation, catch only to translate.** The transaction is already doomed and will roll back.
+
+```ts
+try {
+  await ctx.run(availability.hold, range);
+} catch {
+  throw ctx.reject("cannot_confirm");
+}
+```
+
+Postgres itself aborts a transaction after a failed statement, and Rails warns against catching database errors inside a transaction block for the same reason.
+
+## Database errors
+
+Map the database errors you care about where you know what they mean. `sqlState` reads the SQLSTATE code, even when Drizzle wraps the error:
+
+```ts
+import { sqlState } from "logic-sdk/drizzle";
+
+try {
+  await ctx.db.insert(users).values(input);
+} catch (error) {
+  // unique_violation
+  if (sqlState(error) === "23505") throw ctx.conflict("email_taken");
+  throw error;
+}
+```

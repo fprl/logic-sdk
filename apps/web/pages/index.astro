@@ -1,0 +1,74 @@
+---
+import PageLayout from "blume/components/layout/PageLayout.astro";
+import data from "blume:data";
+
+const { config } = data;
+
+const example = `export const confirm = mutation({
+  description: "Confirm a pending booking",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  expose: "staff",
+  async execute({ bookingId }, ctx) {
+    const b = await findBooking(ctx, bookingId);
+    if (b.status !== "pending") throw reject("bookings.not_pending");
+    await ctx.run(availability.hold, { bookingId }); // same transaction
+    ctx.emit(confirmed, { bookingId });              // delivered after commit
+    return setStatus(ctx, b.id, "confirmed");
+  },
+});
+
+const caller = registry.as({ actor, accountId });  // HTTP, a job, a script, a test
+await caller.run(confirm, { bookingId });`;
+
+const points = [
+  { title: "One transaction", body: "A mutation and every mutation it runs commit together, across modules. A nested failure rolls back everything." },
+  { title: "Side effects after commit", body: "Mutations emit events. Listeners send the email once the data is safe, never from a transaction that might roll back." },
+  { title: "Who is calling, everywhere", body: "Bind the scope once per request, job or test. Every nested call and listener sees it. Policies narrow its type." },
+  { title: "Tests without mocks", body: "Each test is a real transaction on a real database, always rolled back. Swap services for memory ones, freeze time." },
+];
+---
+
+<PageLayout
+  analytics={config.analytics}
+  appleIcon={config.appleIcon}
+  banner={config.banner}
+  clientData={{ config: data.config, navigation: data.navigation, page: { route: "/", title: "Home" } }}
+  favicon={config.favicon}
+  fontCssVars={data.fontCssVars}
+  logo={config.logo}
+  navigation={data.navigation}
+  ogEnabled={config.og.enabled}
+  page={{ title: "Logic SDK: business logic for TypeScript apps", description: config.description }}
+  searchEnabled={config.search.enabled}
+  site={{ title: config.title, description: config.description }}
+  siteUrl={config.site}
+  themeMode={config.theme.mode}
+  ui={data.ui}
+>
+  <main class="mx-auto flex max-w-5xl flex-col gap-16 px-6 py-20">
+    <section class="flex flex-col gap-6">
+      <h1 class="text-4xl font-semibold tracking-tight sm:text-5xl">Write your business logic once.</h1>
+      <p class="text-muted-foreground max-w-2xl text-lg">
+        Queries, mutations, actions and events as plain declarations. Call them from HTTP, a queue, a script or a test,
+        on Node, Bun or Cloudflare Workers.
+      </p>
+      <div class="flex flex-wrap items-center gap-3">
+        <a class="bg-foreground text-background rounded-md px-4 py-2 text-sm font-medium" href="/docs">Read the docs</a>
+        <code class="border-border rounded-md border px-3 py-2 text-sm">npm i logic-sdk</code>
+      </div>
+    </section>
+
+    <pre class="border-border overflow-x-auto rounded-lg border p-5 text-sm leading-relaxed"><code>{example}</code></pre>
+
+    <section class="grid gap-6 sm:grid-cols-2">
+      {
+        points.map((p) => (
+          <div class="border-border rounded-lg border p-5">
+            <h2 class="mb-2 font-medium">{p.title}</h2>
+            <p class="text-muted-foreground text-sm">{p.body}</p>
+          </div>
+        ))
+      }
+    </section>
+  </main>
+</PageLayout>

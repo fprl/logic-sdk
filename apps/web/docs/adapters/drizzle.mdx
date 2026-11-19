@@ -1,0 +1,39 @@
+---
+title: Drizzle
+description: The database adapter, and the types for queries and mutations.
+---
+
+```ts
+import { drizzleAdapter } from "logic-sdk/drizzle";
+
+createRegistry({
+  modules,
+  database: drizzleAdapter(db),
+});
+```
+
+`drizzleAdapter(db)` takes any Drizzle database with interactive transactions: node-postgres, postgres.js, PGlite, Neon (websocket), Hyperdrive, better-sqlite3, libsql and others.
+
+## Types
+
+```ts
+import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+
+// What mutations get: the transaction
+type Tx = DrizzleTx<typeof db>;
+
+// What queries get: no insert, update, delete or execute
+type Reader = DrizzleReader<Tx>;
+```
+
+## Retries
+
+The adapter tells the registry which failures are worth retrying: Postgres deadlocks (`40P01`) and serialization failures (`40001`). See [Transactions](/docs/concepts/transactions#lost-races-are-retried).
+
+## `sqlState`
+
+Reads the SQLSTATE code of a database error, even when Drizzle wraps it. Use it to map constraint violations to [domain errors](/docs/concepts/errors#database-errors).
+
+## Not D1, not HTTP drivers
+
+Cloudflare D1 rejects `BEGIN` and `SAVEPOINT`, and HTTP drivers can't hold a transaction open. `createRegistry` refuses to start when there are mutations but no transactional adapter. On Workers, use Postgres through Hyperdrive.
