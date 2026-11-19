@@ -5,6 +5,7 @@ A link shortener on Hono, with two modules: `links` emits `visited` when someone
 - **One caller per request.** A Hono middleware builds the registry with this request's database and bindings, binds who is calling, and puts the caller in `c.var.caller`. Routes just `run`.
 - **Errors map to statuses in one `switch`** in `app.onError`.
 - **Bindings are services.** The R2 bucket goes straight into `services`, and a listener saves each new link with `services.archive.put(...)`.
+- **Policies are plain functions.** `anyone` and `signedIn` live in `src/logic.ts`; functions say `authorize: signedIn`, and the guard narrows `ctx.scope.user` to a string.
 - **Two files besides the modules:** `src/logic.ts` (types, policies, definers) and `src/index.ts` (the Worker: registry, caller, routes, errors).
 - **Postgres through Hyperdrive**, one client per request.
 

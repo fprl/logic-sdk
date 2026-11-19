@@ -48,9 +48,11 @@ export async function confirmBooking(bookingId: string) {
 }
 ```
 
+Server Actions call functions directly, so they don't need `expose`: `authorize` still runs. To let listeners finish after the response, pass `waitUntil: (p) => after(() => p)` to `createRegistry` (see [Events](/docs/concepts/events#serverless)).
+
 ## A queue worker
 
-Who is calling comes from the job:
+Who is calling comes from the job. Jobs run internal functions, so pick a scope their `authorize` (if any) accepts:
 
 ```ts
 boss.work("wake-tasks", async ([job]) => {

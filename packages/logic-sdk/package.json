@@ -77,15 +77,15 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=26"
+    "node": ">=24"
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0"
   },
   "peerDependencies": {
-    "@orpc/server": ">=2.0.0-beta.51",
-    "ai": ">=7",
-    "@logic-sdk/cli": ">=0.1.0"
+    "@orpc/server": ">=2.0.0-beta.51 <3",
+    "ai": ">=7 <8",
+    "@logic-sdk/cli": ">=0.2.0 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@orpc/server": {

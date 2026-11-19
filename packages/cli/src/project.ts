@@ -11,13 +11,15 @@ export interface FnInfo {
   name: string;
   kind: "query" | "mutation" | "action";
   description: string;
-  expose: string | null; // policy name, "inline", or null when internal
+  authorize: string | null; // the policy as written in source ("member"), "inline", or null without authorize
+  exposed: boolean; // expose: true, so adapters may publish it
   input: JsonSchema | null;
   output: JsonSchema | null;
   meta: unknown;
   at: Loc | null;
   runs: Edge[];
   emits: Edge[];
+  checks: string[]; // can*(...) record checks in its body or this module's helpers it calls
   calledBy: string[];
 }
 export interface ListenerInfo {
@@ -122,13 +124,16 @@ export async function loadProject(root: string): Promise<Project> {
       name: f.name,
       kind: f.kind,
       description: f.fn.description,
-      expose: f.exposed ? (s?.expose ?? "inline") : null,
+      // the name as written in source; else the function's own name (`const member = …` names it), else "inline"
+      authorize: f.fn.authorize ? (s?.authorize ?? (f.fn.authorize.name || "inline")) : null,
+      exposed: f.exposed === true,
       input: jsonSchemaOf(f.fn.inputSchema, "input"),
       output: f.fn.outputSchema ? jsonSchemaOf(f.fn.outputSchema, "output") : null,
       meta: f.fn.meta ?? null,
       at: at(f.id),
       runs: s?.runs ?? [],
       emits: s?.emits ?? [],
+      checks: s?.checks ?? [],
       calledBy: [],
     };
   });

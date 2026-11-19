@@ -1,7 +1,7 @@
 import { init, type MutationCtx as Mutation, type QueryCtx as Query } from "logic-sdk";
 import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
 import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { is, type Scope } from "./scope";
+import type { Scope } from "./scope";
 import type { Services } from "./services";
 
 export type Db = PgAsyncDatabase<PgQueryResultHKT>;
@@ -12,11 +12,4 @@ type Config = { scope: Scope; db: Tx; reader: DrizzleReader<Tx>; services: Servi
 export type QueryCtx = Query<Config>;
 export type MutationCtx = Mutation<Config>;
 
-export const { query, mutation, action, event, on, createRegistry } = init<Config>()({
-  policies: {
-    public: () => true,
-    staff: (s) => is(s, "agent", "owner", "admin"),
-    owner: (s) => is(s, "owner", "admin"),
-    agent: (s) => is(s, "agent", "admin"),
-  },
-});
+export const { query, mutation, action, event, on, createRegistry } = init<Config>();

@@ -19,7 +19,7 @@ export async function handle(request: Request) {
 }
 ```
 
-The router has one procedure per exposed function, grouped by module, fully typed. Internal functions aren't in it, at the type level either.
+The router has one procedure per `expose: true` function, grouped by module, fully typed. Internal functions aren't in it, at the type level either.
 
 ```ts
 const client: RouterClient<typeof router> = createORPCClient(link);
@@ -43,3 +43,8 @@ Domain errors become `ORPCError`s with `data: { kind, code, details }`:
 | `rejected` | `UNPROCESSABLE_CONTENT` |
 
 The map is exported as `orpcCodeOf`.
+
+## Signed out
+
+Build the caller with a scope that has no actor, and let each function's `authorize` answer 403. For a router that's entirely session-only, throw `ORPCError("UNAUTHORIZED")` from your own middleware, before the caller is built.
+

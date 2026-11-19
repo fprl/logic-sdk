@@ -8,7 +8,7 @@ Six modules written with `logic-sdk`, served by Hono on Node, stored in Postgres
 | `availability` | `availability_holds` | `check` (query), `hold`/`release` (internal), `block` (owners). A Postgres exclusion constraint makes overlaps impossible |
 | `pricing` | nothing | `priceStay` runs `properties.get`; minimum nights rule |
 | `enquiries` | `enquiries` | a listener marks the enquiry won when bookings emits `confirmed` |
-| `bookings` | `bookings` | `confirm` holds dates in the same transaction and emits `confirmed`; `checkout` is an action that charges, confirms, and refunds on failure |
+| `bookings` | `bookings` | `confirm` holds dates in the same transaction and emits `confirmed`; `cancel` checks a record rule (`canCancel`); `checkout` is an action that charges, confirms, and refunds on failure |
 | `tasks` | `tasks` | a listener creates a task and emails the guest in their locale |
 
 ```bash
@@ -26,4 +26,11 @@ curl -X POST localhost:3000/api/properties.create \
   -d '{"name":"Casa","nightlyRate":10000,"cleaningFee":0,"minNights":1}'
 ```
 
-Read in this order: `src/logic.ts` → `src/registry.ts` → `src/bookings/mutations.ts` → `src/enquiries/listeners.ts` → `src/server.ts` → `test/app.test.ts`.
+## Who may call what
+
+- **Policies** are plain functions in `src/policies.ts` (`anyone`, `member`, `staff`, `owner`, `agent`). A function opts in with `authorize: staff`; the guard narrows `ctx.scope`, so `ctx.scope.actor` is never null inside.
+- **`expose: true`** lets the HTTP and oRPC adapters publish a function. It needs `authorize` and `outputSchema`. Without it a function is internal: other modules `run` it, nobody calls it over the wire.
+- **Record rules** run in `execute`, after loading through an account-scoped helper: `if (!canCancel(ctx.scope.actor, booking)) throw ctx.errors.deny()` (`src/bookings/data.ts`). Another account's booking is a 404, not a 403.
+- **`checkout` doesn't pretend to be an admin.** A guest may pay but not read or confirm bookings, so the action runs two internal functions with no policy (`amountDue`, `confirmPaid`). The scope stays the guest's.
+
+Read in this order: `src/logic.ts` → `src/policies.ts` → `src/registry.ts` → `src/bookings/mutations.ts` → `src/bookings/actions.ts` → `src/enquiries/listeners.ts` → `src/server.ts` → `test/app.test.ts`.

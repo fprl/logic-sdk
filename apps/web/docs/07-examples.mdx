@@ -31,7 +31,7 @@ bun run test        # Vitest inside workerd, against in-process PGlite
 
 ## Next.js: one function, two callers
 
-`examples/nextjs` runs the bookings domain from `examples/node`, imported as a workspace package, not copied. One page calls `bookings.confirm` two ways: a Server Action behind a staff form, and an agent (Claude Opus 5.5 through the AI SDK) with the same function as a tool. Both share the same policy, transaction and events.
+`examples/nextjs` runs the bookings domain from `examples/node`, imported as a workspace package, not copied. One page calls `bookings.confirm` two ways: a Server Action behind a staff form, and an agent (Claude Opus 5.5 through the AI SDK) with the same function as a tool. Both go through the same `authorize`, transaction and events.
 
 ```bash
 cd examples/node && bun run db && bun run db:migrate

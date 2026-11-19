@@ -15,16 +15,19 @@ export function check(project: Project): Problem[] {
   const problems: Problem[] = [];
   const { source } = project;
 
-
-  // 1. Modules reach each other only through their index
+  // 1. Modules reach each other only through their index, and so does code outside them (routes, pages)
   for (const i of source.imports)
     if (i.internal)
       problems.push({
         code: "cross-module-import",
         severity: "error",
-        message: `${i.from} imports "${i.spec}", a file inside ${i.target}. Other modules are reachable only through their index.`,
+        message: i.from
+          ? `${i.from} imports "${i.spec}", a file inside ${i.target}. Other modules are reachable only through their index.`
+          : `${i.at.file} imports "${i.spec}", a file inside ${i.target}. Code outside the modules reaches them only through their index.`,
         at: i.at,
-        fix: `Import it as \`import * as ${i.target} from "../${i.target}"\` and call its functions with ctx.run(${i.target}.fn, input).`,
+        fix: i.from
+          ? `Import it as \`import * as ${i.target} from "${i.index}"\` and call its functions with ctx.run(${i.target}.fn, input).`
+          : `Import it as \`import * as ${i.target} from "${i.index}"\` and call its functions through the registry: caller.run(${i.target}.fn, input).`,
       });
 
   // 2. No run cycles between modules (an event breaks them)
@@ -32,7 +35,18 @@ export function check(project: Project): Problem[] {
   for (const f of [...project.functions, ...project.listeners])
     for (const e of f.runs) {
       const to = e.to.split(".")[0]!;
-      if (e.to === "(dynamic)" || to === f.module) continue;
+      if (e.to === "(dynamic)") {
+        // Never pass silently: an edge we can't name could close a cycle
+        problems.push({
+          code: "dynamic-run",
+          severity: "warning",
+          message: `${f.id} runs a function the CLI can't name from the source, so run cycles through it aren't checked.`,
+          at: e.at,
+          fix: "Pass the function itself: ctx.run(otherModule.fn, input), with otherModule imported from its index.",
+        });
+        continue;
+      }
+      if (to === f.module) continue;
       if (!graph.has(f.module)) graph.set(f.module, new Map());
       if (!graph.get(f.module)!.has(to)) graph.get(f.module)!.set(to, `${f.id} → ${e.to}`);
     }
@@ -82,7 +96,27 @@ export function check(project: Project): Problem[] {
       });
   }
 
-  // 5. Listeners for events nothing emits
+  // 5. Record checks (can*) are sync and their result is used: `if (!canCancel(actor, order)) throw ctx.errors.deny()`
+  for (const c of source.cans)
+    problems.push(
+      c.code === "unused-can"
+        ? {
+            code: "unused-can",
+            severity: "error",
+            message: `The result of ${c.name}(...) is thrown away, so nothing is denied.`,
+            at: c.at,
+            fix: `Use it: if (!${c.name}(ctx.scope.actor, record)) throw ctx.errors.deny();`,
+          }
+        : {
+            code: "async-can",
+            severity: "error",
+            message: `${c.name} ${c.how === "declared" ? "is async" : "is awaited"}, so it returns a Promise. A Promise is never falsy: if (!${c.name}(...)) never denies and the check silently passes.`,
+            at: c.at,
+            fix: `Make ${c.name} a plain sync function: load the record first through a data.ts helper, then pass it in, ${c.name}(ctx.scope.actor, record).`,
+          },
+    );
+
+  // 6. Listeners for events nothing emits
   for (const e of project.events)
     if (e.listeners.length && !e.emittedBy.length)
       problems.push({

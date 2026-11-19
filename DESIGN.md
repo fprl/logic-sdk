@@ -38,7 +38,7 @@ Not adopted: `await using` in tests. It isn't safely portable across runtimes ye
 - **`expose` with named policies** (replaced "`authorize` = exposure", which read as magic). Missing means internal, so forgetting it is safe. A policy written as a type guard narrows `scope` in `execute`, and it runs on every call, nested ones too, so the narrowing never lies. Exposure is tracked at the type level (`Fn<…, true>`), so adapters' types only include exposed functions.
 - **One door.** Your own server code is trusted, like a Convex `httpAction` calling `internal.*` or a Rails job calling a model. "Internal" means no adapter publishes it. There's no "system" concept: scope is the app's type.
 - **The registry is required** (`createRegistry({ modules })`). Ids feed errors, events, tracing, adapters and stubs. Auto-discovery means a new listener can't be forgotten.
-- **`init<Config>()({ policies })` is curried and returns a typed `createRegistry`**, because TypeScript can't partially infer type arguments.
+- **`init<Config>()` returns typed constructors and a typed `createRegistry`.** In 0.1 it was curried to infer policy names; 0.2 passes policies by reference, so the second call went away.
 - **Function references are plain imports**, and types flow one way. `run(fn, input)` is the one call shape: definitions exist from startup and the caller per request, so route helpers, stubs and adapters take definitions. A typed proxy (`caller.bookings.confirm()`) may come later as sugar.
 - **`on(() => event, …)` is lazy**, resolved at `createRegistry`, so listeners import other modules' barrels without import-cycle crashes.
 - **Validate and check before the transaction**, so bad or denied calls never take a connection. Transaction state is created per attempt, so a retrying adapter can't reuse events from a failed one.
@@ -48,7 +48,7 @@ Not adopted: `await using` in tests. It isn't safely portable across runtimes ye
 - **Lost races are retried** (40001/40P01, 3 attempts, short random pause), like Laravel's `DB::transaction(fn, attempts)` and Convex's automatic OCC retries. The adapter decides what's retryable; the registry loops. Safe because mutations have no side effects and transaction state is per attempt.
 - **`toAITools(registry, caller)`** mirrors the oRPC adapter: exposed functions only, named `module_function`, every call through `caller.run`. Domain errors reach the model with their details so it can recover; anything unexpected becomes `internal_error`, so internals never enter the model's context. `DomainError`'s message now includes its details for the same reason (the AI SDK shows the model only the message).
 - **The CLI reads, it doesn't run.** `@logic-sdk/cli` loads the modules with jiti and asks the app's own `logic-sdk` (`describeModules`, no database) what's registered; `run`/`emit` edges and imports come from parsing the source with oxc. TypeScript 7 has no stable JS compiler API, and knip uses the same stack. Commands are Stricli; output is plain `node:util` `styleText` (no TUI library: the output is printed, piped and read in CI). Patterns from Laravel `route:list`/`model:show`, Phoenix `mix xref graph`, Packwerk `check` and Vercel's agent mode (`--json`, exit codes 0/1/2).
-- **Node 26 LTS everywhere.** The active LTS since October 2026, with `Temporal` built in.
+- **Node 24 and 26.** The repo develops on 26; the packages declare `>=24` because nothing in them needs 26, and Node 24 is supported until April 2028.
 - **`maxEventDepth` defaults to 8.** Real chains are 2 or 3 hops; deeper is almost always a loop.
 
 ## Code review fixes
@@ -85,3 +85,16 @@ A second Fable pass reviewed the built code and found real bugs. All are fixed, 
 3. **A Postgres `READ ONLY` transaction for queries**, as an adapter flag. Today it's a type-level guard only.
 4. **An MCP and AI SDK tools adapter** (`toAITools(registry)`): each exposed function is already `description` + `inputSchema` + `execute`. oRPC's MCP package covers it via `toORPCRouter` in the meantime.
 5. **The name.** `logic-sdk` ("Logic SDK") was free on npm and GitHub on 2026-11-19. `bounded` was taken by an unrelated agent-guardrails tool with its own `bounded` command. Whether the `@logic-sdk` scope is free couldn't be checked without logging in.
+
+## 0.2.0: authorization, settled
+
+Reviewed against Laravel's current docs, 37signals' Fizzy source, Next.js, Convex, Phoenix and the RPC libraries, then stress-tested in several independent reviews.
+
+- **`authorize` and `expose` are two keys.** Every reference stack separates "reachable" (`"use server"`, Convex `query` vs `internalQuery`, TanStack `createServerFn`) from "who" (checks in the body, middleware). `expose: true` without `authorize` is a type error, so you still can't publish something without deciding who.
+- **Policies are sync type guards over scope, passed by reference.** Sync because TS can't narrow through a Promise and because they run before validation and before any database work. Return-style narrowing (tRPC's `next({ ctx })`) works too, but needs runtime identity checks to be safe; not worth a new concept for the handful of policies an app has.
+- **Policy before validation, and exactly `true`.** Anonymous callers never see a protected function's schema errors (Laravel authorizes first); a truthy non-boolean or a Promise fails closed.
+- **Record rules stay in `execute`, the Fizzy way.** Load through a scoped helper (404 for what you can't see), then a sync `can*` predicate (403), reused for UI flags in lists. Rejected: an async policy that loads the record (`ctx.auth`): it reads before the transaction, retries reuse the stale row, and lists need the predicate anyway. Rejected: `ctx.authorize(fn, record)`: a second way to call the same predicate. The CLI keeps the pattern safe instead: `async-can` (an async `can*` would fail open when negated) and `unused-can`.
+- **No `anyone` export, no `ctx.can`, no policy cache.** One line in your app, a later non-breaking addition, and over-engineering, in that order.
+- **Errors moved to `ctx.errors`.** Destructured `reject` read like a Promise executor's. `throw` stays: a never-returning `ctx.errors.notFound()` wouldn't narrow, because `ctx` is contextually typed (tested on tsc 7.0.2).
+- **The agent door is opt-in.** `toAITools` requires a `filter`; `toAITool(caller, fn)` is the per-function form, like the AI SDK's own `tool()`. Approval stays the AI SDK's `toolApproval`.
+

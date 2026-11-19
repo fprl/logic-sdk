@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { query } from "../logic";
+import { anyone } from "../policies";
 import { overlapping } from "./data";
 
 export const Range = z
@@ -9,7 +10,8 @@ export const Range = z
 export const check = query({
   description: "Is a property free for a date range? Check-out day is free for the next check-in.",
   inputSchema: Range,
-  expose: "public",
+  authorize: anyone,
+  expose: true,
   outputSchema: z.object({ available: z.boolean() }),
   async execute({ propertyId, from, to }, ctx) {
     const clashes = await overlapping(ctx, propertyId, from, to);

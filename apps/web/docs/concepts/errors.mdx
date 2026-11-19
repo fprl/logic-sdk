@@ -3,54 +3,68 @@ title: Errors
 description: Six kinds, codes namespaced to your module, and when catching makes sense.
 ---
 
-Throw expected failures from `ctx`. The code gets your module's name for you:
+Throw expected failures from `ctx.errors`. The code gets your module's name for you:
 
 ```ts
 // Inside bookings.cancel
 
 // A rule said no, and trying again won't help: "bookings.not_pending"
-throw ctx.reject("not_pending", { status });
+throw ctx.errors.reject("not_pending", { status });
 
 // Someone got there first, or it already exists: "bookings.dates_taken"
-throw ctx.conflict("dates_taken");
+throw ctx.errors.conflict("dates_taken");
 
 // It doesn't exist, or isn't visible here: "bookings.not_found"
-throw ctx.notFound();
+throw ctx.errors.notFound();
 
-// The caller is known, but not allowed: "bookings.cancel.forbidden"
-throw ctx.deny();
+// The caller may not do this: "bookings.cancel.forbidden"
+throw ctx.errors.deny();
 ```
 
 Every expected failure is a `DomainError` with a `kind`, a `code` and optional `details`.
+
+**Why `throw` and not a method that throws?** TypeScript narrows after `throw`: below `if (!booking) throw ...`, `booking` is defined. A `never`-returning method would only narrow if its type were declared explicitly, and `ctx` is contextually typed, so it wouldn't.
 
 ## Kinds
 
 | Kind | Means | Thrown by |
 |---|---|---|
 | `invalid` | The input doesn't match the schema | The library |
-| `unauthenticated` | There's no valid session | Your edge: `unauthenticated()` |
-| `forbidden` | The caller may not do this | The library when a policy fails, or `ctx.deny()` |
-| `not_found` | It doesn't exist here | `ctx.notFound()` |
-| `conflict` | Someone got there first | `ctx.conflict(code)` |
-| `rejected` | A rule said no | `ctx.reject(code)` |
+| `unauthenticated` | There's no valid session | Your edge: `unauthenticated()` from `logic-sdk/fetch` |
+| `forbidden` | The caller may not do this | The library when `authorize` fails, or `ctx.errors.deny()` |
+| `not_found` | It doesn't exist here | `ctx.errors.notFound()` |
+| `conflict` | Someone got there first | `ctx.errors.conflict(code)` |
+| `rejected` | A rule said no | `ctx.errors.reject(code)` |
 
 Kinds are domain words, not status codes. Each adapter maps them: see [HTTP](/docs/adapters/fetch#errors) and [oRPC](/docs/adapters/orpc#errors). It's the same split as Rails, where `RecordNotFound` knows nothing about HTTP and `rescue_responses` maps it at the edge.
 
-Anything else that's thrown is a bug: a plain `Error`, invalid output, an invalid event payload. Clients get a generic failure without details, and the error goes to `onError`.
+## Unexpected errors
+
+Anything else that's thrown is a bug: a plain `Error`, invalid output, an invalid event payload. Clients get a generic 500 `internal` without details, and the error goes to `onError`. Unexpected errors aren't part of a function's contract.
+
+Bad input works the same way. From a client, it's `invalid` (400). From a nested `ctx.run`, it's your own code passing the wrong thing: a bug, so a 500.
 
 ## Authentication lives at the edge
 
-Whether there's a valid session is decided before any function runs. Throw `unauthenticated()` from the code that builds the scope:
+Whether there's a valid session is decided before any function runs, in the code that builds the scope. Two cases:
+
+- **The mount serves public functions too:** return a scope with no actor. Functions that need one fail their policy with `forbidden` (403), like Laravel.
+- **The mount is entirely session-only** (an admin API, say): throw `unauthenticated()` from `resolveScope`, and the client gets a 401.
 
 ```ts
-resolveScope: async (request) => {
-  const session = await auth.getSession(request);
-  if (!session) throw unauthenticated();
-  return scopeFrom(session);
-},
+import { toFetchHandler, unauthenticated } from "logic-sdk/fetch";
+
+toFetchHandler(registry, {
+  basePath: "/admin/api/",
+  resolveScope: async (request) => {
+    const session = await auth.getSession(request);
+    if (!session) throw unauthenticated();
+    return scopeFrom(session);
+  },
+});
 ```
 
-Inside modules, the caller is always known. When they're not allowed, it's `ctx.deny()`.
+With oRPC, throw `ORPCError("UNAUTHORIZED")` from your own middleware instead. Inside modules there's no 401: a caller who may not do something gets `forbidden`.
 
 ## Whose code is it?
 
@@ -100,7 +114,7 @@ try {
 try {
   await ctx.run(availability.hold, range);
 } catch {
-  throw ctx.reject("cannot_confirm");
+  throw ctx.errors.reject("cannot_confirm");
 }
 ```
 
@@ -117,7 +131,7 @@ try {
   await ctx.db.insert(users).values(input);
 } catch (error) {
   // unique_violation
-  if (sqlState(error) === "23505") throw ctx.conflict("email_taken");
+  if (sqlState(error) === "23505") throw ctx.errors.conflict("email_taken");
   throw error;
 }
 ```

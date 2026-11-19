@@ -8,14 +8,18 @@ The scope answers "who and where": the actor, the account or tenant, the locale,
 It's your own type. The library defines no fields.
 
 ```ts
-export type Scope = {
-  actor: { id: string; role: Role } | null;
-  accountId: string;
-  locale: string;
-};
+type Base = { accountId: string; locale: string };
+
+// Signed in or not
+export type Scope =
+  | (Base & { actor: null })
+  | (Base & { actor: { id: string; role: Role } });
 ```
+
+Make it a union of signed in and signed out, so [policies](/docs/concepts/authorization#policies) can narrow it.
 
 - **Bind it once** per request, job or test with `registry.as(scope)`. Every nested call inherits it.
 - **Change it** with `caller.with(patch)` or `ctx.with(patch)`.
 - **Listeners get the scope** of the call that emitted the event, so a confirmation email goes out in the guest's locale.
-- **Keep it JSON.** It travels with events, so it must be serializable. Write permission helpers as plain functions, like `is(scope, "agent")`, not methods.
+- **Keep it JSON.** It travels with events, so it must be serializable. Policies are plain functions in `policies.ts`, like `member(scope)`, not methods.
+- **It's a snapshot.** A listener sees the scope as it was at emit time, flags and roles included. See [Feature flags](/docs/concepts/feature-flags).

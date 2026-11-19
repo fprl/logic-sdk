@@ -20,14 +20,14 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 ## Done
 
-- **API:** `query`/`mutation`/`action`/`on`; `expose` with named policies that narrow the scope and run on every call; curried `init<Config>()({ policies })`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
-- **Transactions:** validation and the policy check before the transaction opens; transaction state per attempt; lost races retried (40001/40P01, 3 attempts with jitter).
-- **Errors:** `ctx.reject`/`conflict`/`notFound`/`deny`, namespaced per module; `unauthenticated()` at the edge; six kinds, no HTTP in core.
+- **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call) plus `expose: true`; record rules as sync `can*` checks in `execute`; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
+- **Transactions:** the policy check and validation before the transaction opens (policy first); transaction state per attempt; lost races retried (40001/40P01, 3 attempts with jitter).
+- **Errors:** `ctx.errors.reject`/`conflict`/`notFound`/`deny`, namespaced per module; `unauthenticated()` in `logic-sdk/fetch`; six kinds, no HTTP in core; bad input on a nested call is a bug (500).
 - **Contracts:** `outputSchema` required on exposed functions; typed `meta` per function, visible in `wrap`.
 - **Events:** loop limit 8; `emit` snapshots its payload.
-- **Agents:** `toAITools` (`logic-sdk/ai`) and `examples/nextjs`, where a Server Action and an agent call the same `bookings.confirm`.
+- **Agents:** `toAITool` and `toAITools` with a required `filter` (`logic-sdk/ai`), and `examples/nextjs`, where a Server Action and an agent call the same `bookings.confirm`.
 - **CLI v0.1** (`@logic-sdk/cli`): `list`, `show`, `graph`, `check`, `--json`, read-only. Stricli for commands, jiti to load the app, oxc to read the source, zero-dependency rendering.
-- **Node 26 LTS** required everywhere (Temporal is built in).
+- **Node 24 and 26** supported by the packages (CI runs both); the repo develops on 26.
 - **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/node` (Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test) and `examples/workers` (Vitest in workerd, Hyperdrive); docs site on Blume; oxlint repo-wide.
 
 ## Next

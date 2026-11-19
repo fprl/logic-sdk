@@ -15,13 +15,13 @@ Any [Standard Schema](https://standardschema.dev) library works for `inputSchema
 |---|---|
 | `logic-sdk` | `init`, the definers, `createRegistry`, errors |
 | `logic-sdk/drizzle` | `drizzleAdapter(db)`, the database adapter |
-| `logic-sdk/fetch` | `toFetchHandler`, a web-standard HTTP handler |
+| `logic-sdk/fetch` | `toFetchHandler`, a web-standard HTTP handler, and `unauthenticated` |
 | `logic-sdk/orpc` | `toORPCRouter`, a typed oRPC v2 router |
-| `logic-sdk/ai` | `toAITools`, AI SDK tools for agents |
+| `logic-sdk/ai` | `toAITool` and `toAITools`, AI SDK tools for agents |
 | `logic-sdk/testing` | `createTestRegistry` |
 
 ## Requirements
 
-- **Node 26 or newer** (the current LTS), Bun, or Cloudflare Workers. The core has no `node:` imports and no `AsyncLocalStorage`.
+- **Node 24 or newer**, Bun, or Cloudflare Workers. The core has no `node:` imports and no `AsyncLocalStorage`.
 - **TypeScript:** developed and tested on TypeScript 7. Older versions are untested.
 - **A database with interactive transactions** for mutations: Postgres through Drizzle today. Cloudflare D1 and HTTP-only drivers can't hold a transaction open, so they can't run mutations.

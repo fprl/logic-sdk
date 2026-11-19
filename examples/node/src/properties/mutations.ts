@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { mutation } from "../logic";
+import { owner } from "../policies";
 import { Property, properties } from "./schema";
 
 export const create = mutation({
@@ -10,7 +11,8 @@ export const create = mutation({
     cleaningFee: z.int().min(0),
     minNights: z.int().min(1).default(1),
   }),
-  expose: "owner",
+  authorize: owner,
+  expose: true,
   outputSchema: Property,
   async execute(input, { db, scope }) {
     const [p] = await db.insert(properties).values({ ...input, accountId: scope.accountId }).returning();

@@ -42,7 +42,7 @@ The second argument of `execute`:
 | `services` | | | ✓ |
 | `now()` | ✓ | ✓ | ✓ |
 | `with(patch)` | ✓ | ✓ | ✓ |
-| `reject`, `conflict`, `notFound`, `deny` | ✓ | ✓ | ✓ |
+| `errors` (`reject`, `conflict`, `notFound`, `deny`) | ✓ | ✓ | ✓ |
 | `signal` | ✓ | ✓ | actions only |
 | `event` | | | listeners only |
 
@@ -64,9 +64,25 @@ export async function findBooking(ctx: QueryCtx, id: string) {
       ),
     );
 
-  if (!booking) throw ctx.notFound();
+  if (!booking) throw ctx.errors.notFound();
   return booking;
 }
 ```
 
 A mutation's `ctx` works wherever a `QueryCtx` is expected, so one read helper serves both.
+
+## Helper or `run`?
+
+Inside a module, you can call your own functions two ways. They aren't the same:
+
+| | `ctx.run(fn, input)` | A helper in `data.ts` |
+|---|---|---|
+| The callee's `authorize` | Runs (a fast, sync check on the scope, no database) | No |
+| Input validation, output parsing | Yes | No |
+| Traced by `wrap` | Yes | No |
+| What it is | A call through the registry | Plain TypeScript |
+
+**Within a module, prefer helpers.** Use `run` on your own module's function when you want its policy and validation, for example to reuse a mutation whose rules you'd otherwise copy. Convex gives the same advice: use `ctx.runQuery` and `ctx.runMutation` sparingly, and prefer plain TypeScript functions.
+
+**Across modules, always `run`**, through the other module's index. Never import its `data.ts` or `schema.ts`: [`logic-sdk check`](/docs/cli#check) fails the build if you do.
+

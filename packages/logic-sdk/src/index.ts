@@ -7,7 +7,6 @@ import type { StandardSchemaV1 } from "@standard-schema/spec";
 type Schema<I = any, O = any> = StandardSchemaV1<I, O>;
 type In<S> = S extends Schema<infer I, any> ? I : never;
 type Out<S> = S extends Schema<any, infer O> ? O : never;
-type Awaitable<T> = T | Promise<T>;
 
 /** What you declare once in `init<...>()`. */
 export interface Config {
@@ -42,13 +41,15 @@ export interface Fn<K extends Kind = Kind, I = any, O = any, E extends boolean =
   readonly outputSchema?: Schema;
   /** Your own data about the function. Checked against `meta` in `init` where you set it, typed in `wrap`; loose here, for adapters. */
   readonly meta?: any;
-  /** Set when the function is exposed: who may call it. Runs on every call. */
-  readonly check?: (scope: any, input: any) => Awaitable<boolean>;
+  /** Who may call it (from `authorize`). Runs on every call, before validation. */
+  readonly authorize?: Policy<any>;
+  /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Requires `authorize` and `outputSchema`. */
+  readonly expose?: true;
   readonly execute: (input: any, ctx: any) => Promise<any>;
   /** Phantom types, never set at runtime. */
   readonly [types]?: { input: I; output: O; exposed: E };
 }
-/** A function with `expose`: adapters publish it. */
+/** A function with `expose: true`: adapters may publish it. */
 export type ExposedFn<K extends Kind = Kind, I = any, O = any> = Fn<K, I, O, true>;
 /** What callers pass to a function. */
 export type FnIn<F> = F extends Fn<any, infer I, any> ? I : never;
@@ -88,11 +89,11 @@ export interface Listener<O = any> {
 type Run<Allowed extends Kind> = <F extends Fn<Allowed>>(fn: F, input: FnIn<F>) => Promise<FnOut<F>>;
 
 /**
- * Expected failures, namespaced to the module you're in: inside `bookings`, `ctx.reject("not_pending")` has
+ * Expected failures, namespaced to the module you're in: inside `bookings`, `ctx.errors.reject("not_pending")` has
  * code `"bookings.not_pending"`. Throw what they return. Codes are plain strings on purpose (see the errors docs).
  */
-interface Fail {
-  /** A business rule said no, and trying again won't help. `throw ctx.reject("not_pending", { status })` */
+export interface Errors {
+  /** A business rule said no, and trying again won't help. `throw ctx.errors.reject("not_pending", { status })` */
   reject(code: string, details?: unknown): DomainError;
   /** Someone else got there first, or it already exists. Refreshing and retrying may work. */
   conflict(code: string, details?: unknown): DomainError;
@@ -101,8 +102,10 @@ interface Fail {
   /** The caller is known but may not do this. Code defaults to `"<module>.<function>.forbidden"`. */
   deny(code?: string, details?: unknown): DomainError;
 }
-interface BaseCtx<S> extends Fail {
+interface BaseCtx<S> {
   scope: S;
+  /** Expected failures: `throw ctx.errors.reject("not_pending")`. */
+  errors: Errors;
   /** Current time. Fixed in tests. */
   now: () => Date;
 }
@@ -134,13 +137,13 @@ export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C>
   event: Envelope<unknown, ScopeOf<C>> & { payload: O };
 }
 
-/** Who may call an exposed function. Write it as a type guard (`(s): s is Staff => ...`) to narrow `scope` in `execute`. */
+/**
+ * Who may call a function at all: signed in, admin, staff. Sync, reads only the scope, returns exactly `true` to allow.
+ * Write it as a type guard (`(s): s is Admin => ...`) to narrow `ctx.scope` in `execute`.
+ * Rules about one record ("only the owner may cancel") go in `execute`, after loading it.
+ */
 export type Policy<S> = (scope: S) => boolean;
 type Guarded<F, S> = F extends (scope: any) => scope is infer G ? G : S;
-type Inline<C extends Config, IS extends Schema> = (scope: ScopeOf<C>, input: Out<IS>) => Awaitable<boolean>;
-/** A policy name from `init`, or an inline check that also sees the input. */
-type Exposure<C extends Config, P, IS extends Schema> = (keyof P & string) | Inline<C, IS>;
-type ScopeFor<C extends Config, P, E> = E extends keyof P ? Guarded<P[E], ScopeOf<C>> : ScopeOf<C>;
 type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
   ? QueryCtx<C, S>
   : K extends "mutation"
@@ -153,19 +156,31 @@ type Def<IS extends Schema, Ctx, R> = {
   inputSchema: IS;
   execute: (input: Out<IS>, ctx: Ctx) => Promise<R>;
 };
-type Internal = { expose?: undefined };
+type NotExposed = { expose?: undefined };
+type NoPolicy = { authorize?: undefined };
 type WithMeta<C extends Config> = { meta?: MetaOf<C> };
 type WithOutput<OS extends Schema> = { outputSchema: OS };
 
-/** Exposed functions must declare `outputSchema`: what leaves your process is a contract. Internal ones may skip it. */
-interface Constructor<C extends Config, K extends Kind, P> {
-  <IS extends Schema, OS extends Schema, const E extends Exposure<C, P, IS>>(
-    def: Def<IS, CtxOf<C, K, ScopeFor<C, P, E>>, In<OS>> & WithOutput<OS> & WithMeta<C> & { expose: E },
+/**
+ * `expose: true` needs `authorize` and `outputSchema`: you can't publish something without saying who may call it,
+ * and what leaves your process is a contract. Internal functions may skip both; `authorize` still runs if set.
+ */
+interface Constructor<C extends Config, K extends Kind> {
+  <IS extends Schema, OS extends Schema, P extends Policy<ScopeOf<C>>>(
+    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> &
+      WithOutput<OS> &
+      WithMeta<C> & { authorize: P; expose: true },
   ): Fn<K, In<IS>, Out<OS>, true>;
-  <IS extends Schema, OS extends Schema>(
-    def: Def<IS, CtxOf<C, K, ScopeOf<C>>, In<OS>> & WithOutput<OS> & WithMeta<C> & Internal,
+  <IS extends Schema, OS extends Schema, P extends Policy<ScopeOf<C>>>(
+    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> & WithOutput<OS> & WithMeta<C> & { authorize: P } & NotExposed,
   ): Fn<K, In<IS>, Out<OS>, false>;
-  <IS extends Schema, R>(def: Def<IS, CtxOf<C, K, ScopeOf<C>>, R> & WithMeta<C> & Internal): Fn<K, In<IS>, R, false>;
+  <IS extends Schema, R, P extends Policy<ScopeOf<C>>>(
+    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, R> & WithMeta<C> & { authorize: P } & NotExposed,
+  ): Fn<K, In<IS>, R, false>;
+  <IS extends Schema, OS extends Schema>(
+    def: Def<IS, CtxOf<C, K, ScopeOf<C>>, In<OS>> & WithOutput<OS> & WithMeta<C> & NoPolicy & NotExposed,
+  ): Fn<K, In<IS>, Out<OS>, false>;
+  <IS extends Schema, R>(def: Def<IS, CtxOf<C, K, ScopeOf<C>>, R> & WithMeta<C> & NoPolicy & NotExposed): Fn<K, In<IS>, R, false>;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -192,15 +207,12 @@ export class DomainError extends Error {
     this.details = details;
   }
 }
-/** For the edge (`resolveScope`): no valid session. Inside modules, use `ctx.deny()`. */
-export const unauthenticated = (code = "unauthenticated", details?: unknown) =>
-  new DomainError("unauthenticated", code, details);
 /** `isDomainError(e)`, or with a code: `isDomainError(e, "availability.dates_unavailable")`. */
 export const isDomainError = (e: unknown, code?: string): e is DomainError =>
   e instanceof DomainError && (code === undefined || e.code === code);
 
-/** `ctx.reject` and friends for one function or listener (`id` like "bookings.confirm"). */
-const failFor = (id: string): Fail => {
+/** `ctx.errors` for one function or listener (`id` like "bookings.confirm"). */
+const errorsFor = (id: string): Errors => {
   const module = id.slice(0, id.indexOf("."));
   return {
     reject: (code, details) => new DomainError("rejected", `${module}.${code}`, details),
@@ -297,7 +309,7 @@ export interface Registered {
 export interface RegisteredFn extends Registered {
   fn: Fn;
   kind: Kind;
-  /** Has `expose`: adapters publish it. */
+  /** Has `expose: true`: adapters may publish it. */
   exposed: boolean;
 }
 
@@ -312,39 +324,34 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>> = Omit<
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
   ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<any, DbOf<C>> });
 
-/**
- * Typed constructors for your app. Curried so policy names are inferred while `Config` is explicit:
- *
- * ```ts
- * export const { query, mutation, action, event, on, createRegistry } = init<Config>()({
- *   policies: { public: () => true, staff: (s): s is Staff => isStaff(s) },
- * });
- * ```
- */
 /** Keys `Config` doesn't know are errors, so a typo like `servises` can't be silently ignored. */
 type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
 
-export function init<C extends Config & OnlyKnownKeys<C>>(): Init<C> {
-  return ((options?: { policies?: Record<string, Policy<any>> }) => constructors<C, {}>(options?.policies ?? {})) as Init<C>;
+/**
+ * Typed constructors for your app:
+ *
+ * ```ts
+ * export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+ * ```
+ */
+export function init<C extends Config & OnlyKnownKeys<C>>() {
+  return constructors<C>();
 }
 
-interface Init<C extends Config> {
-  (): Constructors<C, {}>;
-  <P extends Record<string, Policy<ScopeOf<C>>>>(options: { policies: P }): Constructors<C, P>;
-}
-type Constructors<C extends Config, P> = ReturnType<typeof constructors<C, P>>;
-
-function constructors<C extends Config, P>(policies: Record<string, Policy<any>>) {
+function constructors<C extends Config>() {
   const make =
     <K extends Kind>(kind: K) =>
-    ({ expose, ...def }: any): any => {
-      let check: Fn["check"];
-      if (typeof expose === "function") check = expose;
-      else if (expose !== undefined) {
-        check = policies[expose];
-        if (!check) throw new Error(`[logic-sdk] Unknown policy "${expose}". Define it in init()({ policies }).`);
-      }
-      return Object.freeze({ [BRAND]: kind, kind, outputSchema: undefined, ...def, check });
+    (def: any): any => {
+      const where = def?.description ? `"${def.description}"` : `a ${kind}`;
+      if (def.authorize !== undefined && typeof def.authorize !== "function")
+        throw new Error(`[logic-sdk] authorize on ${where} must be a policy function, like \`authorize: member\`.`);
+      if (def.expose !== undefined && def.expose !== true)
+        throw new Error(`[logic-sdk] expose on ${where} must be \`true\` or left out.`);
+      if (def.expose && !def.authorize)
+        throw new Error(`[logic-sdk] ${where} has expose: true but no authorize. Say who may call it.`);
+      if (def.expose && !def.outputSchema)
+        throw new Error(`[logic-sdk] ${where} has expose: true but no outputSchema. Say what callers may see.`);
+      return Object.freeze({ [BRAND]: kind, kind, outputSchema: undefined, ...def });
     };
 
   return {
@@ -352,11 +359,11 @@ function constructors<C extends Config, P>(policies: Record<string, Policy<any>>
     createRegistry: <const Mods extends Record<string, object>>(options: TypedOptions<C, Mods>) =>
       build<ScopeOf<C>, Mods>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by MetaOf<C>; the values come from typed defs
     /** Reads data. Can run other queries. No writes, no events, no services. */
-    query: make("query") as Constructor<C, "query", P>,
+    query: make("query") as Constructor<C, "query">,
     /** Changes data inside one transaction. Can run queries and mutations (same transaction) and emit events. */
-    mutation: make("mutation") as Constructor<C, "mutation", P>,
+    mutation: make("mutation") as Constructor<C, "mutation">,
     /** Talks to the outside world (payments, email, AI). No transaction; each mutation it runs commits on its own. */
-    action: make("action") as Constructor<C, "action", P>,
+    action: make("action") as Constructor<C, "action">,
     /** Something that happened. Emitted by mutations, delivered after commit. */
     event: <S extends Schema>(def: { schema: S; description?: string }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
@@ -439,7 +446,7 @@ export function describeModules(modules: Record<string, object>) {
       else if (kind === "listener") {
         const listener = value as Listener;
         listeners.push({ id, module, name, listener, event: listener.event() });
-      } else functions.push({ id, module, name, kind, fn: value as Fn, exposed: typeof (value as Fn).check === "function" });
+      } else functions.push({ id, module, name, kind, fn: value as Fn, exposed: (value as Fn).expose === true });
     }
   }
   return { ids, functions, events, listeners };
@@ -476,14 +483,20 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
 
   const idOf = (x: object) => {
     const id = ids.get(x);
-    if (!id) throw new Error("[logic-sdk] This function or event isn't registered. Add its module to createRegistry({ modules }).");
+    if (!id)
+      throw new Error(
+        "[logic-sdk] This function or event isn't registered. Export it from its module's index.ts, and add the module to createRegistry({ modules }).",
+      );
     return id;
   };
 
-  async function parseInput(schema: Schema, value: unknown, code: string) {
+  /** Bad input from a caller is their error. Bad input from your own code (a nested call) is a bug. */
+  async function parseInput(schema: Schema, value: unknown, id: string, nested: boolean) {
     const r = await schema["~standard"].validate(value);
-    if (r.issues) throw new DomainError("invalid", code, { issues: describeIssues(r.issues) });
-    return r.value;
+    if (!r.issues) return r.value;
+    const issues = describeIssues(r.issues);
+    if (nested) throw new Error(`[logic-sdk] ${id} was run with invalid input: ${JSON.stringify(issues)}`);
+    throw new DomainError("invalid", `${id}.invalid_input`, { issues });
   }
   /** Output and event payloads are produced by our own code: invalid means a bug, not a bad request. */
   async function parseOwn(schema: Schema, value: unknown, what: string) {
@@ -539,7 +552,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
 
   function queryCtx(frame: Frame, id: string): QueryCtx<any> {
     return {
-      ...failFor(id),
+      errors: errorsFor(id),
       scope: frame.scope,
       now,
       signal: frame.opts.signal,
@@ -551,7 +564,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
   function mutationCtx(frame: Frame, id: string): MutationCtx<any> {
     const tx = frame.tx!;
     return {
-      ...failFor(id),
+      errors: errorsFor(id),
       scope: frame.scope,
       now,
       signal: frame.opts.signal,
@@ -578,7 +591,7 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
   }
   function actionCtx(frame: Frame, id: string): ActionCtx<any> {
     return {
-      ...failFor(id),
+      errors: errorsFor(id),
       scope: frame.scope,
       now,
       signal: frame.opts.signal,
@@ -596,12 +609,16 @@ function build<S extends object, Mods extends Record<string, object>>(options: R
 
     const call: Call = { id, kind: fn.kind, meta: fn.meta, input: rawInput, scope: frame.scope, depth: frame.depth };
 
-    /** Validate and check before any transaction opens: bad or denied calls never touch the database. */
+    /** Authorize, then validate, before any transaction opens: denied or bad calls never touch the database. */
     const prepare = async () => {
       frame.opts.signal?.throwIfAborted();
-      const input = await parseInput(fn.inputSchema, rawInput, `${id}.invalid_input`);
-      if (fn.check && !(await fn.check(frame.scope, input))) throw new DomainError("forbidden", `${id}.forbidden`);
-      return input;
+      if (fn.authorize) {
+        const allowed: unknown = fn.authorize(frame.scope);
+        if (allowed instanceof Promise || typeof (allowed as any)?.then === "function")
+          throw new Error(`[logic-sdk] The policy on ${id} returned a Promise. Policies are sync and read only the scope.`);
+        if (allowed !== true) throw new DomainError("forbidden", `${id}.forbidden`);
+      }
+      return parseInput(fn.inputSchema, rawInput, id, frame.depth > 0);
     };
     const execute = async (input: unknown, ctx: unknown) => {
       const stub = o.stubs?.get(fn);

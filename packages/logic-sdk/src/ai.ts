@@ -16,49 +16,69 @@ export type AIToolsOf<Mods> = UnionToIntersection<
   }[keyof Mods & string]
 >;
 
-export interface AIToolsOptions {
-  /** Keep only some exposed functions, e.g. `(f) => f.fn.meta?.agent !== false`. */
-  filter?: (fn: RegisteredFn) => boolean;
+export interface AIToolOptions {
   /** Unexpected (non-domain) errors. The model only sees "internal_error". Default: console.error. */
   onError?: (error: unknown) => void;
 }
+export interface AIToolsOptions extends AIToolOptions {
+  /**
+   * Which exposed functions an agent may call. Required: the agent door is opt-in, so a function exposed
+   * for your UI doesn't become a tool by accident. E.g. `(f) => f.fn.meta?.agent === true`.
+   */
+  filter: (fn: RegisteredFn) => boolean;
+}
 
 /**
- * Exposed functions as AI SDK tools, run as `caller`: an agent goes through the same policies,
- * validation, transactions and events as your HTTP API. Tool names are `<module>_<function>`.
+ * One exposed function as an AI SDK tool, run as `caller`: the agent goes through the same policy,
+ * validation, transaction and events as your HTTP API. You name it, like any AI SDK tool.
  *
  * ```ts
  * const caller = registry.as(await scopeFrom(request));
- * await generateText({ model, tools: toAITools(registry, caller), prompt });
+ * await generateText({ model, prompt, tools: { confirmBooking: toAITool(caller, bookings.confirm) } });
  * ```
  *
  * Domain errors reach the model (it sees the code and can react). Anything unexpected is reported
  * to `onError` and the model gets "internal_error", so internals never land in its context.
  */
+export function toAITool<F extends Fn<any, any, any, true>>(
+  caller: Caller<any>,
+  fn: F,
+  options: AIToolOptions = {},
+): Tool<FnIn<F>, FnOut<F>> {
+  const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
+  if (fn.expose !== true) throw new Error("[logic-sdk] toAITool needs a function with expose: true.");
+  return tool({
+    description: fn.description,
+    inputSchema: fn.inputSchema as FlexibleSchema,
+    outputSchema: fn.outputSchema as FlexibleSchema,
+    async execute(input) {
+      try {
+        return await caller.run(fn, input);
+      } catch (e) {
+        if (isDomainError(e)) throw e;
+        onError(e);
+        throw new Error("internal_error");
+      }
+    },
+  }) as Tool<FnIn<F>, FnOut<F>>;
+}
+
+/**
+ * The exposed functions your `filter` picks, as AI SDK tools named `<module>_<function>`.
+ *
+ * ```ts
+ * tools: toAITools(registry, caller, { filter: (f) => f.fn.meta?.agent === true })
+ * ```
+ */
 export function toAITools<S extends object, Mods extends Record<string, object>>(
   registry: Registry<S, Mods>,
   caller: Caller<S>,
-  options: AIToolsOptions = {},
-): AIToolsOf<Mods> {
-  const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
+  options: AIToolsOptions,
+): Partial<AIToolsOf<Mods>> {
+  if (typeof options?.filter !== "function")
+    throw new Error("[logic-sdk] toAITools needs a filter: the agent door is opt-in. E.g. { filter: (f) => f.fn.meta?.agent === true }");
   const tools: Record<string, Tool> = {};
-
-  for (const f of registry.functions) {
-    if (!f.exposed || (options.filter && !options.filter(f))) continue;
-    tools[`${f.module}_${f.name}`] = tool({
-      description: f.fn.description,
-      inputSchema: f.fn.inputSchema as FlexibleSchema,
-      outputSchema: f.fn.outputSchema as FlexibleSchema,
-      async execute(input) {
-        try {
-          return await caller.run(f.fn, input);
-        } catch (e) {
-          if (isDomainError(e)) throw e;
-          onError(e);
-          throw new Error("internal_error");
-        }
-      },
-    });
-  }
-  return tools as AIToolsOf<Mods>;
+  for (const f of registry.functions)
+    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as Fn<any, any, any, true>, options);
+  return tools as Partial<AIToolsOf<Mods>>;
 }

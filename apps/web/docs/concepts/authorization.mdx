@@ -1,0 +1,183 @@
+---
+title: Authorization
+description: Who you are, what you can see, what you may do. Three steps, one place for each.
+---
+
+Every call answers three questions, in this order, each in one place:
+
+| Question | Where it's answered | Fails with |
+|---|---|---|
+| **Who are you?** | The [scope](/docs/concepts/scope), built at the edge | `unauthenticated` (401), only on session-only mounts |
+| **What can you see?** | Account-scoped loading in `data.ts` | `not_found` (404) |
+| **What may you do?** | `authorize` for the function, `can*` for the record | `forbidden` (403) |
+
+## Policies
+
+A policy is a plain, sync function over the scope. Write them once, in `policies.ts`, as type guards:
+
+```ts
+// src/policies.ts
+export type Actor = { id: string; role: "guest" | "agent" | "owner" | "admin" };
+type Base = { accountId: string; locale: string };
+
+export type SignedOutScope = Base & { actor: null };
+export type MemberScope = Base & { actor: Actor };
+export type StaffScope = Base & { actor: Actor & { role: "agent" | "owner" | "admin" } };
+export type AdminScope = Base & { actor: Actor & { role: "admin" } };
+// Signed in or not: a union, so guards can narrow it
+export type Scope = SignedOutScope | MemberScope;
+
+export const anyone = () => true;
+export const member = (s: Scope): s is MemberScope => s.actor !== null;
+export const staff = (s: Scope): s is StaffScope => s.actor !== null && s.actor.role !== "guest";
+export const admin = (s: Scope): s is AdminScope => s.actor?.role === "admin";
+```
+
+Make `Scope` a union of signed in and signed out: then a simple check like `member` narrows it (TypeScript would even infer the guard). Compound checks like `staff` and `admin` look inside the actor, so they need their `s is ...` written out. Inside `execute`, `ctx.scope` has the narrowed type.
+
+## `authorize`: who may call the function
+
+```ts
+export const block = mutation({
+  description: "Block dates on a property's calendar",
+  inputSchema: BlockInput,
+  authorize: member,
+
+  async execute(input, ctx) {
+    // No null check: member guarantees an actor
+    const blockedBy = ctx.scope.actor.id;
+    ...
+  },
+});
+```
+
+- **Runs on every call**: from HTTP, from an agent, from another function, from your own job. Nested calls too.
+- **Runs first**, before input validation, before any transaction opens.
+- **Must return exactly `true`.** Anything else is `forbidden` (403), even when nobody is signed in, like Laravel.
+- **Sync, and reads only the scope.** No database, no input. A policy that returns a Promise throws.
+
+## `expose`: who may publish it
+
+`authorize` says who may call. `expose: true` says adapters ([HTTP](/docs/adapters/fetch), [oRPC](/docs/adapters/orpc), [AI tools](/docs/adapters/ai)) may publish it:
+
+```ts
+export const cancel = mutation({
+  description: "Cancel a booking and free its dates",
+  inputSchema: z.object({ bookingId: z.uuid() }),
+  outputSchema: Booking,
+  authorize: member,
+  expose: true,
+  ...
+});
+```
+
+`expose: true` requires `authorize` and an [`outputSchema`](/docs/concepts/output). Leaving either out is a type error: you can't publish something without saying who may call it and what they get back.
+
+## Internal functions
+
+No `expose`, and it's internal: other functions `run` it, and your own server code (jobs, webhooks, scripts) calls it with `caller.run`. No adapter publishes it, at the type level too. `authorize` is optional here, and still runs if you set it.
+
+## Record rules: `can*`
+
+`authorize` can't see the booking, so "only its creator or an admin may cancel it" goes in `execute`, after loading the record. Two steps:
+
+1. **Load through an account-scoped helper.** It filters by `ctx.scope.accountId` and throws `notFound`, so another account's id is a 404, never a 403 that confirms it exists.
+2. **Ask a sync predicate named `can*`.** `false` is `ctx.errors.deny()`, a 403.
+
+```ts
+// src/bookings/data.ts
+export const canCancel = (actor: Actor, booking: BookingRow) =>
+  actor.role === "admin" || booking.createdBy === actor.id;
+
+// src/bookings/mutations.ts
+async execute({ bookingId }, ctx) {
+  const booking = await findBooking(ctx, bookingId); // other accounts: 404
+  if (!canCancel(ctx.scope.actor, booking)) throw ctx.errors.deny(); // 403
+  ...
+}
+```
+
+The same predicate feeds your UI, so the button and the rule never disagree:
+
+```ts
+export const list = query({
+  description: "List the account's bookings",
+  inputSchema: z.object({}),
+  outputSchema: z.array(Booking.extend({ can: z.object({ cancel: z.boolean() }) })),
+  authorize: member,
+  expose: true,
+
+  async execute(_, ctx) {
+    const rows = await listBookings(ctx);
+    return rows.map((b) => ({ ...b, can: { cancel: canCancel(ctx.scope.actor, b) } }));
+  },
+});
+```
+
+This is how 37signals writes Fizzy. A controller says `before_action :ensure_permission_to_administer_card`, which does `head :forbidden unless Current.user.can_administer_card?(@card)`, and the predicate is a plain method:
+
+```ruby
+def can_administer_card?(card)
+  admin? || card.creator == self
+end
+```
+
+Laravel's policies are the same shape: boolean methods on a user and a record.
+
+### What the CLI checks
+
+| Rule | Catches |
+|---|---|
+| `async-can` | A `can*` predicate that's `async` or returns a Promise. Load first, then ask. |
+| `unused-can` | A `can*` call whose result is thrown away, so nothing is enforced |
+
+`logic-sdk show bookings.cancel` lists the predicates a function calls under `checks:`, next to its policy.
+
+## Nested calls and listeners
+
+- **Nested calls keep the scope**, and each callee's `authorize` runs against it.
+- **Listeners run with the emitter's scope.** A booking confirmed by a guest reaches `tasks.prepareStay` as that guest.
+- So **listeners and jobs run internal functions**, which carry no `authorize` or one that fits the job. Keep exposed functions thin: check, then `run` the internal function that does the work.
+- **Acting as someone else on purpose** is a scope change, and every check after it sees the new one:
+
+```ts
+const system = ctx.with({ actor: { id: "system", role: "admin" } });
+
+await system.run(tasks.create, { bookingId, title: "Prepare the house" });
+```
+
+## Recipes
+
+**A rule that must hold at commit**, not just when you checked, goes into the write itself. Put it in the `WHERE`:
+
+```ts
+const [updated] = await ctx.db
+  .update(bookings)
+  .set({ status: "cancelled" })
+  .where(and(eq(bookings.id, booking.id), eq(bookings.status, "pending")))
+  .returning();
+
+if (!updated) throw ctx.errors.conflict("no_longer_pending");
+```
+
+Or re-select the row `FOR UPDATE`, so concurrent writers wait, then check:
+
+```ts
+const [row] = await ctx.db
+  .select()
+  .from(bookings)
+  .where(and(eq(bookings.accountId, ctx.scope.accountId), eq(bookings.id, bookingId)))
+  .for("update");
+```
+
+**Tenancy is yours.** The library guarantees the scope reaches every function and helper. Filtering by `ctx.scope.accountId`, reads and writes, is your helpers' job.
+
+## How other stacks do it
+
+| Stack | What it does |
+|---|---|
+| Rails (Fizzy) | `before_action` calls `Current.user.can_administer_card?(@card)` and answers `head :forbidden` |
+| Laravel | Policies are boolean methods on (user, record). A failed policy is a 403, signed in or not |
+| Phoenix 1.8 | Scopes: an explicit scope, secure by default, passed by hand to every function. Here it's bound once |
+| Next.js | Recommends a Data Access Layer that checks who's calling. This is that layer, as a library |
+| Convex | Internal functions are callable only from your own code. Same idea as functions without `expose` |

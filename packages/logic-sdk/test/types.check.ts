@@ -5,9 +5,9 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
 type Signed = Scope & { actor: string };
-const { query, mutation, action, event, on, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>()({
-  policies: { anyone: () => true, signed: (s): s is Signed => s.actor !== null },
-});
+const { query, mutation, action, event, on, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
+const anyone = () => true;
+const signed = (s: Scope): s is Signed => s.actor !== null;
 
 const ev = event({ schema: z.object({ id: z.string() }) });
 const getOne = query({
@@ -84,30 +84,38 @@ void check;
 create({ modules: {}, database: memoryDatabase() });
 // @ts-expect-error a database is required when the config declares db
 create({ modules: {}, services: { mail: () => {} } });
-declare const maybe: ((s: Scope) => boolean) | undefined;
+declare const maybe: true | undefined;
 // @ts-expect-error expose must be definitely present or absent, so types and runtime exposure agree
-query({ description: "x", inputSchema: z.object({}), expose: maybe, execute: async () => 1 });
+query({ description: "x", inputSchema: z.object({}), authorize: anyone, outputSchema: z.number(), expose: maybe, execute: async () => 1 });
 
-// policies: names are checked, guards narrow the scope, inline checks see the input
-query({ description: "x", inputSchema: z.object({}), expose: "signed", outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
-mutation({ description: "x", inputSchema: z.object({}), expose: "signed", outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
-query({ description: "x", inputSchema: z.object({}), expose: "anyone", outputSchema: z.void(), execute: async (_, { scope }) => {
+// policies: imported functions; guards narrow the scope
+query({ description: "x", inputSchema: z.object({}), authorize: signed, expose: true, outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
+mutation({ description: "x", inputSchema: z.object({}), authorize: signed, expose: true, outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
+// internal functions may have a policy too, and it narrows
+mutation({ description: "x", inputSchema: z.object({}), authorize: signed, execute: async (_, { scope }) => scope.actor.length });
+query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, outputSchema: z.void(), execute: async (_, { scope }) => {
   // @ts-expect-error a non-guard policy doesn't narrow
   scope.actor.length;
 } });
-query({ description: "x", inputSchema: z.object({ id: z.string() }), expose: (s, input) => s.tenant === input.id, outputSchema: z.number(), execute: async () => 1 });
-// @ts-expect-error unknown policy name
-query({ description: "x", inputSchema: z.object({}), expose: "nope", outputSchema: z.number(), execute: async () => 1 });
+// @ts-expect-error policies are sync
+query({ description: "x", inputSchema: z.object({}), authorize: async (s: Scope) => s.actor !== null, execute: async () => 1 });
+// @ts-expect-error policies read only the scope, not the input
+query({ description: "x", inputSchema: z.object({ id: z.string() }), authorize: (s: Scope, input: { id: string }) => s.tenant === input.id, execute: async () => 1 });
+// @ts-expect-error a policy name is not a policy
+query({ description: "x", inputSchema: z.object({}), authorize: "signed", execute: async () => 1 });
+// @ts-expect-error expose: true needs authorize
+query({ description: "x", inputSchema: z.object({}), expose: true, outputSchema: z.number(), execute: async () => 1 });
 // @ts-expect-error exposed functions must declare outputSchema
-query({ description: "x", inputSchema: z.object({}), expose: "anyone", execute: async () => 1 });
+query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, execute: async () => 1 });
 query({ description: "x", inputSchema: z.object({}), execute: async (_, { scope }) => {
-  // @ts-expect-error internal functions keep the nullable actor
+  // @ts-expect-error internal functions without a policy keep the nullable actor
   scope.actor.length;
 } });
-const exposedQ = query({ description: "x", inputSchema: z.object({}), expose: "anyone", outputSchema: z.number(), execute: async () => 1 });
-// errors live on ctx and return DomainError, so `throw` works everywhere
-query({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.notFound(); } });
-action({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.conflict("taken", { id: 1 }); } });
+const exposedQ = query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, outputSchema: z.number(), execute: async () => 1 });
+// errors live on ctx.errors and return DomainError, so `throw` works everywhere
+query({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.errors.notFound(); } });
+action({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.errors.conflict("taken", { id: 1 }); } });
+on(() => ev, async (_, ctx) => { throw ctx.errors.reject("nope"); });
 type IsExposed<F> = F extends import("../src/index.ts").ExposedFn ? true : false;
 const exposedFlag: IsExposed<typeof exposedQ> = true;
 // @ts-expect-error internal functions are not ExposedFn
@@ -129,7 +137,7 @@ void createTestRegistry(registry).transaction(async (tx) => {
 
 // meta: one shape declared in init, values set per function, typed in wrap
 {
-  const m = init<{ scope: Scope; meta: { tags?: string[]; agent?: boolean } }>()();
+  const m = init<{ scope: Scope; meta: { tags?: string[]; agent?: boolean } }>();
   m.query({ description: "x", inputSchema: z.object({}), meta: { tags: ["a"], agent: false }, execute: async () => 1 });
   // @ts-expect-error meta must match the shape from init
   m.query({ description: "x", inputSchema: z.object({}), meta: { nope: 1 }, execute: async () => 1 });

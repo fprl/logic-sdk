@@ -19,7 +19,7 @@ async execute({ bookingId }, ctx) {
 }
 ```
 
-Input is validated and the policy checked **before** the transaction opens, so bad or denied calls never take a database connection.
+The policy is checked and the input validated **before** the transaction opens, so bad or denied calls never take a database connection.
 
 ## A failure rolls back everything
 
@@ -70,7 +70,7 @@ export const hold = mutation({
     );
 
     const clashes = await overlapping(ctx, input);
-    if (clashes.length) throw ctx.conflict("dates_unavailable");
+    if (clashes.length) throw ctx.errors.conflict("dates_unavailable");
 
     const [hold] = await ctx.db.insert(holds).values(input).returning();
     return hold;
