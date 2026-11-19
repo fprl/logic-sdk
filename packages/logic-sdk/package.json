@@ -34,7 +34,7 @@
   "type": "module",
   "sideEffects": false,
   "bin": {
-    "logic-sdk": "./bin/logic-sdk.js"
+    "logic-sdk": "bin/logic-sdk.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
