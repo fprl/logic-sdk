@@ -28,19 +28,23 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Agents:** `toAITool` and `toAITools` with a required `filter` (`logic-sdk/ai`), and `examples/nextjs`, where a Server Action and an agent call the same `bookings.confirm`.
 - **CLI v0.1** (`@logic-sdk/cli`): `list`, `show`, `graph`, `check`, `--json`, read-only. Stricli for commands, jiti to load the app, oxc to read the source, zero-dependency rendering.
 - **Node 24 and 26** supported by the packages (CI runs both); the repo develops on 26.
-- **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/node` (Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test) and `examples/workers` (Vitest in workerd, Hyperdrive); docs site on Blume; oxlint repo-wide.
+- **Config and run options (0.3.0):** `ctx.config` (declared in `init`, filled at the entry, frozen, overridable per test) and `run(fn, input, { scope, signal })`; the CLI's `env-in-module` rule.
+- **Published:** `logic-sdk` and `@logic-sdk/cli` on npm through trusted publishing from github.com/fprl/logic-sdk.
+- **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js), `examples/node` (Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test) and `examples/workers` (Vitest in workerd, Hyperdrive); docs site on Blume; oxlint repo-wide.
 
 ## Next
 
-**Before the first publish**
-
-1. Claim `logic-sdk` and the `@logic-sdk` scope on npm.
-2. git and GitHub, then `repository`, `homepage` and `bugs` in `package.json`, and CI and changesets publishing switched on (first publish by hand, then npm trusted publishing).
-
-**The CLI** (`@logic-sdk/cli`, loads `src/registry.ts`)
-
-3. CLI v0.2: `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
-4. CLI later: `init`, `add module`, `inspect` (a live tree of calls built on `wrap`).
+1. **Use it in a real app.** What feels clunky there decides what comes next.
+2. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
+3. **Plugins:** first the contract (`plugins: [...]`, composing in order, `call.parent` for nesting, what runs inside vs after the transaction, typed `meta` per plugin, behavior in `createTestRegistry`). Then, as subpath exports, only once a real app asks for them:
+   - `tracing()`: an OpenTelemetry span per function, nested like the calls
+   - `audit()`: who ran which mutation, as whom, with what outcome, denied attempts included
+   - `errors()`: unexpected errors to Sentry or similar, with the call chain; domain errors skipped
+   - `rateLimit()`: by actor, account or function, from `meta` (IP limits stay in HTTP)
+   - `usage()`: calls per account per function, for billing or plan limits
+   - `idempotency()`: a replayed webhook or double click returns the first result
+   - `inspect()`: dev only, a live tree of calls, opened by the CLI
+4. **CLI later:** `init` (logic.ts, registry.ts, lint config, AGENTS.md), `add module`.
 
 ## Later
 
@@ -52,7 +56,9 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.
 - **Opt-in savepoint `run`** for "try, and continue on failure" (e.g. coupons). `nest` already exists in the Drizzle adapter.
 - **A second database adapter** (Kysely or Prisma) before 1.0.
-- **Skills** in the package via TanStack Intent, and `logic-sdk init` (logic.ts, registry.ts, lint config, AGENTS.md).
+- **Skills** in the package via TanStack Intent.
+- **A module registry,** shadcn-style: `logic-sdk add auth` copies a module (tables, functions, tests) into your app, as code you own.
+- **An admin panel** as a package (`@logic-sdk/admin`): a form per function from its JSON Schema, run as a chosen scope, filtered by `meta`. Built on `registry.functions` and run options.
 - **Seeds:** a docs recipe, not a feature. A seed script calls real mutations through `registry.as(scope)`.
 - Turbo if build caching starts to matter, tsdown only if CJS is needed, oxfmt, deploying apps/web.
 

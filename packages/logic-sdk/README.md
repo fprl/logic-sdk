@@ -109,6 +109,7 @@ Read-only, `--json` everywhere, exit codes for CI. The `logic-sdk` command ships
 
 ## Examples
 
+- [`examples/shop`](examples/shop): start here. A shop written once and run on Node, Cloudflare Workers and Next.js.
 - [`examples/node`](examples/node): a bookings app. Six modules, Hono, Postgres, and a race test on real Postgres.
 - [`examples/workers`](examples/workers): a link shortener on Cloudflare Workers, Hyperdrive and `waitUntil`.
 - [`examples/nextjs`](examples/nextjs): a Server Action and an AI agent calling the same `bookings.confirm`.

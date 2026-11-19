@@ -1,9 +1,27 @@
 ---
 title: Examples
-description: A Node server, a Cloudflare Worker, and a Next.js app with an agent.
+description: A shop on three hosts, a bookings app, a link shortener, and an agent.
 ---
 
-Two real projects live in the repository's `examples/` folder. Both are tested and run against real Postgres.
+Real projects live in the repository's `examples/` folder. All are tested and run against real Postgres.
+
+## Shop: one app, three hosts
+
+Start here. `examples/shop` is written once and runs on Node, Cloudflare Workers and Next.js. Two modules: `catalog` (products and stock) and `orders` (place, cancel, ship, your orders).
+
+- **Prices come from the catalog, never from the client.** `orders.place` runs `catalog.reserve` in the same transaction; one item short and the whole order rolls back.
+- **One rule, two uses.** `canCancel` guards `orders.cancel` and becomes `can.cancel` in `orders.mine`, so the UI shows the button only when it would work.
+- **Settings from [config](/docs/concepts/config).** Each host fills them from its own env; modules read `ctx.config`.
+- **Three entries, a few lines each.** Node and Workers share one Hono API; Next.js calls the same functions from Server Actions and gives two of them to an AI assistant as tools.
+
+```bash
+cd examples/shop
+bun run db && bun run db:migrate   # Postgres in Docker on 127.0.0.1:5442
+bun run dev                        # Node, http://localhost:3000
+bun run dev:worker                 # Workers, http://localhost:8787
+bun run dev:next                   # Next.js, http://localhost:3200
+bun run test                       # PGlite in-process: no Docker needed
+```
 
 ## Node: bookings
 
