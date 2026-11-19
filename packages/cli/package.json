@@ -1,6 +1,6 @@
 {
   "name": "@logic-sdk/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The logic-sdk CLI: list, show, graph and check an app. Run it with `npx logic-sdk`.",
   "license": "MIT",
   "repository": {
