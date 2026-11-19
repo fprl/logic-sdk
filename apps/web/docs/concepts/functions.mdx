@@ -37,13 +37,13 @@ The second argument of `execute`:
 |---|---|---|---|
 | `scope` | ✓ | ✓ | ✓ |
 | `db` | read-only | the transaction | |
-| `run(fn, input)` | queries | queries and mutations | anything |
+| `run(fn, input, { scope?, signal? })` | queries | queries and mutations | anything |
 | `emit(event, payload)` | | ✓ | |
 | `services` | | | ✓ |
 | `now()` | ✓ | ✓ | ✓ |
-| `with(patch)` | ✓ | ✓ | ✓ |
 | `errors` (`reject`, `conflict`, `notFound`, `deny`) | ✓ | ✓ | ✓ |
-| `signal` | ✓ | ✓ | actions only |
+| `config` | ✓ | ✓ | ✓ |
+| `signal` | | | ✓ (undefined in listeners) |
 | `event` | | | listeners only |
 
 Time comes from `ctx.now()`, never `new Date()`, so tests can freeze it.

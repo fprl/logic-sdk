@@ -1,4 +1,4 @@
-import { DomainError, isDomainError, type CallerOptions, type ErrorKind, type Registry } from "./index.ts";
+import { DomainError, isDomainError, type ErrorKind, type Registry } from "./index.ts";
 
 /**
  * Throw from `resolveScope` when this mount is session-only and there's no valid session: the client gets 401.
@@ -20,8 +20,6 @@ export const statusOf: Record<ErrorKind, number> = {
 export interface FetchOptions<S extends object> {
   /** Build the scope for this request (session → actor, account, locale...). */
   resolveScope: (request: Request, ...rest: any[]) => S | Promise<S>;
-  /** Per-request caller options, e.g. `(req) => ({ signal: req.signal })`. */
-  callerOptions?: (request: Request, ...rest: any[]) => CallerOptions;
   /** Mount point. Default "/". Functions live at `${basePath}${id}`, e.g. `/api/bookings.confirm`. */
   basePath?: string;
   /** Unexpected (non-domain) errors. Default: console.error. */
@@ -71,8 +69,7 @@ export function toFetchHandler<S extends object>(registry: Registry<S, any>, opt
 
     try {
       const scope = await options.resolveScope(request, ...rest);
-      const caller = registry.as(scope, options.callerOptions?.(request, ...rest));
-      return json({ data: await caller.run(entry.fn, input) });
+      return json({ data: await registry.as(scope).run(entry.fn, input, { signal: request.signal }) });
     } catch (e) {
       if (isDomainError(e)) return json({ error: { kind: e.kind, code: e.code, details: e.details } }, statusOf[e.kind]);
       onError(e);

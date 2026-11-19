@@ -20,6 +20,7 @@ export interface FnInfo {
   runs: Edge[];
   emits: Edge[];
   checks: string[]; // can*(...) record checks in its body or this module's helpers it calls
+  config: string[]; // ctx.config keys it reads ("orders.maxItems"), in its body or this module's helpers it calls
   calledBy: string[];
 }
 export interface ListenerInfo {
@@ -98,10 +99,15 @@ export async function loadProject(root: string): Promise<Project> {
       const e = error as Error;
       const frame = e.stack?.split("\n").find((l) => l.includes(root) && !l.includes("node_modules"));
       const where = frame?.match(/(\/[^():\s]+):(\d+):(\d+)/);
+      // A module reading the platform's env (cloudflare:workers) can't even load outside it: say that, not just the crash
+      // Only when the crash is that import, and a module reads env through it: never blame an unrelated read
+      const env = e.message.includes("cloudflare:workers") ? source.env.find((r) => r.what.includes("cloudflare:workers")) : undefined;
       throw new CliError(
         "app-load-failed",
         `Loading your app failed: ${e.message}${where ? ` (${relative(root, where[1]!)}:${where[2]}:${where[3]})` : ""}`,
-        "Fix that error first. The CLI imports your modules the same way your app does, without connecting to anything.",
+        env
+          ? `${env.at.file}:${env.at.line} reads the environment (${env.what}), which modules don't do. Read the value from ctx.config, filled from your env at the entry: createRegistry({ config }).`
+          : "Fix that error first. The CLI imports your modules the same way your app does, without connecting to anything.",
       );
     }
   };
@@ -134,6 +140,7 @@ export async function loadProject(root: string): Promise<Project> {
       runs: s?.runs ?? [],
       emits: s?.emits ?? [],
       checks: s?.checks ?? [],
+      config: s?.config ?? [],
       calledBy: [],
     };
   });

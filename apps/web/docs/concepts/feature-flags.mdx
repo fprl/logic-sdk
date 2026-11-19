@@ -10,6 +10,7 @@ A flag is just data your code reads. What matters is where it lives, because tha
 | **In scope** | Everything, including policies | The flag is per user or account and cheap to resolve per request |
 | **Behind a service** | Actions and listeners | You already use a flag provider (a network call) |
 | **In your database** | Queries and mutations | The flag changes what your data means, or you want it in the same transaction |
+| **In [config](/docs/concepts/config)** | Every function | The same for everyone, and a deploy is fine to flip it |
 
 ## In scope, resolved at the edge
 

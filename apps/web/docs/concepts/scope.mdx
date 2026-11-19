@@ -19,7 +19,7 @@ export type Scope =
 Make it a union of signed in and signed out, so [policies](/docs/concepts/authorization#policies) can narrow it.
 
 - **Bind it once** per request, job or test with `registry.as(scope)`. Every nested call inherits it.
-- **Change it** with `caller.with(patch)` or `ctx.with(patch)`.
+- **Change it for one call** with run options: `ctx.run(fn, input, { scope: { locale: "es" } })`. It's merged over the current scope, for that call and everything it runs.
 - **Listeners get the scope** of the call that emitted the event, so a confirmation email goes out in the guest's locale.
 - **Keep it JSON.** It travels with events, so it must be serializable. Policies are plain functions in `policies.ts`, like `member(scope)`, not methods.
 - **It's a snapshot.** A listener sees the scope as it was at emit time, flags and roles included. See [Feature flags](/docs/concepts/feature-flags).

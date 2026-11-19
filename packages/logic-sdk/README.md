@@ -80,6 +80,7 @@ await caller.run(bookings.confirm, { bookingId });
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
 - **Internal by default.** Only `expose: true` functions reach HTTP, RPC or AI tools, with a required policy and output contract.
 - **Agents included.** `toAITool` gives an agent your functions, under the same policies and transactions as your API. Opt-in, one function at a time or by `filter`.
+- **Settings in one place.** Declare `config` once, fill it from env at the entry, read `ctx.config` anywhere. The CLI fails the build if a module reads env.
 - **Errors without HTTP.** `ctx.errors.reject`, `conflict`, `notFound`, `deny`; adapters map them to statuses.
 - **Tests without mocks.** Each test is a real transaction on a real database, always rolled back.
 - **No magic.** No decorators, classes, codegen, build step or `AsyncLocalStorage`.

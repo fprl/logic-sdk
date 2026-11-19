@@ -14,19 +14,16 @@ export type Result = { ok: boolean; text: string };
 export async function seed(): Promise<Result> {
   const caller = staffCaller();
   // Seeding acts as other people on purpose: an owner lists the property, a guest requests the stay.
-  const owner = caller.with({ actor: { id: "owner_1", role: "owner" } });
-  const property = await owner.run(properties.create, {
-    name: "Casa Azul",
-    nightlyRate: 120_00,
-    cleaningFee: 60_00,
-    minNights: 2,
-  });
-  const booking = await caller.with({ actor: null }).run(bookings.request, {
-    propertyId: property.id,
-    checkIn: "2026-12-20",
-    checkOut: "2026-12-24",
-    guestEmail: "ana@example.com",
-  });
+  const property = await caller.run(
+    properties.create,
+    { name: "Casa Azul", nightlyRate: 120_00, cleaningFee: 60_00, minNights: 2 },
+    { scope: { actor: { id: "owner_1", role: "owner" } } },
+  );
+  const booking = await caller.run(
+    bookings.request,
+    { propertyId: property.id, checkIn: "2026-12-20", checkOut: "2026-12-24", guestEmail: "ana@example.com" },
+    { scope: { actor: null } },
+  );
   return { ok: true, text: booking.id };
 }
 

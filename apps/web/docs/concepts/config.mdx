@@ -1,0 +1,95 @@
+---
+title: Config
+description: Settings every function reads, filled from your env in one place.
+---
+
+Your app has settings: a base URL, a limit, a currency. Declare their shape once, fill them where your app starts, and read them in any function as `ctx.config`.
+
+```ts
+// src/logic.ts
+type Config = {
+  scope: Scope;
+  db: Tx;
+  config: {
+    app: { url: string };
+    orders: { maxItems: number; currency: "EUR" | "USD" };
+  };
+};
+
+export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+```
+
+```ts
+// src/registry.ts, or wherever your app starts
+export const registry = createRegistry({
+  modules: { orders, catalog },
+  database: drizzleAdapter(db),
+  config: {
+    app: { url: process.env.APP_URL! },
+    orders: { maxItems: Number(process.env.MAX_ITEMS ?? 20), currency: "EUR" },
+  },
+});
+```
+
+```ts
+// src/orders/mutations.ts
+export const place = mutation({
+  ...
+  async execute({ items }, ctx) {
+    if (items.length > ctx.config.orders.maxItems)
+      throw ctx.errors.reject("too_many_items", { max: ctx.config.orders.maxItems });
+    ...
+    return { ...order, link: `${ctx.config.app.url}/orders/${order.id}` };
+  },
+});
+```
+
+- **Everywhere.** Queries, mutations, actions and listeners all read the same `ctx.config`. Policies don't: they read only the scope.
+- **Typed.** Once you declare `config`, `createRegistry` requires it, with that shape.
+- **Read-only.** It's copied and frozen when the registry is created. Changing the object you passed in later changes nothing.
+- **Plain data.** Strings, numbers, booleans, null, arrays and plain objects. Anything else (a function, a `Date`, a `Map`, a class instance) throws at startup with its path: `config.app.launch is Date`.
+- **Not in events.** Envelopes carry the scope, not config. A listener reads its own registry's config when it runs.
+
+## Env stays outside your modules
+
+Read `process.env`, `import.meta.env` or Cloudflare's `env` wherever your app starts: the registry file, routes, scripts, a `env.ts` with t3-env. Inside a module, read `ctx.config`.
+
+That keeps modules testable without touching globals, and the same code runs on Node, Workers and Vercel. `logic-sdk check` enforces it:
+
+```txt
+✗ env-in-module  src/orders/mutations.ts:12:18
+  src/orders/mutations.ts reads the environment (process.env). Modules don't read env, so tests can change settings and the CLI can load them.
+  fix: Read the value from ctx.config: declare it in Config's `config` in logic.ts, and fill it from your env at the entry, createRegistry({ config }). …
+```
+
+It follows the app files a module imports, so a helper in `src/lib/` that reads env is caught too.
+
+## Config, services or scope?
+
+| | Holds | Read by | Example |
+|---|---|---|---|
+| **`config`** | Plain settings, the same for every call | Every function | A base URL, a limit, a currency |
+| **`services`** | Clients that talk to the network | Actions and listeners | A Stripe client, a mailer |
+| **`scope`** | Who and where, per call | Every function and policy | The actor, the account, the locale |
+
+A secret usually belongs inside a service: build `stripe(process.env.STRIPE_KEY)` at the entry and pass the client. Config can hold a secret if you need one as a value, but then every function can read it.
+
+## In tests
+
+Override any part of it per test registry. Sections merge, so you only write what changes:
+
+```ts
+const t = createTestRegistry(registry, {
+  config: { orders: { maxItems: 1 } }, // currency and app.url stay as they were
+});
+```
+
+The original registry isn't touched.
+
+## In the CLI
+
+`logic-sdk show` lists the config keys a function reads, never their values:
+
+```txt
+config      orders.maxItems, app.url
+```
