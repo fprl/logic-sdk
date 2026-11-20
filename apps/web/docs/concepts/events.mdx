@@ -72,4 +72,10 @@ A listener whose mutation emits the event it listens to would loop forever. Deli
 
 ## Durability
 
-The default dispatcher delivers in-process, right after commit. If the process crashes between commit and delivery, the events are lost. The seam for a durable outbox exists: `enqueue(tx, envelopes)` runs inside the transaction, and a worker calls `registry.dispatch(envelope)`, which throws if any listener failed, so the worker can retry.
+The default dispatcher delivers in-process, right after commit. If the process crashes between commit and delivery, the events are lost. Durable dispatchers (an outbox, a queue) are coming; the contract they plug into is already here:
+
+- **One delivery per listener.** Each committed event becomes one `Delivery` per listener (`{ id, listener, envelope }`, where `id` is `<event id>:<listener id>`, the key to dedupe on), so a failing listener retries alone.
+- **`enqueue(tx, deliveries)`** runs inside the transaction; `deliver(deliveries, run)` runs after commit.
+- **A queue consumer calls `registry.deliver(delivery, { attempt })`.** It resolves `"done"`, or `"failed"` when retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema): acknowledge both. It throws when a retry might help (`conflict`, anything unexpected). Every failure is reported to `onError` with the delivery id and attempt.
+- **Payloads and the scope must be plain JSON** when you emit, checked in every dispatcher: a `Date` would work in-process and break only once a queue is in between. Send an ISO string and let the schema turn it into a `Date`.
+- **Listeners get `ctx.event`** (`id`, `name`, `payload`, `occurredAt`, `attempt`), without the stored scope: `ctx.scope` is the one they run as.

@@ -38,7 +38,8 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
 2. **Durable events, then crons.** The plan is in DESIGN.md ("Next: listeners, plugins, durable events, crons").
-   - **First, the blockers:** deliver per (event, listener); one dispatch that lets transports ack or retry; `depth` and `attempt` on `Envelope` (the loop limit is lost on the durable path today); stable listener ids; scope at rest on the dispatcher (snapshot by default, optional `store`/`load`); a failed state you can list and retry, plus a versioning rule for payloads.
+   - **Done: the delivery contract.** One `Delivery` per (event, listener) with a dedupe id; `registry.deliver(delivery, { attempt })` resolves `done`/`failed` or throws to retry; `depth` on the envelope; payload and scope checked as plain JSON at emit; `ctx.event` without the stored scope.
+   - **With the first durable transport:** stable listener ids (`listener({ id })`), scope at rest (`store`/`load` on the dispatcher), a failed state you can list and retry, and a versioning rule for payloads.
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `retries`, `delay`, `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. Transports declare capabilities; an option they can't honour fails at startup, never silently.
    - **Crons:** `cron({ schedule, run, scope })` exported from a module and discovered like listeners. pg-boss schedules on Node; `registry.crons.handle(c.cron)` on Cloudflare; one route on Vercel Schedules.
@@ -75,7 +76,7 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 
 ## Dispatcher contract
 
-- `enqueue(tx, envelopes)` inside the transaction, `deliver` after commit, `registry.dispatch(envelope)` from any worker. Being reworked before durable ships (see Next, item 2).
+- `enqueue(tx, deliveries)` inside the transaction, `deliver(deliveries, run)` after commit, `registry.deliver(delivery, { attempt })` from any consumer: resolves `done` or `failed` (ack both), throws to retry.
 - **Transactional queues** (pg-boss, Graphile Worker): enqueue in the same transaction. **External queues** (Cloudflare Queues, Vercel Queues, Inngest, SQS): after commit (lossy), or an outbox table plus a relay (durable).
 - Tests use the in-memory dispatcher, so they're the same whatever production uses.
 - Every adapter (database and dispatcher) runs a shipped conformance suite.
