@@ -36,15 +36,8 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
   options: TestOptions<Cf> = {},
 ) {
   const { options: registryOptions } = internal(registry);
-  const now =
-    options.now === undefined
-      ? undefined
-      : typeof options.now === "function"
-        ? options.now
-        : (() => {
-            const fixed = new Date(options.now);
-            return () => new Date(fixed);
-          })();
+  const fixed = options.now;
+  const now = typeof fixed === "function" ? fixed : fixed === undefined ? undefined : () => new Date(fixed);
 
   return {
     async transaction<T>(fn: (t: TestTransaction<S, Mods, Cf>) => Promise<T>): Promise<T> {

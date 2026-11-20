@@ -42,13 +42,8 @@ export interface AIToolsOptions extends ErrorOption {
   describe?: (fn: RegisteredFn) => string | undefined;
 }
 
-/** `meta.ai`, read defensively: meta is stored loose, `AIMeta` only types where you write it. */
-const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }): { tool?: unknown; description?: unknown } =>
-  typeof fn.meta?.ai === "object" && fn.meta.ai !== null ? fn.meta.ai : {};
-const metaDescription = (fn: ExposedFn) => {
-  const d = aiMeta(fn).description;
-  return typeof d === "string" ? d : undefined;
-};
+/** `meta.ai` as `AIMeta` types it where you write it (meta is stored loose). */
+const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }) => fn.meta?.ai as AIMeta["ai"];
 
 /** What a function without input looks like to the model: an object with nothing in it. It sends `{}`, which run ignores. */
 const noInput = jsonSchema({ type: "object", properties: {}, additionalProperties: false });
@@ -73,7 +68,7 @@ export function toAITool<F extends ExposedFn>(
   const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
   if (fn.expose !== true) throw new Error("[logic-sdk] toAITool needs a function with expose: true.");
   return tool({
-    description: options.description ?? metaDescription(fn),
+    description: options.description ?? aiMeta(fn)?.description,
     inputSchema: fn.input ?? noInput,
     outputSchema: fn.output,
     async execute(input, { abortSignal }) {
@@ -100,7 +95,7 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
   caller: Caller<S>,
   options: AIToolsOptions = {},
 ): Partial<AIToolsOf<Mods>> {
-  const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn).tool === true);
+  const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn)?.tool === true);
   const tools: Record<string, Tool> = {};
   for (const f of registry.functions)
     if (f.exposed && filter(f))
