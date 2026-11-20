@@ -10,7 +10,7 @@ export interface FnInfo {
   module: string;
   name: string;
   kind: "query" | "mutation" | "action";
-  description: string;
+  description: string | null; // the JSDoc above it, first paragraph
   authorize: string | null; // the policy as written in source ("member"), "inline", or null without authorize
   exposed: boolean; // expose: true, so adapters may publish it
   takesInput: boolean; // false: declared without `input`, so it's called as run(fn)
@@ -130,7 +130,7 @@ export async function loadProject(root: string): Promise<Project> {
       module: f.module,
       name: f.name,
       kind: f.kind,
-      description: f.fn.description,
+      description: s?.doc ?? null,
       // the name as written in source; else the function's own name (`const member = …` names it), else "inline"
       authorize: f.fn.authorize ? (s?.authorize ?? (f.fn.authorize.name || "inline")) : null,
       exposed: f.exposed === true,
@@ -150,7 +150,7 @@ export async function loadProject(root: string): Promise<Project> {
     id: l.id,
     module: l.module,
     event: described.ids.get(l.event) ?? "(unknown)",
-    description: l.listener.description ?? null,
+    description: source.fns.get(l.id)?.doc ?? null,
     at: at(l.id),
     runs: source.fns.get(l.id)?.runs ?? [],
   }));

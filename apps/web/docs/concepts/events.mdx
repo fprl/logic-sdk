@@ -13,9 +13,9 @@ export const confirmed = event({
 ctx.emit(confirmed, { bookingId });
 
 // tasks/listeners.ts
+/** Create the handover task and email the guest */
 export const prepareStay = listener({
   event: () => bookings.confirmed,
-  description: "Create the handover task and email the guest",
   async handler(ctx, payload) {
     await ctx.run(tasks.create, { bookingId: payload.bookingId, title: "Prepare the house" });
     await ctx.services.mailer.send(...);

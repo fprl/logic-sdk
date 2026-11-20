@@ -53,7 +53,6 @@ const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean> {
   readonly [BRAND]: K;
   readonly kind: K;
-  readonly description: string;
   /** What callers pass, validated on every call. Left out: the function takes nothing (`run(fn)`). */
   readonly input?: Schema;
   /** What callers get back, checked before it leaves. */
@@ -83,7 +82,6 @@ export interface EventDef<I = unknown, O = I> {
   readonly kind: "event";
   /** The payload's schema, checked when emitted and again at delivery. */
   readonly payload: Schema;
-  readonly description?: string;
   readonly [types]?: { input: I; payload: O };
 }
 
@@ -104,7 +102,6 @@ export interface Listener<O = unknown> {
   readonly kind: "listener";
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
   readonly event: () => EventDef<unknown, O>;
-  readonly description: string;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }
@@ -194,8 +191,6 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 /** What a function without `input` gets: nothing. */
 type NoInput = StandardSchemaV1<undefined, undefined>;
 type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
-  /** One sentence, shown to humans, adapters and AI tools. */
-  description: string;
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
   input?: IS;
   /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
@@ -392,7 +387,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
   const make =
     <K extends Kind>(kind: K) =>
     (def: any): any => {
-      const where = def?.description ? `"${def.description}"` : `a ${kind}`;
+      const where = `a ${kind}`; // no id yet at definition time: the stack trace points at it
       if (def.authorize !== undefined && typeof def.authorize !== "function")
         throw new Error(`[logic-sdk] authorize on ${where} must be a policy function, like \`authorize: member\`.`);
       if (def.expose !== undefined && def.expose !== true)
@@ -416,25 +411,23 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /** Talks to the outside world (payments, email, AI). No transaction; each mutation it runs commits on its own. */
     action: make("action") as Constructor<C, "action">,
     /** Something that happened. Emitted by mutations, delivered after commit. */
-    event: <S extends Schema>(def: { payload: S; description?: string }): EventDef<In<S>, Out<S>> =>
+    event: <S extends Schema>(def: { payload: S }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
     /**
      * React to an event after commit, like an action. Must be idempotent.
-     * `listener({ event: () => bookings.confirmed, description: "...", async handler(ctx, payload) {…} })`
+     * `listener({ event: () => bookings.confirmed, async handler(ctx, payload) {…} })`
      */
     listener: <O>(def: {
       /** The event it reacts to, as a thunk so modules can import each other's barrels without cycles. */
       event: () => EventDef<unknown, O>;
-      /** One sentence, shown to humans and tools (`logic-sdk show`, `graph`). */
-      description: string;
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
       if (typeof def.event !== "function") throw new Error("[logic-sdk] listener: `event` must be a thunk: `event: () => orders.placed`.");
       if (typeof def.handler !== "function") throw new Error("[logic-sdk] listener: `handler` must be a function.");
-      const { event, description, meta, handler } = def;
+      const { event, meta, handler } = def;
       // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
-      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, description, meta: meta as Listener["meta"], handler });
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, meta: meta as Listener["meta"], handler });
     },
   };
 }

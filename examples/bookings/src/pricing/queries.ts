@@ -5,8 +5,8 @@ import * as properties from "../properties";
 
 const nightsBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / 86_400_000;
 
+/** Price a stay: nights × nightly rate + cleaning fee. Enforces minimum nights. */
 export const priceStay = query({
-  description: "Price a stay: nights × nightly rate + cleaning fee. Enforces minimum nights.",
   input: z.object({ propertyId: z.uuid(), from: z.iso.date(), to: z.iso.date() }),
   authorize: anyone,
   expose: true,

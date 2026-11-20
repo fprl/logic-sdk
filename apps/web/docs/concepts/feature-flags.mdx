@@ -43,8 +43,8 @@ export const betaCheckout = (s: Scope): s is MemberScope =>
 When the flag comes from a provider over the network, it's a service. Services reach actions and listeners only, so read it there and pass the answer down as input:
 
 ```ts
+/** Charge the guest and confirm the booking */
 export const checkout = action({
-  description: "Charge the guest and confirm the booking",
   ...
   async handler(ctx, input) {
     const useNewPricing = await ctx.services.flags.enabled("new-pricing", ctx.scope.accountId);
@@ -62,8 +62,8 @@ The Convex way: a flag is a row, and a query reads it.
 
 ```ts
 // src/flags/queries.ts
+/** Is this flag on for the current account? */
 export const enabled = query({
-  description: "Is this flag on for the current account?",
   input: z.object({ name: z.string() }),
   async handler(ctx, input) {
     const [row] = await ctx.db

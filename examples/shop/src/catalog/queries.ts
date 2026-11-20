@@ -4,8 +4,8 @@ import { query } from "../logic";
 import { anyone } from "../policies";
 import { Product, products } from "./schema";
 
+/** Everything for sale, with prices and stock */
 export const list = query({
-  description: "Everything for sale, with prices and stock",
   authorize: anyone,
   expose: true,
   output: z.array(Product),

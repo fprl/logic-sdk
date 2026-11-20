@@ -30,7 +30,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Node 24 and 26** supported by the packages (CI runs both); the repo develops on 26.
 - **Config and run options (0.3.0):** `ctx.config` (declared in `init`, filled at the entry, frozen, overridable per test) and `run(fn, input, { scope, signal })`; the CLI's `env-in-module` rule.
 - **`input`/`output`/`handler(ctx, input)` (0.4.0):** names from app-logic libraries, ctx first everywhere, optional `input` and `run(fn)`, events declare `payload`.
-- **Unreleased:** `listener({ event: () => placed, description, meta, handler })` replaces `on(...)`; `query`/`mutation`/`action` have one typed signature instead of five overloads (clearer errors, same type-check speed).
+- **Unreleased:** `listener({ event: () => placed, meta, handler })` replaces `on(...)`; `description` is gone (JSDoc for humans, `meta.ai.description` for tools); the agent skill ships in the package; `query`/`mutation`/`action` have one typed signature instead of five overloads (clearer errors, same type-check speed).
 - **Published:** `logic-sdk` and `@logic-sdk/cli` on npm through trusted publishing from github.com/fprl/logic-sdk.
 - **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js; its Worker tested in workerd) and `examples/bookings` (six modules; Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test); docs site on Blume; oxlint repo-wide.
 
@@ -53,7 +53,10 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - `usage()`: calls per account per function, for billing or plan limits
    - `idempotency()`: a replayed webhook or double click returns the first result
    - `inspect()`: dev only, a live tree of calls, opened by the CLI
-5. **CLI later:** `init` (logic.ts, registry.ts, lint config, AGENTS.md), `add module`.
+5. **Ship the agent skill with the package.** Done: `skills/logic-sdk/SKILL.md` is in the tarball and the repo `AGENTS.md` is contributor-only. Next, two channels that stay in step with the installed version:
+   - **TanStack Intent-compatible:** add the `tanstack-intent` keyword and `metadata.library_version` (kept current by the release), so `intent install` and `npx skills experimental_sync` find it. About 560 npm packages carry the keyword, tRPC and trigger.dev among them; Prisma ships `skills/` in its tarball the same way, without it.
+   - **A managed block in the app's AGENTS.md,** written by `logic-sdk init` (or `logic-sdk agents`), Next.js style (`next dev` writes `<!-- BEGIN:nextjs-agent-rules -->`): the rules in short, plus a pointer to `node_modules/logic-sdk/skills/logic-sdk/`. `check` warns when it's stale. Vercel's evals (Jan 2026) scored an always-on AGENTS.md index at 100% against 53 to 79% for skills alone, which were never invoked in 56% of runs, so the rules stay always-on and the skill holds the depth.
+6. **CLI later:** `init` (logic.ts, registry.ts, lint config, the AGENTS.md block), `add module`.
 
 ## Later
 
@@ -85,6 +88,7 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 
 ## Sources
 
+- Agent skills: [TanStack Intent](https://tanstack.com/intent/latest/docs/overview), [vercel-labs/skills](https://github.com/vercel-labs/skills), [Next.js AI agents guide](https://nextjs.org/docs/app/guides/ai-agents), [AGENTS.md outperforms skills](https://vercel.com/blog/agents-md-outperforms-skills-in-our-agent-evals), [Agent Skills spec](https://agentskills.io/specification)
 - Convex: [runtimes](https://docs.convex.dev/functions/runtimes), [OCC](https://docs.convex.dev/database/advanced/occ), [actions](https://docs.convex.dev/functions/actions), [scheduling](https://docs.convex.dev/scheduling/scheduled-functions), [application errors](https://docs.convex.dev/functions/error-handling/application-errors)
 - Frameworks: [Rails transactions](https://api.rubyonrails.org/classes/ActiveRecord/Transactions/ClassMethods.html), [Rails rescue_responses](https://guides.rubyonrails.org/configuring.html), [Laravel transactions](https://laravel.com/docs/database#database-transactions), [Laravel errors](https://laravel.com/docs/errors), [Ecto.Repo](https://ecto.hexdocs.pm/Ecto.Repo.html), [Oban](https://hexdocs.pm/oban/Oban.html), [Postgres isolation](https://www.postgresql.org/docs/current/transaction-iso.html)
 - RPC: [tRPC metadata](https://trpc.io/docs/server/metadata), [oRPC metadata](https://orpc.dev/docs/metadata), [oRPC errors](https://orpc.dev/docs/error-handling), [AI SDK tool()](https://ai-sdk.dev/docs/reference/ai-sdk-core/tool)

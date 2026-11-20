@@ -1,6 +1,6 @@
 # Contributing
 
-Working on logic-sdk itself. (`AGENTS.md` is for apps that use it, so this lives here.)
+Working on logic-sdk itself. Coding agents: see [AGENTS.md](AGENTS.md). How apps use logic-sdk lives in the skill we ship, [`packages/logic-sdk/skills/logic-sdk/SKILL.md`](packages/logic-sdk/skills/logic-sdk/SKILL.md).
 
 ```bash
 bun install

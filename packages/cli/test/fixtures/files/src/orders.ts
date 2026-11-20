@@ -5,14 +5,14 @@ import * as stock from "./stock";
 
 export const placed = event({ payload: z.object({ sku: z.string() }) });
 
+/** How many orders */
 export const count = query({
-  description: "How many orders",
   input: z.object({}),
   handler: async ({ db }) => db.rows.length,
 });
 
+/** Place an order */
 export const place = mutation({
-  description: "Place an order",
   input: z.object({ sku: z.string() }),
   async handler({ run, emit }, { sku }) {
     emit(placed, { sku });
@@ -20,4 +20,5 @@ export const place = mutation({
   },
 });
 
-export const notify = listener({ event: () => placed, description: "Reacts to placed", handler: async () => {} });
+/** Reacts to placed */
+export const notify = listener({ event: () => placed, handler: async () => {} });

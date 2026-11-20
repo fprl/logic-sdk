@@ -3,22 +3,22 @@ title: Meta
 description: Your own typed data about each function, read by wrap and adapters.
 ---
 
-Tags, rate limits, whether an AI agent may call it: anything you want to know about a function from the outside. The shape is declared once, in your config. The values are set per function.
+Tags, rate limits, whether an AI agent may call it: anything you want to know about a function from the outside. The shape is declared once, in your config. The values are set per function. Meta is yours: the library reserves no key in it. Adapters that read meta export their part of the shape, under their own name, for you to add.
 
 ```ts
 // logic.ts
 type Config = {
   scope: Scope;
   db: Tx;
-  meta: { tags?: string[]; agent?: boolean };
+  meta: AIMeta & { tags?: string[] };  // AIMeta from logic-sdk/ai: { ai?: { tool?, description? } }
 };
 ```
 
 ```ts
 // a module
+/** Cancel a booking */
 export const cancel = mutation({
-  description: "Cancel a booking",
-  meta: { tags: ["bookings"], agent: false },
+  meta: { tags: ["bookings"], ai: { tool: true, description: "Use when the guest asks to cancel" } },
   ...
 });
 ```
@@ -36,4 +36,4 @@ createRegistry({
 });
 ```
 
-Adapters read it from `registry.functions`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
+Adapters read it from `registry.functions`, each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.

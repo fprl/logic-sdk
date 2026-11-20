@@ -20,6 +20,14 @@ test("list: every function and listener, with kind and policy", () => {
   expect(rows).toContainEqual(expect.objectContaining({ id: "tasks.prepareStay", kind: "listener", event: "bookings.confirmed" }));
 });
 
+test("descriptions come from the JSDoc above each export: its first paragraph, on one line", () => {
+  const rows: { id: string; description: string | null }[] = cli(app, "list", "--json").json();
+  const of = (id: string) => rows.find((r) => r.id === id)?.description;
+  expect(of("availability.hold")).toEqual("Reserve a date range on a property's calendar"); // not the "Internal…" paragraph below it
+  expect(of("enquiries.winOnBooking")).toEqual("Mark the enquiry won when its booking is confirmed"); // listeners too
+  expect(cli(app, "show", "availability.hold", "--json").json().description).toEqual("Reserve a date range on a property's calendar");
+});
+
 test("list filters by module, kind and exposure", () => {
   const ids = cli(app, "list", "--module", "bookings", "--exposed", "--json").json().map((r: { id: string }) => r.id);
   expect(ids.sort()).toEqual(["bookings.cancel", "bookings.checkout", "bookings.confirm", "bookings.get", "bookings.request"]);

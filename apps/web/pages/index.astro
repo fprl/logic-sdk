@@ -4,8 +4,8 @@ import data from "blume:data";
 
 const { config } = data;
 
-const example = `export const confirm = mutation({
-  description: "Confirm a pending booking",
+const example = `/** Confirm a pending booking */
+export const confirm = mutation({
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: staff,                                  // on every call, nested ones too

@@ -59,7 +59,7 @@ const list = buildCommand({
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind) && (!flags.exposed || r.exposed),
     );
     if (flags.json) return print(this, rows);
-    out(this, table(["NAME", "KIND", "ACCESS", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" ? dim("-") : access(r), r.description])));
+    out(this, table(["NAME", "KIND", "ACCESS", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" ? dim("-") : access(r), r.description ?? ""])));
     out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length} · logic-sdk show <name> for details`));
   }),
 });
@@ -86,7 +86,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
 
     if (fn) {
       lines.push(`${bold(fn.id)}  ${kind(fn.kind)} ${dim("·")} ${fn.exposed ? paint("green", "exposed") : dim("internal")}`);
-      lines.push(fn.description, dim(where(fn.at)), "");
+      lines.push(...(fn.description ? [fn.description] : []), dim(where(fn.at)), "");
       row("policy", fn.authorize ?? dim("none (no authorize)"));
       row("exposed", fn.exposed ? "yes (adapters may publish it)" : dim("no"));
       row("input", fn.takesInput ? shape(fn.input) : dim("none"));

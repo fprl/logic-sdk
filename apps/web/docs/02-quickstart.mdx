@@ -74,8 +74,8 @@ src/bookings/
 
 ```ts
 // src/bookings/mutations.ts
+/** Cancel a booking and free its dates */
 export const cancel = mutation({
-  description: "Cancel a booking and free its dates",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   // Who may call it, on every call

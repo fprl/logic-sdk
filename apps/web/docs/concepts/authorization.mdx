@@ -38,8 +38,8 @@ Make `Scope` a union of signed in and signed out: then a simple check like `memb
 ## `authorize`: who may call the function
 
 ```ts
+/** Block dates on a property's calendar */
 export const block = mutation({
-  description: "Block dates on a property's calendar",
   input: BlockInput,
   authorize: member,
 
@@ -61,8 +61,8 @@ export const block = mutation({
 `authorize` says who may call. `expose: true` says adapters ([HTTP](/docs/adapters/fetch), [oRPC](/docs/adapters/orpc), [AI tools](/docs/adapters/ai)) may publish it:
 
 ```ts
+/** Cancel a booking and free its dates */
 export const cancel = mutation({
-  description: "Cancel a booking and free its dates",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: member,
@@ -100,8 +100,8 @@ async handler(ctx, input) {
 The same predicate feeds your UI, so the button and the rule never disagree:
 
 ```ts
+/** List the account's bookings */
 export const list = query({
-  description: "List the account's bookings",
   output: z.array(Booking.extend({ can: z.object({ cancel: z.boolean() }) })),
   authorize: member,
   expose: true,

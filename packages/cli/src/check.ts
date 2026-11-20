@@ -1,4 +1,4 @@
-// The rules from AGENTS.md, checked against the project. Each problem says where and how to fix it.
+// The rules from the logic-sdk skill (skills/logic-sdk/SKILL.md), checked against the project. Each problem says where and how to fix it.
 import { relative } from "node:path";
 import type { Loc } from "./analyze.ts";
 import type { Project } from "./project.ts";

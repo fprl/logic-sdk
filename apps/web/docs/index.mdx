@@ -6,8 +6,8 @@ description: Business logic for TypeScript apps, as queries, mutations, actions 
 Logic SDK is for the layer between your routes and your database: the business logic. You write it once, as plain declarations, and call it from anywhere: an HTTP route, a Server Action, a queue worker, a script, a test or an AI agent.
 
 ```ts
+/** Confirm a pending booking */
 export const confirm = mutation({
-  description: "Confirm a pending booking",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: staff,

@@ -7,8 +7,8 @@ import { canCancel, confirmBooking, findBooking, setStatus } from "./data";
 import { cancelled, confirmed } from "./events";
 import { Booking, bookings } from "./schema";
 
+/** Request a booking. Prices it and checks the dates are free; nothing is held yet. */
 export const request = mutation({
-  description: "Request a booking. Prices it and checks the dates are free; nothing is held yet.",
   input: z.object({
     propertyId: z.uuid(),
     checkIn: z.iso.date(),
@@ -33,8 +33,8 @@ export const request = mutation({
   },
 });
 
+/** Confirm a pending booking: holds its dates and tells the other modules */
 export const confirm = mutation({
-  description: "Confirm a pending booking: holds its dates and tells the other modules",
   input: z.object({ bookingId: z.uuid() }),
   authorize: staff,
   expose: true,
@@ -47,11 +47,12 @@ export const confirm = mutation({
 });
 
 /**
+ * Confirm a booking the guest has just paid for
+ *
  * Internal (no authorize, no expose): `checkout` runs it once the guest has paid. Not reachable from
  * any adapter, so the gate is the action that runs it.
  */
 export const confirmPaid = mutation({
-  description: "Confirm a booking the guest has just paid for",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   async handler(ctx, input) {
@@ -61,8 +62,8 @@ export const confirmPaid = mutation({
   },
 });
 
+/** Cancel a booking and free its dates */
 export const cancel = mutation({
-  description: "Cancel a booking and free its dates",
   input: z.object({ bookingId: z.uuid() }),
   authorize: staff,
   expose: true,

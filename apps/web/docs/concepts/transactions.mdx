@@ -58,8 +58,8 @@ createRegistry({
 When a rule depends on rows that don't exist yet, like "no two bookings overlap", two transactions can both pass the check. Lock first, then check:
 
 ```ts
+/** Reserve a date range on a property's calendar */
 export const hold = mutation({
-  description: "Reserve a date range on a property's calendar",
   input: HoldInput,
 
   async handler(ctx, input) {

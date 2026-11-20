@@ -2,9 +2,9 @@ import { listener } from "../logic";
 import * as bookings from "../bookings";
 import { create } from "./mutations";
 
+/** Create the key-handover task and email the guest in their language */
 export const prepareStay = listener({
   event: () => bookings.confirmed,
-  description: "Create the key-handover task and email the guest in their language",
   async handler(ctx, payload) {
     const { bookingId, guestEmail } = payload;
     await ctx.run(create, { title: "Prepare keys", bookingId });

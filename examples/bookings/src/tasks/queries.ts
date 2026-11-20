@@ -4,8 +4,8 @@ import { query } from "../logic";
 import { agent } from "../policies";
 import { Task, tasks } from "./schema";
 
+/** Open tasks for the account */
 export const list = query({
-  description: "Open tasks for the account",
   input: z.object({}).optional(),
   authorize: agent,
   expose: true,

@@ -30,8 +30,8 @@ Write a module:
 
 ```ts
 // src/bookings/mutations.ts
+/** Confirm a pending booking */
 export const confirm = mutation({
-  description: "Confirm a pending booking",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   // Who may call it, on every call
@@ -114,7 +114,7 @@ Read-only, `--json` everywhere, exit codes for CI. The `logic-sdk` command ships
 
 ## Docs
 
-The docs site lives in [`apps/web`](apps/web) (`bun run --filter web dev`). Start with the [introduction](apps/web/docs/index.mdx) and the [quickstart](apps/web/docs/02-quickstart.mdx). [`AGENTS.md`](AGENTS.md) is the short version for coding agents.
+The docs site lives in [`apps/web`](apps/web) (`bun run --filter web dev`). Start with the [introduction](apps/web/docs/index.mdx) and the [quickstart](apps/web/docs/02-quickstart.mdx). The agent skill, [`skills/logic-sdk/SKILL.md`](packages/logic-sdk/skills/logic-sdk/SKILL.md), ships in the package: the short version for coding agents.
 
 ## Repository
 

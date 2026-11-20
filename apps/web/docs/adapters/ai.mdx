@@ -20,7 +20,7 @@ const result = await generateText({
 });
 ```
 
-`toAITool(caller, fn)` turns one exposed function into an [AI SDK](https://ai-sdk.dev) tool. You name it, like any tool you'd write with the AI SDK's own `tool()`. The description, input schema and output schema are the ones you already wrote, and the tool is typed.
+`toAITool(caller, fn)` turns one exposed function into an [AI SDK](https://ai-sdk.dev) tool. You name it, like any tool you'd write with the AI SDK's own `tool()`. The input and output schemas are the ones you already wrote, and the tool is typed. Its description comes from `meta: { ai: { description } }`, or `toAITool(caller, fn, { description })` for one call. It's optional, but models pick tools better with one.
 
 ## Same rules as everyone else
 
@@ -35,18 +35,27 @@ There's no separate "AI backend" to keep in sync with your API.
 
 ## Many tools at once
 
-`toAITools` turns the exposed functions you pick into tools named `module_function`: `bookings_confirm`, `pricing_priceStay`. `filter` is required:
+`toAITools` turns exposed functions into tools named `module_function`: `bookings_confirm`, `pricing_priceStay`. By default it takes the ones marked `meta: { ai: { tool: true } }`:
 
 ```ts
-import { toAITools } from "logic-sdk/ai";
+import { toAITools, type AIMeta } from "logic-sdk/ai";
 
-// with meta: { agent?: boolean } in your config
-const tools = toAITools(registry, caller, {
-  filter: (f) => f.fn.meta?.agent === true,
+// logic.ts: init<{ ...; meta: AIMeta & AppMeta }>()
+export const confirm = mutation({ meta: { ai: { tool: true, description: "Use when staff confirm a booking" } }, ... });
+
+const tools = toAITools(registry, caller);
+```
+
+The agent door is opt-in. A function you exposed for your UI doesn't become a tool by accident: something has to mark it. To pick by your own rules, pass `filter`; to take descriptions from your own meta, pass `describe`. Both get the registered function, including its [meta](/docs/concepts/meta):
+
+```ts
+toAITools(registry, caller, {
+  filter: (f) => f.fn.meta?.tags?.includes("agent") ?? false,
+  describe: (f) => f.fn.meta?.summary,
 });
 ```
 
-The agent door is opt-in. A function you exposed for your UI doesn't become a tool by accident: something has to pick it. `filter` gets the registered function, including its [meta](/docs/concepts/meta).
+A description resolves in this order: the call's option (`describe`, or `description` on `toAITool`), then `meta.ai.description`, else none.
 
 To tell agent calls apart in your audit log or policies, put it in the scope: `registry.as({ ...scope, via: "agent" })`.
 

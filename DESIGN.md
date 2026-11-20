@@ -125,19 +125,28 @@ Settled on 2026-11-20 after reading Rails, Fizzy, Laravel, Phoenix, Oban and the
 ### `listener({...})` replaces `on(...)`
 
 ```ts
+/** Email the receipt */
 export const sendReceipt = listener({
   event: () => placed,
-  description: "Email the receipt",
   async handler(ctx, payload) { ... },
 });
 ```
 
 - **Options came after the handler** (`on(ev, handler, { description })`), and durable delivery brings more of them (retries, key, delay). Every other definer takes one object; listeners now do too.
-- **Listeners were invisible to plugins.** `wrap` got no `meta` for them, so tracing, audit or rate limits couldn't see them. With an object they take `description` and `meta` like functions.
+- **Listeners were invisible to plugins.** `wrap` got no `meta` for them, so tracing, audit or rate limits couldn't see them. With an object they take `meta` like functions.
 - **Nouns, like the other definers:** `query`, `mutation`, `action`, `event`, `listener`, in a file called `listeners.ts`. The field is `event`, matching the `event()` it points at. Fable preferred keeping the name `on`; we chose consistency.
 - **The CLI reads object keys,** which is simpler and sturdier than positional arguments.
 - **The thunk stays.** Listeners run at module evaluation and module barrels import each other; accepting both `placed` and `() => placed` would be two ways to do one thing. What would change it: a typed string id (`event: "orders.placed"`) checked against the registry type, which costs the one-way type flow.
 - **Options are flat,** like `authorize` and `expose`, not under `config: {}` (which already means `ctx.config`). They arrive with durable delivery (below).
+
+### No `description` field: JSDoc for people, adapter meta for tools
+
+- **Nobody has one in the definition.** Convex `query`, tRPC, TanStack Start `createServerFn` and Inngest `createFunction` don't; the AI SDK's `tool()` description is optional; trpc-to-openapi reads `meta.openapi.description` and oRPC `.meta(openapi({ description }))`. Text for a tool lives in that tool's namespace of meta.
+- **People get JSDoc.** One sentence above each export shows on hover wherever the function is used, which a field never did, and the CLI reads it statically (oxc returns comments with positions; about 10 lines), first paragraph only.
+- **Adapters own a namespace in your meta and export its type.** `logic-sdk/ai` exports `AIMeta = { ai?: { tool?, description? } }`; you add it to your shape (`meta: AIMeta & AppMeta`). Meta stays yours: the library reserves no key, so nothing collides with your own `description`.
+- **Options last override meta,** for every adapter: `toAITool(caller, fn, { description })`, or `describe: (f) => …` on `toAITools` (the bulk form), then `meta.ai.description`, else none. `toAITools` defaults `filter` to `meta.ai.tool === true`, so the agent door stays opt-in without a key of your own.
+- **Costs, accepted:** nothing flags a tool without a description (models pick worse; a `check` rule could warn later), and definition-time errors name "a mutation", not its sentence (the stack trace locates it).
+- **What would change it:** several library-owned descriptive keys arriving (`title`, `tags`, `deprecated`), where a typed base would scale better than namespaces.
 
 ### No per-function middleware
 
@@ -209,8 +218,8 @@ createRegistry({ modules, events: pgBoss(boss) });                       // tran
 
 ```ts
 // orders/crons.ts
+/** Expire carts nobody touched for a day */
 export const expireCarts = cron({
-  description: "Expire carts nobody touched for a day",
   schedule: "*/15 * * * *",
   run: expireStale,          // a function, run with its policy, validation and tracing
   scope: system,             // required: a cron has no caller, so it says who it runs as

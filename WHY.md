@@ -12,7 +12,7 @@ Rails' superpower was that anyone could open any app and know where things go. T
 - ✅ **One folder shape for every module:** `queries.ts`, `mutations.ts`, `actions.ts`, `events.ts`, `listeners.ts`, `data.ts`, `schema.ts`. Where code goes follows from what it touches, not from taste.
 - ✅ **Registration is automatic.** Export a listener and it's live. Add a module with one line in `createRegistry`. There's no route table, job list or listener array to keep in sync.
 - ✅ **Explicit instead of callbacks.** A `mutation` shows everything it does in its body (`run`, `emit`). There are no `after_save` hooks firing from somewhere else.
-- 🛠 `logic-sdk init` scaffolds `logic.ts`, `registry.ts`, the lint config and AGENTS.md.
+- 🛠 `logic-sdk init` scaffolds `logic.ts`, `registry.ts`, the lint config and a managed block in your AGENTS.md that points agents at the skill.
 
 *Instead you'd:* hold a team discussion per project about "services vs use-cases vs actions", and get a different answer each time.
 
@@ -75,7 +75,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 ## 9. Built for AI-written code
 
-- ✅ **Uniform shape, a one-sentence `description` on every function, AGENTS.md.** An agent can't invent a new architecture per feature.
+- ✅ **Uniform shape, a one-sentence JSDoc on every function, an agent skill.** An agent can't invent a new architecture per feature.
 - ✅ **The lint rule blocks cross-module imports.**
 - 🛠 Skills shipped in the package (TanStack Intent), and `logic-sdk check`, which fails on cycles and on side effects in mutations. The agent writes the code; the lib verifies it followed the rules.
 

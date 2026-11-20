@@ -8,8 +8,8 @@ import { canHold, canShip } from "./rules";
 export { reserved } from "../stock/data"; // ✗ re-export of stock's files
 export const loadStock = () => import("../stock/data"); // ✗ dynamic import of stock's files
 
+/** Place an order */
 export const place = mutation({
-  description: "Place an order",
   input: z.object({ sku: z.string() }),
   async handler(ctx, { sku }) {
     const byName: Record<string, typeof stock.reserve> = { reserve: stock.reserve };

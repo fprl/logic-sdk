@@ -26,6 +26,7 @@ export interface SourceFn {
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), directly or through this module's helpers
   fetches: Loc[]; // fetch(...) calls
   dates: Loc[]; // new Date() / Date.now()
+  doc?: string; // the first paragraph of the JSDoc block above the export, shown by list and show
 }
 export interface SourceImport {
   from: string | null; // module that imports, or null for a file outside every module (a route, a page)
@@ -140,7 +141,15 @@ export function analyze(root: string, registryFile: string): Source {
       if (line === -1) line = lineStarts.length;
       return { file: relative(root, file), line, column: offset - lineStarts[line - 1]! + 1 };
     };
-    return { file, program: result.program as unknown as Node, loc };
+    /** The `/** … *\/` block right above `start` (only whitespace between), first paragraph, on one line. */
+    const docAt = (start: number) => {
+      const c = result.comments.findLast((c) => c.end <= start);
+      if (!c || c.type !== "Block" || !c.value.startsWith("*") || text.slice(c.end, start).trim()) return undefined;
+      const lines = c.value.slice(1).split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trim());
+      const end = lines.findIndex((l, i) => i > 0 && l === "" && lines.slice(0, i).some(Boolean));
+      return lines.slice(0, end === -1 ? undefined : end).filter(Boolean).join(" ") || undefined;
+    };
+    return { file, program: result.program as unknown as Node, loc, docAt };
   };
 
   // registry.ts: `import * as bookings from "./bookings"` + `modules: { bookings, ... }`
@@ -419,7 +428,7 @@ export function analyze(root: string, registryFile: string): Source {
     };
 
     for (const file of files) {
-      const { program, loc } = file;
+      const { program, loc, docAt } = file;
 
       // Record checks must be sync and their result used
       walk(program, (n) => {
@@ -442,7 +451,7 @@ export function analyze(root: string, registryFile: string): Source {
         const decl = s.type === "ExportNamedDeclaration" ? s.declaration?.declarations?.[0] : undefined;
         const call = unwrap(decl?.init);
         if (call?.type !== "CallExpression" || decl.id?.type !== "Identifier") continue;
-        const fn: SourceFn = { id: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], fetches: [], dates: [] };
+        const fn: SourceFn = { id: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], fetches: [], dates: [], doc: docAt(s.start) };
 
         const def = call.arguments[0];
         const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];

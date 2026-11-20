@@ -1,9 +1,9 @@
 import { listener } from "../logic";
 import { placed } from "./events";
 
+/** Email a receipt once the order is committed, never for one that rolled back */
 export const sendReceipt = listener({
   event: () => placed,
-  description: "Email a receipt once the order is committed, never for one that rolled back",
   async handler(ctx, payload) {
     const { orderId, customerId, total } = payload;
     await ctx.services.mailer.send({
