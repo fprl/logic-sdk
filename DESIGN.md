@@ -252,18 +252,21 @@ From Fable's review, each with what the mature stacks already learned:
 1. **Deliver per (event, listener), not per event.** Today one failing listener makes the healthy ones re-run on retry. Rails, Laravel and Oban all make the job the unit; a listener is our job.
 2. **Let transports acknowledge.** `deliver` gets a `dispatch` that never throws, so a queue adapter can't ack or retry a message, while `registry.dispatch` throws: two paths with different rules. One dispatch that returns per-listener results, with `inProcess` doing the swallowing.
 3. **Stable listener ids.** Ids are export names; with durable delivery they become queue or consumer names, and a rename orphans messages in flight. Inngest's function id "should not change between deploys". An optional `id`, or a CLI check on renames.
-4. **Scope at rest goes stale.** Today the envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Every mature stack stores ids and rebuilds fresh (RESEARCH.md, "Scope at rest"): Fizzy carries only the account and reloads it; Laravel re-fetches models and re-checks authorization in the job. The shape this suggests, given once at the entry:
+4. **Scope at rest goes stale.** The envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Precedents split (RESEARCH.md, "Scope at rest"): Convex carries nothing, Laravel's Context carries a snapshot of what you put in it, Fizzy carries only the account and reloads it. Least machinery that's still safe, configured on the dispatcher because only durable ones store scope (`inProcess()` delivers milliseconds later in the same request):
 
    ```ts
-   createRegistry({
-     events: outbox(),
+   events: outbox({
      scope: {
-       store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId, locale: s.locale }), // ids only, into the envelope
-       load: async (stored) => scopeFor(stored),                                             // fresh at delivery
+       store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId, locale: s.locale }), // optional: what's saved
+       load: async (stored) => scopeFor(stored),                                             // optional: rebuilt fresh at delivery
      },
-   });
+   })
    ```
 
-   Policies already run on every `ctx.run`, so a reloaded scope re-checks permissions with no extra code. `inProcess()` can keep the copy (it delivers right after commit); a durable dispatcher without `load` fails at startup. A user or account that's gone at delivery is a discard, not a retry, like Rails' `discard_on DeserializationError` and Laravel's `DeleteWhenMissingModels`.
+   - **Default: the scope as-is,** what `emit` already stores. Checked to be plain JSON at emit in every dispatcher, `inProcess()` and tests included, so a `Date` or class instance fails in tests, not in production.
+   - **`store` is a projection:** keep ids, drop what shouldn't sit in an outbox table or a third-party queue (emails, session data).
+   - **`load` rebuilds fresh,** so every `ctx.run` re-checks policies with today's roles. `null` discards (recorded, reported to `onError`), a throw retries, like Rails' `discard_on` and Laravel's `DeleteWhenMissingModels`, which are opt-in too.
+   - **`logic-sdk check` prints it** next to the delivery guarantee: "scope at rest: snapshot" or "rebuilt".
+   - Crons resolve their scope in code and store nothing. What would make `load` required for at-least-once dispatchers: an app where revoking access must stop queued work (B2B offboarding with retries over days).
 5. **Old payloads after a deploy.** Payloads are validated again at delivery, so a schema change can turn queued messages into poison that retries forever. Laravel stores exhausted jobs in `failed_jobs` (`queue:retry` re-runs them) and can discard jobs whose model is gone; Oban marks jobs `discarded` after `max_attempts`; Solid Queue doesn't auto-retry a job whose process died. We need the same: a failed state you can list and retry, and a versioning rule for payloads.
 6. **A real event depth on the durable path.** `Envelope` needs `depth` and `attempt`; today `registry.dispatch` starts every stored envelope at depth 1, which loses the loop limit across hops. (Listener `meta` in `wrap` landed with `listener({...})`.)
