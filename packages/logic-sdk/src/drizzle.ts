@@ -1,4 +1,6 @@
-import type { DatabaseAdapter } from "./index.ts";
+import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
+import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, RunDelivery } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -36,4 +38,137 @@ const RETRYABLE = new Set(["40001", "40P01"]);
 export function sqlState(error: unknown): string | undefined {
   for (let e: any = error, i = 0; e && i < 5; e = e.cause, i++) if (typeof e.code === "string") return e.code;
   return undefined;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Outbox: events written in the mutation's transaction, delivered after commit, retried until done
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The outbox table (Postgres). Re-export it from your schema so drizzle-kit adds it to your migrations:
+ * `export { outboxTable } from "logic-sdk/drizzle";`. One row per pending delivery; done rows are deleted,
+ * failed ones stay so you can query them and `retry` them.
+ */
+export const outboxTable = pgTable(
+  "logic_outbox",
+  {
+    /** The delivery id, `<event id>:<listener id>`. */
+    id: text("id").primaryKey(),
+    delivery: jsonb("delivery").$type<Delivery>().notNull(),
+    /** `failed`: out of attempts, or a rule said no. Retrying is your call (`events.retry(id)`). */
+    status: text("status").$type<"pending" | "failed">().notNull().default("pending"),
+    /** Incremented when a runner claims it, so a crash still uses an attempt. */
+    attempts: integer("attempts").notNull().default(0),
+    /** Due from then on. While claimed: when the lease ends and a sweep may take it over. */
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("logic_outbox_due").on(t.availableAt).where(sql`${t.status} = 'pending'`)],
+);
+
+export interface OutboxOptions {
+  /** Seconds a runner owns a delivery before a sweep may take it over. Longer than your slowest listener. Default 300. */
+  lease?: number;
+  /** Tries before a delivery is marked failed. Default 10: about 3.5 hours of backoff in all. */
+  maxAttempts?: number;
+  /** Seconds to wait after a failed try. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
+  backoff?: (attempt: number) => number;
+}
+
+export interface SweepResult {
+  done: number;
+  failed: number;
+  retrying: number;
+}
+
+/** The outbox dispatcher, plus what you run yourself: `sweep` from a cron or an interval, `retry` for a failed row. */
+export interface Outbox extends Dispatcher {
+  /**
+   * Run what's due: retries whose backoff is over, and deliveries whose runner crashed (lease expired).
+   * Claims one at a time, so every claim gets a full lease.
+   */
+  sweep(registry: { deliver: RunDelivery }, options?: { limit?: number }): Promise<SweepResult>;
+  /** Put a failed delivery back in line, with a fresh set of attempts. */
+  retry(id: string): Promise<void>;
+}
+
+/** Anything Drizzle that can run these queries: your database, or the mutation's transaction. */
+type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "delete" | "select">;
+
+/**
+ * A durable dispatcher: deliveries are rows written in the mutation's transaction, so a committed event is never lost.
+ * After commit the request runs them (through `waitUntil` on serverless); `sweep` picks up what a crash or a failure
+ * left behind. At least once: a crash between a listener finishing and its row being deleted runs it again.
+ *
+ * ```ts
+ * const events = outbox(db);
+ * const registry = createRegistry({ modules, database: drizzleAdapter(db), events });
+ * setInterval(() => events.sweep(registry), 60_000); // or a cron
+ * ```
+ */
+export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
+  const lease = options.lease ?? 300;
+  const maxAttempts = options.maxAttempts ?? 10;
+  const backoff = options.backoff ?? ((attempt: number) => Math.exp(Math.min(attempt, 10)));
+  const t = outboxTable;
+  const inSeconds = (seconds: number) => sql`now() + make_interval(secs => ${seconds})`;
+  /** Writes only land if no one has claimed the row since: a slow listener can't undo a newer runner's work. */
+  const mine = (id: string, attempt: number) => and(eq(t.id, id), eq(t.attempts, attempt));
+
+  /** Run one claimed delivery and record how it went. */
+  async function settle(delivery: Delivery, attempt: number, run: RunDelivery): Promise<keyof SweepResult> {
+    let outcome: DeliveryOutcome;
+    try {
+      outcome = await run(delivery, { attempt });
+    } catch (e) {
+      const lastError = e instanceof Error ? e.message : String(e);
+      if (attempt >= maxAttempts) {
+        await db.update(t).set({ status: "failed", lastError }).where(mine(delivery.id, attempt));
+        return "failed";
+      }
+      await db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError }).where(mine(delivery.id, attempt));
+      return "retrying";
+    }
+    if (outcome === "done") {
+      await db.delete(t).where(mine(delivery.id, attempt));
+      return "done";
+    }
+    await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine(delivery.id, attempt));
+    return "failed";
+  }
+
+  return {
+    /** Inside the mutation's transaction: one row per delivery, already claimed by this request for its first try. */
+    async enqueue(tx: unknown, deliveries: Delivery[]) {
+      await (tx as PgClient).insert(t).values(deliveries.map((d) => ({ id: d.id, delivery: d, attempts: 1, availableAt: inSeconds(lease) })));
+    },
+    /** After commit, in this request: the first try of each. */
+    async deliver(deliveries: Delivery[], run: RunDelivery) {
+      for (const d of deliveries) await settle(d, 1, run);
+    },
+    async sweep(registry, { limit = 100 } = {}) {
+      const result: SweepResult = { done: 0, failed: 0, retrying: 0 };
+      for (let i = 0; i < limit; i++) {
+        const due = db
+          .select({ id: t.id })
+          .from(t)
+          .where(and(eq(t.status, "pending"), lte(t.availableAt, sql`now()`)))
+          .orderBy(t.availableAt)
+          .limit(1)
+          .for("update", { skipLocked: true });
+        const [row] = await db
+          .update(t)
+          .set({ attempts: sql`${t.attempts} + 1`, availableAt: inSeconds(lease) })
+          .where(inArray(t.id, due))
+          .returning({ delivery: t.delivery, attempts: t.attempts });
+        if (!row) break;
+        result[await settle(row.delivery, row.attempts, registry.deliver)]++;
+      }
+      return result;
+    },
+    async retry(id) {
+      await db.update(t).set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null }).where(eq(t.id, id));
+    },
+  };
 }

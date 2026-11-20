@@ -264,6 +264,17 @@ Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retent
 - **`ctx.event` carries no scope.** Once a durable dispatcher stores ids instead of the scope, listeners would otherwise see two scopes; `ctx.scope` is the one they run as.
 - **`depth` rides on the envelope,** so the loop limit (`maxEventDepth`) holds across queue hops; it's checked when deliveries are built, inside the transaction, before anything is enqueued.
 
+### The outbox (step 2)
+
+- **Lease, not a held lock.** A runner claims a row by pushing `available_at` forward (`lease`, default 300 s) and bumping `attempts`; listeners run outside any transaction, so nothing pins a connection across network calls. pg-boss does the same (an active state with `expireInSeconds`, default 15 minutes).
+- **Rows are born leased.** `enqueue` writes `attempts = 1` and a lease, so the emitting request owns the first try: no claim query on the hot path, and no race with a sweep. A crash costs one lease of delay.
+- **Completion writes are fenced** on `attempts`, so a listener that outlives its lease can't delete or reschedule a row a newer runner claimed.
+- **The sweep claims one row at a time** (`FOR UPDATE SKIP LOCKED` in the claim's subquery), so every claim gets a full lease.
+- **Done rows are deleted;** it's a queue, not a log. pg-boss (7 days) and Solid Queue (1 day) keep finished jobs for dashboards, which then need a pruner. Failed rows stay: `failed` means "a human might retry this".
+- **Backoff and attempts:** Graphile Worker's curve, `exp(min(attempt, 10))` seconds, with 10 attempts (about 3.5 hours of backoff in all) by default. Oban defaults to 20 attempts, Graphile to 25, pg-boss to 2 with no backoff.
+- **The database clock,** `now()`, for leases and backoff: one clock across instances, and `ctx.now()` is frozen in tests.
+- **No listing API.** The table is yours (you re-export it into your schema), so you query it with Drizzle.
+
 ### Before durable events ship
 
 From Fable's review, each with what the mature stacks already learned. **Landed with the delivery contract:** 1, 2 and 6, plus the stale-payload half of 5 (a payload that fails its schema at delivery is `failed`, not retried) and the plain-JSON check from 4. **With the first durable transport:** 3, `store`/`load` from 4, and the failed state from 5.

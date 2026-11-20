@@ -85,11 +85,15 @@
   },
   "peerDependencies": {
     "@orpc/server": ">=2.0.0-beta.51 <3",
+    "drizzle-orm": ">=1.0.0-rc.5 <2",
     "ai": ">=7 <8",
     "@logic-sdk/cli": ">=0.4.0 <0.5.0"
   },
   "peerDependenciesMeta": {
     "@orpc/server": {
+      "optional": true
+    },
+    "drizzle-orm": {
       "optional": true
     },
     "ai": {
@@ -100,6 +104,7 @@
     }
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "@orpc/server": "2.0.0-beta.51",
     "@types/bun": "^1.4.4",
     "ai": "^7.0.177",
