@@ -6,7 +6,7 @@ description: Emitted inside a mutation, delivered to listeners only after commit
 ```ts
 // bookings/events.ts
 export const confirmed = event({
-  schema: z.object({ bookingId: z.uuid() }),
+  payload: z.object({ bookingId: z.uuid() }),
 });
 
 // bookings/mutations.ts, inside a mutation
@@ -15,8 +15,8 @@ ctx.emit(confirmed, { bookingId });
 // tasks/listeners.ts
 export const prepareStay = on(
   () => bookings.confirmed,
-  async ({ bookingId }, ctx) => {
-    await ctx.run(tasks.create, { bookingId, title: "Prepare the house" });
+  async (ctx, payload) => {
+    await ctx.run(tasks.create, { bookingId: payload.bookingId, title: "Prepare the house" });
     await ctx.services.mailer.send(...);
   },
 );

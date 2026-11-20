@@ -1,6 +1,6 @@
 ---
 title: Output
-description: outputSchema is the contract for what an exposed function returns.
+description: output is the contract for what an exposed function returns.
 ---
 
 ```ts
@@ -11,17 +11,17 @@ export const Booking = createSelectSchema(bookings).omit({
 
 export const get = query({
   description: "Get a booking",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   authorize: staff,
   expose: true,
 
   // Returns the whole row; accountId is stripped
-  execute: ({ bookingId }, ctx) => findBooking(ctx, bookingId),
+  handler: (ctx, input) => findBooking(ctx, input.bookingId),
 });
 ```
 
-- **Exposed functions must declare `outputSchema`.** With `expose: true`, leaving it out is a type error. What leaves your process, to a browser, an oRPC client or an AI agent, is a contract.
+- **Exposed functions must declare `output`.** With `expose: true`, leaving it out is a type error. What leaves your process, to a browser, an oRPC client or an AI agent, is a contract.
 - **The result is parsed against it.** Unknown keys are stripped (Zod objects strip by default), so returning a whole row can't leak a column.
 - **Invalid output is a bug in your code**, not a bad request. Clients get a generic failure, and the details go to `onError`.
 - **Internal functions may skip it.** Their result only reaches your own code.

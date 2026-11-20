@@ -15,7 +15,7 @@ export interface TestTransaction<S extends object, Mods extends Record<string, o
   /** Bind who is calling, exactly like `registry.as(...)`. */
   as(scope: S): Caller<S>;
   /** Replace a function's implementation for this test. Matched by identity, so `run(availability.hold, …)` hits the stub. */
-  stub<F extends Fn>(fn: F, impl: (input: FnIn<F>, ctx: any) => Promise<FnOut<F>>): void;
+  stub<F extends Fn>(fn: F, impl: (ctx: unknown, input: FnIn<F>) => Promise<FnOut<F>>): void;
   /** Every event emitted (and committed) so far, in order. */
   readonly events: Envelope[];
   /** The test transaction itself: read rows to assert on them. */
@@ -42,7 +42,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       : typeof options.now === "function"
         ? options.now
         : (() => {
-            const fixed = new Date(options.now as Date | string);
+            const fixed = new Date(options.now);
             return () => new Date(fixed);
           })();
 
@@ -52,7 +52,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       let result!: T;
 
       const body = async (outer: unknown) => {
-        const stubs = new Map<Fn, (input: any, ctx: any) => Promise<any>>();
+        const stubs = new Map<Fn, (ctx: never, input: never) => Promise<unknown>>();
         const events: Envelope[] = [];
         const derived = internal(registry).derive({
           database: outer !== undefined && database?.nest ? database.nest(outer) : database,
@@ -62,10 +62,10 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           stubs,
           record: (e) => events.push(e),
           events: options.listeners === false ? { deliver: async () => {} } : undefined,
-        }) as Registry<S, Mods, Cf>;
+        });
         result = await fn({
           as: (scope) => derived.as(scope),
-          stub: (f, impl) => void stubs.set(f, impl as (input: any, ctx: any) => Promise<any>),
+          stub: (f, impl) => void stubs.set(f, impl),
           events,
           db: outer,
           registry: derived,

@@ -1,40 +1,37 @@
 ---
 title: Examples
-description: A Node server, a Cloudflare Worker, and a Next.js app with an agent.
+description: A shop on three hosts, and a bigger bookings app.
 ---
 
-Two real projects live in the repository's `examples/` folder. Both are tested and run against real Postgres.
+Two projects live in the repository's `examples/` folder. Both are tested and run against real Postgres.
 
-## Node: bookings
+## Shop: one app, three hosts
 
-`examples/node` is a bookings app with six modules (properties, availability, pricing, enquiries, bookings, tasks): cross-module transactions, a payment action that refunds on failure, listeners that email guests in their locale, and a Postgres exclusion constraint that makes double-booking impossible under concurrency. A Hono server mounts the fetch and oRPC adapters.
+Start here. `examples/shop` is written once and runs on Node, Cloudflare Workers and Next.js. Two modules: `catalog` (products and stock) and `orders` (place, cancel, ship, your orders).
+
+- **Prices come from the catalog, never from the client.** `orders.place` runs `catalog.reserve` in the same transaction; one item short and the whole order rolls back.
+- **One rule, two uses.** `canCancel` guards `orders.cancel` and becomes `can.cancel` in `orders.mine`, so the UI shows the button only when it would work.
+- **Settings from [config](/docs/concepts/config).** Each host fills them from its own env; modules read `ctx.config`.
+- **Three entries, a few lines each.** `node.ts` (Node or Bun, self-hosted) and `worker.ts` (Cloudflare) share one Hono API; `app/` (Next.js, on Vercel or anywhere) calls the same functions from Server Actions and gives two of them to an AI assistant as tools.
 
 ```bash
-cd examples/node
+cd examples/shop
+bun run db && bun run db:migrate   # Postgres in Docker on 127.0.0.1:5442
+bun run dev                        # Node, http://localhost:3000
+bun run dev:worker                 # Workers, http://localhost:8787
+bun run dev:next                   # Next.js, http://localhost:3200
+bun run test                       # PGlite in-process, plus the Worker inside workerd: no Docker needed
+```
+
+## Bookings: a bigger app
+
+`examples/bookings` has six modules (properties, availability, pricing, enquiries, bookings, tasks): cross-module transactions, a payment action that refunds on failure, listeners that email guests in their locale, and a Postgres exclusion constraint that makes double-booking impossible under concurrency. A Hono server mounts the fetch and oRPC adapters.
+
+```bash
+cd examples/bookings
 bun run db          # Postgres in Docker on 127.0.0.1:5440
 bun run db:migrate
 bun run dev         # http://localhost:3000
 bun run test        # Vitest on Node, PGlite in-process: no Docker needed
 bun run test:pg     # the same suite on the Docker Postgres, plus the race
-```
-
-## Cloudflare Workers: links
-
-`examples/workers` is a link shortener on Hono with two modules: `links` emits `visited`, and a `stats` listener counts it after the redirect has been sent, kept alive by `ctx.waitUntil`. A middleware puts one caller per request in `c.var.caller`, `app.onError` maps error kinds to statuses in a `switch`, and an R2 bucket is a service behind a small interface. Postgres goes through Hyperdrive, with a client per request.
-
-```bash
-cd examples/workers
-bun run db && bun run db:migrate
-bun run dev         # wrangler dev, Hyperdrive → local Postgres
-bun run test        # Vitest inside workerd, against in-process PGlite
-```
-
-## Next.js: one function, two callers
-
-`examples/nextjs` runs the bookings domain from `examples/node`, imported as a workspace package, not copied. One page calls `bookings.confirm` two ways: a Server Action behind a staff form, and an agent (Claude Opus 5.5 through the AI SDK) with the same function as a tool. Both go through the same `authorize`, transaction and events.
-
-```bash
-cd examples/node && bun run db && bun run db:migrate
-cd ../nextjs
-ANTHROPIC_API_KEY=... bun run dev   # http://localhost:3100
 ```

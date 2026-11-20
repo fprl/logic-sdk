@@ -9,11 +9,11 @@ const { query, mutation, action, event, on, createRegistry: create } = init<{ sc
 const anyone = () => true;
 const signed = (s: Scope): s is Signed => s.actor !== null;
 
-const ev = event({ schema: z.object({ id: z.string() }) });
+const ev = event({ payload: z.object({ id: z.string() }) });
 const getOne = query({
   description: "q",
-  inputSchema: z.object({ id: z.string() }),
-  execute: async ({ id }, ctx) => {
+  input: z.object({ id: z.string() }),
+  handler: async (ctx, { id }) => {
     const s: Scope = ctx.scope;
     // @ts-expect-error queries have no emit
     ctx.emit;
@@ -22,12 +22,12 @@ const getOne = query({
     return { id, n: 1 };
   },
 });
-const ping = action({ description: "p", inputSchema: z.object({}), execute: async () => "pong" });
+const ping = action({ description: "p", input: z.object({}), handler: async () => "pong" });
 const write = mutation({
   description: "m",
-  inputSchema: z.object({ id: z.string() }),
-  outputSchema: z.object({ ok: z.literal(true) }),
-  execute: async ({ id }, ctx) => {
+  input: z.object({ id: z.string() }),
+  output: z.object({ ok: z.literal(true) }),
+  handler: async (ctx, { id }) => {
     const { run, emit } = ctx;
     // @ts-expect-error mutations have no services (side effects belong in actions/listeners)
     ctx.services;
@@ -43,15 +43,15 @@ const write = mutation({
 });
 const act = action({
   description: "a",
-  inputSchema: z.object({ id: z.string() }),
-  execute: async ({ id }, { run, services }) => {
+  input: z.object({ id: z.string() }),
+  handler: async ({ run, services }, { id }) => {
     services.mail(id);
     const out = await run(write, { id });
     const ok: true = out.ok;
     return ok;
   },
 });
-const listener = on(() => ev, async (payload, { event, services }) => {
+const listener = on(() => ev, async ({ event, services }, payload) => {
   const id: string = payload.id;
   const name: string = event.name;
   services.mail(id + name);
@@ -86,51 +86,51 @@ create({ modules: {}, database: memoryDatabase() });
 create({ modules: {}, services: { mail: () => {} } });
 declare const maybe: true | undefined;
 // @ts-expect-error expose must be definitely present or absent, so types and runtime exposure agree
-query({ description: "x", inputSchema: z.object({}), authorize: anyone, outputSchema: z.number(), expose: maybe, execute: async () => 1 });
+query({ description: "x", input: z.object({}), authorize: anyone, output: z.number(), expose: maybe, handler: async () => 1 });
 
 // policies: imported functions; guards narrow the scope
-query({ description: "x", inputSchema: z.object({}), authorize: signed, expose: true, outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
-mutation({ description: "x", inputSchema: z.object({}), authorize: signed, expose: true, outputSchema: z.number(), execute: async (_, { scope }) => scope.actor.length });
+query({ description: "x", input: z.object({}), authorize: signed, expose: true, output: z.number(), handler: async ({ scope }) => scope.actor.length });
+mutation({ description: "x", input: z.object({}), authorize: signed, expose: true, output: z.number(), handler: async ({ scope }) => scope.actor.length });
 // internal functions may have a policy too, and it narrows
-mutation({ description: "x", inputSchema: z.object({}), authorize: signed, execute: async (_, { scope }) => scope.actor.length });
-query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, outputSchema: z.void(), execute: async (_, { scope }) => {
+mutation({ description: "x", input: z.object({}), authorize: signed, handler: async ({ scope }) => scope.actor.length });
+query({ description: "x", input: z.object({}), authorize: anyone, expose: true, output: z.void(), handler: async ({ scope }) => {
   // @ts-expect-error a non-guard policy doesn't narrow
   scope.actor.length;
 } });
 // @ts-expect-error policies are sync
-query({ description: "x", inputSchema: z.object({}), authorize: async (s: Scope) => s.actor !== null, execute: async () => 1 });
+query({ description: "x", input: z.object({}), authorize: async (s: Scope) => s.actor !== null, handler: async () => 1 });
 // @ts-expect-error policies read only the scope, not the input
-query({ description: "x", inputSchema: z.object({ id: z.string() }), authorize: (s: Scope, input: { id: string }) => s.tenant === input.id, execute: async () => 1 });
+query({ description: "x", input: z.object({ id: z.string() }), authorize: (s: Scope, input: { id: string }) => s.tenant === input.id, handler: async () => 1 });
 // @ts-expect-error a policy name is not a policy
-query({ description: "x", inputSchema: z.object({}), authorize: "signed", execute: async () => 1 });
+query({ description: "x", input: z.object({}), authorize: "signed", handler: async () => 1 });
 // @ts-expect-error expose: true needs authorize
-query({ description: "x", inputSchema: z.object({}), expose: true, outputSchema: z.number(), execute: async () => 1 });
-// @ts-expect-error exposed functions must declare outputSchema
-query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, execute: async () => 1 });
-query({ description: "x", inputSchema: z.object({}), execute: async (_, { scope }) => {
+query({ description: "x", input: z.object({}), expose: true, output: z.number(), handler: async () => 1 });
+// @ts-expect-error exposed functions must declare output
+query({ description: "x", input: z.object({}), authorize: anyone, expose: true, handler: async () => 1 });
+query({ description: "x", input: z.object({}), handler: async ({ scope }) => {
   // @ts-expect-error internal functions without a policy keep the nullable actor
   scope.actor.length;
 } });
-const exposedQ = query({ description: "x", inputSchema: z.object({}), authorize: anyone, expose: true, outputSchema: z.number(), execute: async () => 1 });
+const exposedQ = query({ description: "x", input: z.object({}), authorize: anyone, expose: true, output: z.number(), handler: async () => 1 });
 // errors live on ctx.errors and return DomainError, so `throw` works everywhere
-query({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.errors.notFound(); } });
-action({ description: "x", inputSchema: z.object({}), execute: async (_, ctx) => { throw ctx.errors.conflict("taken", { id: 1 }); } });
-on(() => ev, async (_, ctx) => { throw ctx.errors.reject("nope"); });
+query({ description: "x", input: z.object({}), handler: async (ctx) => { throw ctx.errors.notFound(); } });
+action({ description: "x", input: z.object({}), handler: async (ctx) => { throw ctx.errors.conflict("taken", { id: 1 }); } });
+on(() => ev, async (ctx) => { throw ctx.errors.reject("nope"); });
 type IsExposed<F> = F extends import("../src/index.ts").ExposedFn ? true : false;
 const exposedFlag: IsExposed<typeof exposedQ> = true;
 // @ts-expect-error internal functions are not ExposedFn
 const internalFlag: IsExposed<typeof getOne> = true;
 void exposedFlag; void internalFlag;
-const transforming = event({ schema: z.object({ at: z.string().transform((s) => new Date(s)) }) });
-mutation({ description: "e", inputSchema: z.object({}), execute: async (_, { emit }) => {
+const transforming = event({ payload: z.object({ at: z.string().transform((s) => new Date(s)) }) });
+mutation({ description: "e", input: z.object({}), handler: async ({ emit }) => {
   emit(transforming, { at: "2026-01-01" });
   // @ts-expect-error emit takes the schema input (string), not its output
   emit(transforming, { at: new Date() });
 } });
-on(() => transforming, async ({ at }) => { const d: Date = at; void d; });
+on(() => transforming, async (_, { at }) => { const d: Date = at; void d; });
 import { createTestRegistry } from "../src/testing.ts";
 void createTestRegistry(registry).transaction(async (tx) => {
-  tx.stub(getOne, async ({ id }) => ({ id, n: 2 }));
+  tx.stub(getOne, async (_, input) => ({ id: input.id, n: 2 }));
   // @ts-expect-error stub must return the function's output type
   tx.stub(getOne, async () => ({ nope: true }));
 });
@@ -138,12 +138,12 @@ void createTestRegistry(registry).transaction(async (tx) => {
 // meta: one shape declared in init, values set per function, typed in wrap
 {
   const m = init<{ scope: Scope; meta: { tags?: string[]; agent?: boolean } }>();
-  m.query({ description: "x", inputSchema: z.object({}), meta: { tags: ["a"], agent: false }, execute: async () => 1 });
+  m.query({ description: "x", input: z.object({}), meta: { tags: ["a"], agent: false }, handler: async () => 1 });
   // @ts-expect-error meta must match the shape from init
-  m.query({ description: "x", inputSchema: z.object({}), meta: { nope: 1 }, execute: async () => 1 });
+  m.query({ description: "x", input: z.object({}), meta: { nope: 1 }, handler: async () => 1 });
   m.createRegistry({ modules: {}, wrap: async (call, next) => { const t: string[] | undefined = call.meta?.tags; void t; return next(); } });
   // @ts-expect-error without a meta shape in init, functions can't set meta
-  query({ description: "x", inputSchema: z.object({}), meta: { tags: [] }, execute: async () => 1 });
+  query({ description: "x", input: z.object({}), meta: { tags: [] }, handler: async () => 1 });
 }
 
 // a typo in the config is an error, not a silently ignored key
@@ -154,7 +154,7 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
 {
   type AppConfig = { app: { url: string }; orders: { maxItems: number } };
   const c = init<{ scope: Scope; db: Store; config: AppConfig }>();
-  const q = c.query({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => {
+  const q = c.query({ description: "x", input: z.object({}), handler: async ({ config }) => {
     const max: number = config.orders.maxItems;
     // @ts-expect-error config is read-only, all the way down
     config.orders.maxItems = 1;
@@ -162,9 +162,9 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
     config.orders.nope;
     return max;
   } });
-  c.mutation({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => config.app.url });
-  c.action({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => config.app.url });
-  c.on(() => ev, async (_, { config }) => { const u: string = config.app.url; void u; });
+  c.mutation({ description: "x", input: z.object({}), handler: async ({ config }) => config.app.url });
+  c.action({ description: "x", input: z.object({}), handler: async ({ config }) => config.app.url });
+  c.on(() => ev, async ({ config }) => { const u: string = config.app.url; void u; });
   const reg = c.createRegistry({ modules: { m: { q } }, database: memoryDatabase(), config: { app: { url: "u" }, orders: { maxItems: 1 } } });
   // @ts-expect-error config is required when the app declares it
   c.createRegistry({ modules: {}, database: memoryDatabase() });
@@ -182,7 +182,7 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
   const Url = z.string().brand<"Url">();
   type Brandy = { url: z.infer<typeof Url>; tags: string[] };
   const b = init<{ scope: Scope; config: Brandy }>();
-  b.query({ description: "x", inputSchema: z.object({}), execute: async (_, { config }) => {
+  b.query({ description: "x", input: z.object({}), handler: async ({ config }) => {
     const s: string = config.url; // a branded string is still a string
     // @ts-expect-error arrays in config are read-only
     config.tags.push("x");
@@ -194,4 +194,17 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
   const plainReg = none.createRegistry({ modules: {} });
   // @ts-expect-error and so is overriding one in a test
   createTestRegistry(plainReg, { config: { url: "x" } });
+}
+
+// no input: leave `input` out, the handler takes only ctx, and callers write run(fn)
+{
+  const total = query({ description: "x", handler: async ({ scope }) => scope.tenant.length });
+  const caller = create({ modules: {}, database: memoryDatabase(), services: { mail: () => {} } }).as({ actor: null, tenant: "t" });
+  const n: Promise<number> = caller.run(total);
+  void n;
+  void caller.run(total, undefined, { signal: AbortSignal.timeout(1000) });
+  // @ts-expect-error a function with input still needs it
+  void caller.run(getOne);
+  // @ts-expect-error and a function without input takes nothing else
+  void caller.run(total, { id: "x" });
 }

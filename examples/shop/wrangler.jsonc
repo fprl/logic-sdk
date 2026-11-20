@@ -1,0 +1,15 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "logic-shop",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "APP_URL": "http://localhost:8787", "MAX_ITEMS": "10" },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "<your-hyperdrive-id>", // npx wrangler hyperdrive create shop --connection-string=...
+      "localConnectionString": "postgres://postgres:postgres@localhost:5442/postgres"
+    }
+  ]
+}

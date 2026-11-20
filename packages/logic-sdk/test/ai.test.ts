@@ -16,17 +16,17 @@ const { query, mutation, event, on, createRegistry } = init<{
 const anyone = () => true;
 const signedIn = (s: Scope): s is { actor: string } => s.actor !== null;
 
-const added = event({ schema: z.object({ name: z.string() }) });
+const added = event({ payload: z.object({ name: z.string() }) });
 const items = {
   added,
   add: mutation({
     description: "Add an item",
-    inputSchema: z.object({ name: z.string() }),
-    outputSchema: z.object({ name: z.string() }),
+    input: z.object({ name: z.string() }),
+    output: z.object({ name: z.string() }),
     authorize: signedIn,
     expose: true,
     meta: { agent: true },
-    async execute({ name }, { db, emit, errors }) {
+    async handler({ db, emit, errors }, { name }) {
       if (name === "tiny") throw errors.reject("too_short", { min: 5, got: 4 });
       if (name === "crash") throw new Error("connection refused at 10.0.0.3:5432");
       (db.rows.items ??= []).push({ name });
@@ -36,16 +36,15 @@ const items = {
   }),
   count: query({
     description: "Count items",
-    inputSchema: z.object({}),
-    outputSchema: z.number(),
+    output: z.number(),
     authorize: anyone,
     expose: true,
-    execute: async (_, { db }) => (db.rows.items ?? []).length,
+    handler: async ({ db }) => (db.rows.items ?? []).length,
   }),
-  wipe: mutation({ description: "internal", inputSchema: z.object({}), execute: async () => {} }),
+  wipe: mutation({ description: "internal", input: z.object({}), handler: async () => {} }),
 };
 const services = { log: [] as string[] };
-const audit = { onAdded: on(() => added, async ({ name }, { services }) => { services.log.push(name); }) };
+const audit = { onAdded: on(() => added, async ({ services }, { name }) => { services.log.push(name); }) };
 
 function setup() {
   const db = memoryDatabase();
@@ -95,6 +94,14 @@ test("toAITool: one exposed function as a tool you name; internal functions are 
   expect(db.store.rows.items).toEqual([{ name: "desk" }]);
   // @ts-expect-error internal functions can't be tools
   expect(() => toAITool(caller, items.wipe)).toThrow(/expose: true/);
+});
+
+test("a function without input is an object tool the model calls with {}", async () => {
+  const { registry } = setup();
+  const model = agentCalling("countItems", {});
+  await generateText({ model, tools: { countItems: toAITool(registry.as({ actor: "ana" }), items.count) }, prompt: "How many?", stopWhen: isStepCount(3) });
+  expect(model.doGenerateCalls[0]!.tools?.[0]).toMatchObject({ inputSchema: { type: "object", properties: {} } });
+  expect(toolResultSeenBy(model)).toEqual({ type: "json", value: 0 });
 });
 
 test("an agent's call runs as the caller: same transaction, events after commit", async () => {

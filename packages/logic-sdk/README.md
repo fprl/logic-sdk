@@ -32,15 +32,15 @@ Write a module:
 // src/bookings/mutations.ts
 export const confirm = mutation({
   description: "Confirm a pending booking",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   // Who may call it, on every call
   authorize: staff,
   // HTTP, oRPC and AI tools may publish it
   expose: true,
 
-  async execute({ bookingId }, ctx) {
-    const booking = await findBooking(ctx, bookingId);
+  async handler(ctx, input) {
+    const booking = await findBooking(ctx, input.bookingId);
     if (booking.status !== "pending") {
       throw ctx.errors.reject("not_pending");
     }
@@ -49,7 +49,7 @@ export const confirm = mutation({
     await ctx.run(availability.hold, rangeOf(booking));
 
     // Delivered to listeners only after commit
-    ctx.emit(confirmed, { bookingId });
+    ctx.emit(confirmed, { bookingId: input.bookingId });
 
     return setStatus(ctx, booking.id, "confirmed");
   },
@@ -109,9 +109,8 @@ Read-only, `--json` everywhere, exit codes for CI. The `logic-sdk` command ships
 
 ## Examples
 
-- [`examples/node`](examples/node): a bookings app. Six modules, Hono, Postgres, and a race test on real Postgres.
-- [`examples/workers`](examples/workers): a link shortener on Cloudflare Workers, Hyperdrive and `waitUntil`.
-- [`examples/nextjs`](examples/nextjs): a Server Action and an AI agent calling the same `bookings.confirm`.
+- [`examples/shop`](examples/shop): start here. A shop written once and run on Node, Cloudflare Workers and Next.js, with an AI assistant.
+- [`examples/bookings`](examples/bookings): a bigger app. Six modules, Hono, Postgres, and a race test on real Postgres.
 
 ## Docs
 
@@ -124,7 +123,7 @@ bun install
 bun run test    # build, typecheck, lint, package checks, all tests
 ```
 
-`packages/logic-sdk` is the library, tested with `bun test`. `examples/node` runs on PGlite by default and on real Postgres with `DATABASE_URL` (`bun run test:pg`), which CI always sets. `examples/workers` runs inside workerd. Decisions and their reasons are in [DESIGN.md](DESIGN.md); what's next is in [ROADMAP.md](ROADMAP.md).
+`packages/logic-sdk` is the library, tested with `bun test`. `examples/bookings` runs on PGlite by default and on real Postgres with `DATABASE_URL` (`bun run test:pg`), which CI always sets. `examples/shop` also runs its Worker inside workerd. Decisions and their reasons are in [DESIGN.md](DESIGN.md); what's next is in [ROADMAP.md](ROADMAP.md).
 
 ## License
 

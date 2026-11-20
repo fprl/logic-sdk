@@ -7,11 +7,11 @@ const Order = z.object({ id: z.string(), status: z.string() });
 
 export const cancel = mutation({
   description: "Cancel an order",
-  inputSchema: z.object({ id: z.string() }),
-  outputSchema: Order,
+  input: z.object({ id: z.string() }),
+  output: Order,
   authorize: member,
   expose: true,
-  async execute({ id }, ctx) {
+  async handler(ctx, { id }) {
     const order = loadForCancel(ctx, ctx.scope.actor, id);
     ctx.db.run("update orders"); // a database call, not a run edge
     await ctx.run(stock.release, { sku: order.id }, { scope: { accountId: "a1" } }); // acts in another account on purpose
@@ -21,9 +21,9 @@ export const cancel = mutation({
 
 export const refund = mutation({
   description: "Refund an order",
-  inputSchema: z.object({ id: z.string() }),
+  input: z.object({ id: z.string() }),
   authorize: (s) => s.accountId !== "",
-  async execute({ id }, ctx) {
+  async handler(ctx, { id }) {
     const { run, db, scope, errors } = ctx;
     const order = findOrder(ctx, id);
     if (!canRefund(scope.actor, order)) throw errors.deny();

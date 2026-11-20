@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 
 // The real entry point: the `logic-sdk` command from the main package, which loads this CLI.
 const bin = fileURLToPath(new URL("../../logic-sdk/bin/logic-sdk.js", import.meta.url));
-const app = fileURLToPath(new URL("../../../examples/node", import.meta.url));
+const app = fileURLToPath(new URL("../../../examples/bookings", import.meta.url));
 const broken = fileURLToPath(new URL("./fixtures/broken", import.meta.url));
 
 /** Runs the built CLI with Node, piped, the way a script or an agent would. */

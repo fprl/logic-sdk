@@ -3,12 +3,12 @@ import { event, defineMutation } from "../init";
 import * as stock from "../stock";
 import { reserved } from "../stock/data"; // ✗ another module's internal file
 
-export const shipped = event({ schema: z.object({ id: z.string() }) });
+export const shipped = event({ payload: z.object({ id: z.string() }) });
 
 export const place = defineMutation({
   description: "Place an order",
-  inputSchema: z.object({ sku: z.string() }),
-  async execute({ sku }, { run }) {
+  input: z.object({ sku: z.string() }),
+  async handler({ run }, { sku }) {
     await fetch("https://payments.example.com"); // ✗ network inside a transaction
     void reserved;
     return run(stock.reserve, { sku, at: new Date().toISOString() }); // ! wall clock
@@ -17,6 +17,6 @@ export const place = defineMutation({
 
 export const refund = defineMutation({
   description: "Refund an order",
-  inputSchema: z.object({ id: z.string() }),
-  execute: async ({ id }) => ({ id }),
+  input: z.object({ id: z.string() }),
+  handler: async (_, { id }) => ({ id }),
 });

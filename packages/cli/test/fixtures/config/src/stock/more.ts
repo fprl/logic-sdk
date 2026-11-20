@@ -4,8 +4,8 @@ import { mutation } from "../logic";
 
 export const variants = mutation({
   description: "Every way to reach env that check must catch",
-  inputSchema: z.object({}),
-  async execute() {
+  input: z.object({}),
+  async handler() {
     const a = process["env"].A; // flagged
     const b = globalThis.process.env.B; // flagged
     const { env } = process; // flagged

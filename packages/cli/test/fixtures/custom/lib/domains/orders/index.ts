@@ -4,6 +4,6 @@ import * as stock from "../stock";
 
 export const place = mutation({
   description: "Place an order",
-  inputSchema: z.object({ sku: z.string() }),
-  execute: async ({ sku }, { run }) => run(stock.reserve, { sku }),
+  input: z.object({ sku: z.string() }),
+  handler: async ({ run }, { sku }) => run(stock.reserve, { sku }),
 });

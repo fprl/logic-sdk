@@ -1,7 +1,5 @@
-import { tool, type FlexibleSchema, type Tool } from "ai";
-import { isDomainError, type Caller, type Fn, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
-
-type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<any, any, any, true> ? N : never]: T[N] };
+import { jsonSchema, tool, type Tool } from "ai";
+import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
 type UnionToIntersection<U> = (U extends unknown ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
 
 /** `{ bookings_confirm, pricing_priceStay, … }`: one AI SDK tool per exposed function, typed. */
@@ -28,6 +26,9 @@ export interface AIToolsOptions extends AIToolOptions {
   filter: (fn: RegisteredFn) => boolean;
 }
 
+/** What a function without input looks like to the model: an object with nothing in it. It sends `{}`, which run ignores. */
+const noInput = jsonSchema({ type: "object", properties: {}, additionalProperties: false });
+
 /**
  * One exposed function as an AI SDK tool, run as `caller`: the agent goes through the same policy,
  * validation, transaction and events as your HTTP API. You name it, like any AI SDK tool.
@@ -40,8 +41,8 @@ export interface AIToolsOptions extends AIToolOptions {
  * Domain errors reach the model (it sees the code and can react). Anything unexpected is reported
  * to `onError` and the model gets "internal_error", so internals never land in its context.
  */
-export function toAITool<F extends Fn<any, any, any, true>>(
-  caller: Caller<any>,
+export function toAITool<F extends ExposedFn>(
+  caller: Caller<object>,
   fn: F,
   options: AIToolOptions = {},
 ): Tool<FnIn<F>, FnOut<F>> {
@@ -49,8 +50,8 @@ export function toAITool<F extends Fn<any, any, any, true>>(
   if (fn.expose !== true) throw new Error("[logic-sdk] toAITool needs a function with expose: true.");
   return tool({
     description: fn.description,
-    inputSchema: fn.inputSchema as FlexibleSchema,
-    outputSchema: fn.outputSchema as FlexibleSchema,
+    inputSchema: fn.input ?? noInput,
+    outputSchema: fn.output,
     async execute(input, { abortSignal }) {
       try {
         return await caller.run(fn, input, { signal: abortSignal });
@@ -79,6 +80,6 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
     throw new Error("[logic-sdk] toAITools needs a filter: the agent door is opt-in. E.g. { filter: (f) => f.fn.meta?.agent === true }");
   const tools: Record<string, Tool> = {};
   for (const f of registry.functions)
-    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as Fn<any, any, any, true>, options);
+    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, options);
   return tools as Partial<AIToolsOf<Mods>>;
 }

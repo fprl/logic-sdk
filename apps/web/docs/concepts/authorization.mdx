@@ -33,17 +33,17 @@ export const staff = (s: Scope): s is StaffScope => s.actor !== null && s.actor.
 export const admin = (s: Scope): s is AdminScope => s.actor?.role === "admin";
 ```
 
-Make `Scope` a union of signed in and signed out: then a simple check like `member` narrows it (TypeScript would even infer the guard). Compound checks like `staff` and `admin` look inside the actor, so they need their `s is ...` written out. Inside `execute`, `ctx.scope` has the narrowed type.
+Make `Scope` a union of signed in and signed out: then a simple check like `member` narrows it (TypeScript would even infer the guard). Compound checks like `staff` and `admin` look inside the actor, so they need their `s is ...` written out. Inside `handler`, `ctx.scope` has the narrowed type.
 
 ## `authorize`: who may call the function
 
 ```ts
 export const block = mutation({
   description: "Block dates on a property's calendar",
-  inputSchema: BlockInput,
+  input: BlockInput,
   authorize: member,
 
-  async execute(input, ctx) {
+  async handler(ctx, input) {
     // No null check: member guarantees an actor
     const blockedBy = ctx.scope.actor.id;
     ...
@@ -63,15 +63,15 @@ export const block = mutation({
 ```ts
 export const cancel = mutation({
   description: "Cancel a booking and free its dates",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   authorize: member,
   expose: true,
   ...
 });
 ```
 
-`expose: true` requires `authorize` and an [`outputSchema`](/docs/concepts/output). Leaving either out is a type error: you can't publish something without saying who may call it and what they get back.
+`expose: true` requires `authorize` and an [`output`](/docs/concepts/output). Leaving either out is a type error: you can't publish something without saying who may call it and what they get back.
 
 ## Internal functions
 
@@ -79,7 +79,7 @@ No `expose`, and it's internal: other functions `run` it, and your own server co
 
 ## Record rules: `can*`
 
-`authorize` can't see the booking, so "only its creator or an admin may cancel it" goes in `execute`, after loading the record. Two steps:
+`authorize` can't see the booking, so "only its creator or an admin may cancel it" goes in `handler`, after loading the record. Two steps:
 
 1. **Load through an account-scoped helper.** It filters by `ctx.scope.accountId` and throws `notFound`, so another account's id is a 404, never a 403 that confirms it exists.
 2. **Ask a sync predicate named `can*`.** `false` is `ctx.errors.deny()`, a 403.
@@ -90,8 +90,8 @@ export const canCancel = (actor: Actor, booking: BookingRow) =>
   actor.role === "admin" || booking.createdBy === actor.id;
 
 // src/bookings/mutations.ts
-async execute({ bookingId }, ctx) {
-  const booking = await findBooking(ctx, bookingId); // other accounts: 404
+async handler(ctx, input) {
+  const booking = await findBooking(ctx, input.bookingId); // other accounts: 404
   if (!canCancel(ctx.scope.actor, booking)) throw ctx.errors.deny(); // 403
   ...
 }
@@ -102,12 +102,11 @@ The same predicate feeds your UI, so the button and the rule never disagree:
 ```ts
 export const list = query({
   description: "List the account's bookings",
-  inputSchema: z.object({}),
-  outputSchema: z.array(Booking.extend({ can: z.object({ cancel: z.boolean() }) })),
+  output: z.array(Booking.extend({ can: z.object({ cancel: z.boolean() }) })),
   authorize: member,
   expose: true,
 
-  async execute(_, ctx) {
+  async handler(ctx) {
     const rows = await listBookings(ctx);
     return rows.map((b) => ({ ...b, can: { cancel: canCancel(ctx.scope.actor, b) } }));
   },

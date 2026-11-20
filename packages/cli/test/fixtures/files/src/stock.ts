@@ -4,6 +4,6 @@ import { mutation } from "./init";
 // A single-file module: fine for small modules
 export const reserve = mutation({
   description: "Reserve stock",
-  inputSchema: z.object({ sku: z.string() }),
-  execute: async ({ sku }) => ({ sku }),
+  input: z.object({ sku: z.string() }),
+  handler: async (_, { sku }) => ({ sku }),
 });

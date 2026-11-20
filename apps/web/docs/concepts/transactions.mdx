@@ -8,8 +8,8 @@ description: One transaction per mutation, safe nesting, and retries when a tran
 A top-level mutation opens a transaction. Every mutation it runs joins that same transaction, across modules:
 
 ```ts
-async execute({ bookingId }, ctx) {
-  const booking = await findBooking(ctx, bookingId);
+async handler(ctx, input) {
+  const booking = await findBooking(ctx, input.bookingId);
 
   // Joins this transaction
   await ctx.run(availability.hold, rangeOf(booking));
@@ -60,9 +60,9 @@ When a rule depends on rows that don't exist yet, like "no two bookings overlap"
 ```ts
 export const hold = mutation({
   description: "Reserve a date range on a property's calendar",
-  inputSchema: HoldInput,
+  input: HoldInput,
 
-  async execute(input, ctx) {
+  async handler(ctx, input) {
     // One hold at a time per property. A concurrent confirm waits here,
     // then sees the committed hold in the check below.
     await ctx.db.execute(
@@ -78,4 +78,4 @@ export const hold = mutation({
 });
 ```
 
-The `examples/node` app races three agents confirming overlapping dates on real Postgres: one wins, and the others get a clean `conflict`.
+The `examples/bookings` app races three agents confirming overlapping dates on real Postgres: one wins, and the others get a clean `conflict`.

@@ -3,18 +3,19 @@ title: Functions and ctx
 description: Queries, mutations, actions and listeners, and what each one gets in ctx.
 ---
 
-Every function is a plain object with a description, an input schema and an `execute`. The kind decides what `execute` may touch.
+Every function is a plain object with a description, an `input` schema and a `handler(ctx, input)`. The kind decides what `handler` may touch.
 
 ```ts
 export const priceStay = query({
   description: "Price a stay: nights × rate + cleaning fee",
-  inputSchema: z.object({
+  input: z.object({
     propertyId: z.uuid(),
     from: z.iso.date(),
     to: z.iso.date(),
   }),
 
-  async execute({ propertyId, from, to }, ctx) {
+  async handler(ctx, input) {
+    const { propertyId, from, to } = input;
     const property = await ctx.run(properties.get, { propertyId });
     const nights = nightsBetween(from, to);
     return { nights, total: nights * property.nightlyRate };
@@ -25,13 +26,26 @@ export const priceStay = query({
 - **`query`** reads. It can run other queries.
 - **`mutation`** writes, inside one transaction. It can run queries and mutations, and emit events.
 - **`action`** talks to the outside world: payments, email, AI. It has no transaction, so each mutation it runs commits on its own.
-- **`on(() => event, fn)`** reacts to an event after commit. It behaves like an action.
+- **`on(() => event, (ctx, payload) => …)`** reacts to an event after commit. It behaves like an action.
 
 The `description` is one sentence. People read it, and so do adapters and AI tools.
 
+A function that takes nothing leaves out `input`. Its handler gets only `ctx`, and callers write `run(fn)`:
+
+```ts
+export const list = query({
+  description: "Everything for sale",
+  handler: (ctx) => ctx.db.select().from(products),
+});
+
+await caller.run(catalog.list);
+```
+
+`ctx` comes first everywhere: in handlers, in listeners (`on(() => event, async (ctx, payload) => …)`) and in your own helpers.
+
 ## ctx
 
-The second argument of `execute`:
+The first argument of `handler`:
 
 | | query | mutation | action and listener |
 |---|---|---|---|

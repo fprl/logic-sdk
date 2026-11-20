@@ -24,7 +24,7 @@ export function drizzleAdapter<Db extends Transactional>(db: Db): DatabaseAdapte
     db,
     transactions: "interactive",
     transaction: (fn) => db.transaction(fn),
-    nest: (tx) => drizzleAdapter(tx as Transactional) as any,
+    nest: (tx) => drizzleAdapter(tx),
     retryable: (e) => RETRYABLE.has(sqlState(e) ?? ""),
   };
 }
