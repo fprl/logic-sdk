@@ -36,7 +36,7 @@ type Config = {
 export type QueryCtx = Query<Config>;
 export type MutationCtx = Mutation<Config>;
 
-export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+export const { query, mutation, action, event, listener, createRegistry } = init<Config>();
 ```
 
   </Step>

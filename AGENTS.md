@@ -15,7 +15,7 @@ src/
     mutations.ts   mutation({...})  writes, one transaction
     actions.ts     action({...})    network calls: payments, email, AI, webhooks out
     events.ts      event({...})     things that happened
-    listeners.ts   on(() => other.event, ...)   reacting to OTHER modules' events
+    listeners.ts   listener({...})  reacting to OTHER modules' events
     data.ts        private helpers taking ctx (findBooking(ctx, id)) and can* record checks. Never imported by other modules.
     schema.ts      tables this module owns. Other modules never read them.
     <module>.test.ts
@@ -56,7 +56,7 @@ export const cancel = mutation({
 
 ## Rules
 
-1. **Pick the kind by what it touches.** Only reads: `query`. Writes to our database: `mutation`. Talks to the network: `action`. Reacts to another module: `on`.
+1. **Pick the kind by what it touches.** Only reads: `query`. Writes to our database: `mutation`. Talks to the network: `action`. Reacts to another module: `listener`.
 2. **Never put side effects in a mutation or query.** No email, HTTP or payments. They don't have `services` on purpose. Emit an event and react in a listener, or write an action that runs the mutation.
 3. **Call other modules only with `run(otherModule.fn, input)`.** Import them as `import * as availability from "../availability"`. Never import their `data.ts` or `schema.ts`, from a module or from routes and pages; `logic-sdk check` fails the build if you do (path aliases and `#` imports included).
 4. **Within a module, use helpers.** Shared logic is a plain function in `data.ts` taking `ctx`. `ctx.run` your own module's function only when you want its `authorize`, validation and tracing.
@@ -68,7 +68,7 @@ export const cancel = mutation({
 10. **Listeners must be idempotent** (use `event.id` to dedupe when it matters). They run with the emitter's scope, so they run internal functions. To act as someone else on purpose, change the scope for that call: `ctx.run(fn, input, { scope: { actor: system } })`.
 11. **Time** comes from `ctx.now()`, never `new Date()`, so tests can freeze it.
 12. **Use separate `export const`s**, not functions nested in an object. Name them by verb within the module (`bookings.confirm`, not `bookings.confirmBooking`). Names are unique per module.
-13. **`ctx` comes first, everywhere:** `handler(ctx, input)`, `on(() => ev, async (ctx, payload) => …)`, helpers `findBooking(ctx, id)`. A function that takes nothing leaves out `input`: `handler(ctx)`, called as `run(fn)`.
+13. **`ctx` comes first, everywhere:** `handler(ctx, input)` in functions, `handler(ctx, payload)` in listeners, helpers `findBooking(ctx, id)`. A function that takes nothing leaves out `input`: `handler(ctx)`, called as `run(fn)`.
 14. **Settings come from `ctx.config`**, never from env inside a module. Declare its shape in `init<Config>()` (`config: { orders: { maxItems: number } }`), fill it from your env at the entry (`createRegistry({ config })`), and read it in any function: `ctx.config.orders.maxItems`. Plain data only. Clients built from secrets go in `services`. Outside modules (the entry, routes, scripts), read env however you like; `logic-sdk check` fails on env reads inside modules, including through files they import.
 
 ## Tests

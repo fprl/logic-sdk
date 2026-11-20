@@ -1,5 +1,5 @@
-import { on } from "../init";
+import { listener } from "../init";
 import * as orders from "../orders";
 
 // ! nothing emits orders.shipped
-export const restock = on(() => orders.shipped, async () => {});
+export const restock = listener({ event: () => orders.shipped, description: "Reacts to orders.shipped", handler: async () => {} });

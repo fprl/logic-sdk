@@ -10,4 +10,4 @@ export type Ctx = MutationCtx<Config>;
 /** A policy: who may call a function at all. */
 export const member = (s: Scope): s is MemberScope => s.actor !== null;
 
-export const { query, mutation, action, event, on } = init<Config>();
+export const { query, mutation, action, event, listener } = init<Config>();

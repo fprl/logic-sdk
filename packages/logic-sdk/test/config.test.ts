@@ -6,7 +6,7 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null };
 type AppConfig = { app: { url: string }; orders: { maxItems: number; currency: "EUR" | "USD" } };
-const { query, mutation, action, event, on, createRegistry } = init<{ scope: Scope; db: Store; config: AppConfig }>();
+const { query, mutation, action, event, listener, createRegistry } = init<{ scope: Scope; db: Store; config: AppConfig }>();
 
 const seen: Record<string, unknown> = {};
 const placed = event({ payload: z.object({ items: z.number() }) });
@@ -36,9 +36,9 @@ const checkout = action({
     return run(place, input);
   },
 });
-const receipt = on(() => placed, async ({ config }) => {
+const receipt = listener({ event: () => placed, description: "Reacts to placed", handler: async ({ config }) => {
   seen.listener = config;
-});
+} });
 const write = query({
   description: "tries to change config",
   handler: async ({ config }) => {

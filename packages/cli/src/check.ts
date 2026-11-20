@@ -57,7 +57,7 @@ export function check(project: Project): Problem[] {
       severity: "error",
       message: `Modules run each other in a circle: ${[...cycle, cycle[0]].join(" → ")} (${steps.join(", ")}).`,
       at: null,
-      fix: "Break the cycle with an event: emit it in one module, react with on() in the other.",
+      fix: "Break the cycle with an event: emit it in one module, react with a listener in the other.",
     });
   }
 

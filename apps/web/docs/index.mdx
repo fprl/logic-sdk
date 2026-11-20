@@ -55,7 +55,7 @@ await caller.run(bookings.confirm, { bookingId });
 | `query` | Reading data | The caller's, if any | Queries |
 | `mutation` | Changing data | One, joined by nested mutations | Queries and mutations |
 | `action` | Payments, email, AI, any network call | None | Anything |
-| `on` | Reacting to another module's event | None, runs after commit | Anything |
+| `listener` | Reacting to another module's event | None, runs after commit | Anything |
 
 Services (a mailer, a payment client) only reach actions and listeners. A mutation can roll back, and an email sent from inside it can't be unsent.
 

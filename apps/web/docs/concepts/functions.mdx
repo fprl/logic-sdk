@@ -26,7 +26,7 @@ export const priceStay = query({
 - **`query`** reads. It can run other queries.
 - **`mutation`** writes, inside one transaction. It can run queries and mutations, and emit events.
 - **`action`** talks to the outside world: payments, email, AI. It has no transaction, so each mutation it runs commits on its own.
-- **`on(() => event, (ctx, payload) => …)`** reacts to an event after commit. It behaves like an action.
+- **`listener({ event: () => ev, description, handler(ctx, payload) })`** reacts to an event after commit. It behaves like an action.
 
 The `description` is one sentence. People read it, and so do adapters and AI tools.
 
@@ -41,7 +41,7 @@ export const list = query({
 await caller.run(catalog.list);
 ```
 
-`ctx` comes first everywhere: in handlers, in listeners (`on(() => event, async (ctx, payload) => …)`) and in your own helpers.
+`ctx` comes first everywhere: in handlers, in listeners (`handler(ctx, payload)`) and in your own helpers.
 
 ## ctx
 

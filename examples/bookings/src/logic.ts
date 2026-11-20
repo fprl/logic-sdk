@@ -12,4 +12,4 @@ type Config = { scope: Scope; db: Tx; reader: DrizzleReader<Tx>; services: Servi
 export type QueryCtx = Query<Config>;
 export type MutationCtx = Mutation<Config>;
 
-export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+export const { query, mutation, action, event, listener, createRegistry } = init<Config>();

@@ -5,7 +5,7 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
 type Signed = Scope & { actor: string };
-const { query, mutation, action, event, on, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
+const { query, mutation, action, event, listener, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
 const anyone = () => true;
 const signed = (s: Scope): s is Signed => s.actor !== null;
 
@@ -51,13 +51,13 @@ const act = action({
     return ok;
   },
 });
-const listener = on(() => ev, async ({ event, services }, payload) => {
+const onEv = listener({ event: () => ev, description: "Reacts to ev", handler: async ({ event, services }, payload) => {
   const id: string = payload.id;
   const name: string = event.name;
   services.mail(id + name);
-});
+} });
 
-const registry = create({ modules: { c: { ev, getOne, ping, write, act, listener } }, database: memoryDatabase(), services: { mail: () => {} } });
+const registry = create({ modules: { c: { ev, getOne, ping, write, act, onEv } }, database: memoryDatabase(), services: { mail: () => {} } });
 // @ts-expect-error services are typed from init
 create({ modules: {}, services: { nope: 1 } });
 const mods: { c: { ev: typeof ev } } = { c: registry.modules.c };
@@ -115,7 +115,7 @@ const exposedQ = query({ description: "x", input: z.object({}), authorize: anyon
 // errors live on ctx.errors and return DomainError, so `throw` works everywhere
 query({ description: "x", input: z.object({}), handler: async (ctx) => { throw ctx.errors.notFound(); } });
 action({ description: "x", input: z.object({}), handler: async (ctx) => { throw ctx.errors.conflict("taken", { id: 1 }); } });
-on(() => ev, async (ctx) => { throw ctx.errors.reject("nope"); });
+listener({ event: () => ev, description: "Reacts to ev", handler: async (ctx) => { throw ctx.errors.reject("nope"); } });
 type IsExposed<F> = F extends import("../src/index.ts").ExposedFn ? true : false;
 const exposedFlag: IsExposed<typeof exposedQ> = true;
 // @ts-expect-error internal functions are not ExposedFn
@@ -127,7 +127,7 @@ mutation({ description: "e", input: z.object({}), handler: async ({ emit }) => {
   // @ts-expect-error emit takes the schema input (string), not its output
   emit(transforming, { at: new Date() });
 } });
-on(() => transforming, async (_, { at }) => { const d: Date = at; void d; });
+listener({ event: () => transforming, description: "Reacts to transforming", handler: async (_, { at }) => { const d: Date = at; void d; } });
 import { createTestRegistry } from "../src/testing.ts";
 void createTestRegistry(registry).transaction(async (tx) => {
   tx.stub(getOne, async (_, input) => ({ id: input.id, n: 2 }));
@@ -164,7 +164,7 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
   } });
   c.mutation({ description: "x", input: z.object({}), handler: async ({ config }) => config.app.url });
   c.action({ description: "x", input: z.object({}), handler: async ({ config }) => config.app.url });
-  c.on(() => ev, async ({ config }) => { const u: string = config.app.url; void u; });
+  c.listener({ event: () => ev, description: "Reacts to ev", handler: async ({ config }) => { const u: string = config.app.url; void u; } });
   const reg = c.createRegistry({ modules: { m: { q } }, database: memoryDatabase(), config: { app: { url: "u" }, orders: { maxItems: 1 } } });
   // @ts-expect-error config is required when the app declares it
   c.createRegistry({ modules: {}, database: memoryDatabase() });

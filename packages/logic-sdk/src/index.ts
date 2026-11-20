@@ -104,7 +104,8 @@ export interface Listener<O = unknown> {
   readonly kind: "listener";
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
   readonly event: () => EventDef<unknown, O>;
-  readonly description?: string;
+  readonly description: string;
+  readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }
 
@@ -192,39 +193,50 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 
 /** What a function without `input` gets: nothing. */
 type NoInput = StandardSchemaV1<undefined, undefined>;
-type Def<IS extends Schema, Ctx, R> = {
+type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
   /** One sentence, shown to humans, adapters and AI tools. */
   description: string;
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
   input?: IS;
-  handler: (ctx: Ctx, input: Out<IS>) => Promise<R>;
+  /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
+  authorize?: P;
+  meta?: MetaOf<C>;
+  handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
 };
-type NotExposed = { expose?: undefined };
-type NoPolicy = { authorize?: undefined };
-type WithMeta<C extends Config> = { meta?: MetaOf<C> };
-type WithOutput<OS extends Schema> = { output: OS };
+/**
+ * `expose: true` makes `authorize` and `output` required: you can't publish something without saying who may call it,
+ * and what leaves your process is a contract. `expose` itself is then required too, so a maybe-undefined flag is an
+ * error and the types agree with what adapters publish. Internal functions may skip both; `authorize` still runs if set.
+ */
+type Exposure<C extends Config, OS, X> = [X] extends [true]
+  ? {
+      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). */
+      expose: true;
+      authorize: Policy<ScopeOf<C>>;
+      /** What callers get back, checked before it leaves. */
+      output: OS;
+    }
+  : {
+      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Leave it out for internal functions. */
+      expose?: X;
+      /** What callers get back, checked before it leaves. */
+      output?: OS;
+    };
 
 /**
- * `expose: true` needs `authorize` and `output`: you can't publish something without saying who may call it,
- * and what leaves your process is a contract. Internal functions may skip both; `authorize` still runs if set.
+ * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'output' is missing")
+ * instead of "No overload matches this call". Keep `output: OS` plain: `OS & Schema` makes TypeScript compare the whole
+ * schema type structurally on every definition (about 10x slower to check).
  */
-interface Constructor<C extends Config, K extends Kind> {
-  <IS extends Schema = NoInput, OS extends Schema = Schema, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> &
-      WithOutput<OS> &
-      WithMeta<C> & { authorize: P; expose: true },
-  ): Fn<K, In<IS>, Out<OS>, true>;
-  <IS extends Schema = NoInput, OS extends Schema = Schema, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> & WithOutput<OS> & WithMeta<C> & { authorize: P } & NotExposed,
-  ): Fn<K, In<IS>, Out<OS>, false>;
-  <IS extends Schema = NoInput, R = unknown, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, R> & WithMeta<C> & { authorize: P } & NotExposed,
-  ): Fn<K, In<IS>, R, false>;
-  <IS extends Schema = NoInput, OS extends Schema = Schema>(
-    def: Def<IS, CtxOf<C, K, ScopeOf<C>>, In<OS>> & WithOutput<OS> & WithMeta<C> & NoPolicy & NotExposed,
-  ): Fn<K, In<IS>, Out<OS>, false>;
-  <IS extends Schema = NoInput, R = unknown>(def: Def<IS, CtxOf<C, K, ScopeOf<C>>, R> & WithMeta<C> & NoPolicy & NotExposed): Fn<K, In<IS>, R, false>;
-}
+type Constructor<C extends Config, K extends Kind> = <
+  IS extends Schema = NoInput,
+  OS extends Schema | undefined = undefined,
+  R = unknown,
+  P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>,
+  X extends true | undefined = undefined,
+>(
+  def: Def<C, K, IS, OS, R, P> & Exposure<C, OS, X>,
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false>;
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Errors
@@ -297,7 +309,7 @@ export const inProcess = (): Dispatcher => ({
 export interface Call<M = unknown> {
   id: string;
   kind: Kind | "listener";
-  /** The function's `meta` (undefined for listeners and functions without it). */
+  /** The function's or listener's `meta` (undefined when it has none). */
   meta: M | undefined;
   /** Raw input as received (before validation). */
   input: unknown;
@@ -372,11 +384,11 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * Typed constructors for your app:
  *
  * ```ts
- * export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+ * export const { query, mutation, action, event, listener, createRegistry } = init<Config>();
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed overloads of `Constructor`: the checks here are the runtime half of those types.
+  // One implementation behind the typed signature of `Constructor`: the checks here are the runtime half of those types.
   const make =
     <K extends Kind>(kind: K) =>
     (def: any): any => {
@@ -406,19 +418,24 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /** Something that happened. Emitted by mutations, delivered after commit. */
     event: <S extends Schema>(def: { payload: S; description?: string }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
-    /** React to an event after commit, like an action. Must be idempotent. `on(() => bookings.confirmed, async (ctx, payload) => …)` */
-    on: <O>(
-      event: () => EventDef<unknown, O>,
-      handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>,
-      opts: { description?: string } = {},
-    ): Listener<O> =>
-      Object.freeze({
-        [BRAND]: "listener" as const,
-        kind: "listener" as const,
-        event,
-        description: opts.description,
-        handler,
-      }),
+    /**
+     * React to an event after commit, like an action. Must be idempotent.
+     * `listener({ event: () => bookings.confirmed, description: "...", async handler(ctx, payload) {…} })`
+     */
+    listener: <O>(def: {
+      /** The event it reacts to, as a thunk so modules can import each other's barrels without cycles. */
+      event: () => EventDef<unknown, O>;
+      /** One sentence, shown to humans and tools (`logic-sdk show`, `graph`). */
+      description: string;
+      meta?: MetaOf<C>;
+      handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
+    }): Listener<O> => {
+      if (typeof def.event !== "function") throw new Error("[logic-sdk] listener: `event` must be a thunk: `event: () => orders.placed`.");
+      if (typeof def.handler !== "function") throw new Error("[logic-sdk] listener: `handler` must be a function.");
+      const { event, description, meta, handler } = def;
+      // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, description, meta: meta as Listener["meta"], handler });
+    },
   };
 }
 
@@ -621,7 +638,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     for (const l of byEvent.get(envelope.name) ?? []) {
       const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth };
       try {
-        await wrap({ id: l.id, kind: "listener", meta: undefined, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
+        await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
           const payload = event ? await parseOwn(event.payload, envelope.payload, `${envelope.name} payload`) : envelope.payload;
           return l.listener.handler({ ...actionCtx(frame, l.id), event: { ...envelope, payload } } as never, payload); // SAFETY: as in invoke
         });

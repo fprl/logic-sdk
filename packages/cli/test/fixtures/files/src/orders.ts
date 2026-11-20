@@ -1,6 +1,6 @@
 // A whole module in one file: query, mutation, event and listener.
 import { z } from "zod";
-import { event, mutation, on, query } from "./init";
+import { event, mutation, listener, query } from "./init";
 import * as stock from "./stock";
 
 export const placed = event({ payload: z.object({ sku: z.string() }) });
@@ -20,4 +20,4 @@ export const place = mutation({
   },
 });
 
-export const notify = on(() => placed, async () => {});
+export const notify = listener({ event: () => placed, description: "Reacts to placed", handler: async () => {} });

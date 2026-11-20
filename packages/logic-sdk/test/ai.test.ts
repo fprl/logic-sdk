@@ -7,7 +7,7 @@ import { init } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null };
-const { query, mutation, event, on, createRegistry } = init<{
+const { query, mutation, event, listener, createRegistry } = init<{
   scope: Scope;
   db: Store;
   services: { log: string[] };
@@ -44,7 +44,7 @@ const items = {
   wipe: mutation({ description: "internal", input: z.object({}), handler: async () => {} }),
 };
 const services = { log: [] as string[] };
-const audit = { onAdded: on(() => added, async ({ services }, { name }) => { services.log.push(name); }) };
+const audit = { onAdded: listener({ event: () => added, description: "Reacts to added", handler: async ({ services }, { name }) => { services.log.push(name); } }) };
 
 function setup() {
   const db = memoryDatabase();

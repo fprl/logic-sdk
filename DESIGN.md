@@ -81,7 +81,7 @@ A second Fable pass reviewed the built code and found real bugs. All are fixed, 
 ## Open questions
 
 1. **Pure services in mutations.** A mutation that needs a pure dependency (a pricing table, an id generator) currently has to use `db`, `now`, or a plain import. Should there be a `deps` slot for side-effect-free things, or is that the slope back to mocks?
-2. **A durable dispatcher.** The seam is there: a Postgres outbox (`enqueue` inserts rows in the same transaction; a worker calls `registry.dispatch`) is about 60 lines. Workflow DevKit or Cloudflare Queues would be adapters on top.
+2. **A durable dispatcher.** Settled as a ladder of dispatchers (`inProcess`, after-commit queues, `outbox()`, `outbox(queue)`, `pgBoss`); see "Next: listeners, plugins, durable events, crons".
 3. **A Postgres `READ ONLY` transaction for queries**, as an adapter flag. Today it's a type-level guard only.
 4. **An MCP and AI SDK tools adapter** (`toAITools(registry)`): each exposed function is already `description` + `inputSchema` + `execute`. oRPC's MCP package covers it via `toORPCRouter` in the meantime.
 5. **The name.** `logic-sdk` ("Logic SDK") was free on npm and GitHub on 2026-11-19. `bounded` was taken by an unrelated agent-guardrails tool with its own `bounded` command. Whether the `@logic-sdk` scope is free couldn't be checked without logging in.
@@ -117,3 +117,141 @@ Reviewed against Laravel's current docs, 37signals' Fizzy source, Next.js, Conve
 - **Events declare `payload`**, the one shape they have, so they name the thing like functions do.
 - **One event per listener.** Typed precedents either group per-event handlers in one class (Laravel and Symfony subscribers, Commanded) or take an array of events with a union payload you narrow on the event name (Inngest). Two `on`s calling one helper keep exact payload types and show both edges in `graph`. Listening to everything is `wrap`'s job, or a plugin's later.
 - **No `emits: [...]` declaration.** The CLI already reads `emit(...)` calls (`show` prints them, `event-never-emitted` checks the other side). A declared list would only earn its keep as a contract across a boundary, such as a durable queue shared with another service.
+
+## Next: listeners, plugins, durable events, crons
+
+Settled on 2026-11-20 after reading Rails, Fizzy, Laravel, Phoenix, Oban and the JS platforms (RESEARCH.md has the evidence) and an independent Fable review. Only the listener shape ships in this change; the rest is the plan.
+
+### `listener({...})` replaces `on(...)`
+
+```ts
+export const sendReceipt = listener({
+  event: () => placed,
+  description: "Email the receipt",
+  async handler(ctx, payload) { ... },
+});
+```
+
+- **Options came after the handler** (`on(ev, handler, { description })`), and durable delivery brings more of them (retries, key, delay). Every other definer takes one object; listeners now do too.
+- **Listeners were invisible to plugins.** `wrap` got no `meta` for them, so tracing, audit or rate limits couldn't see them. With an object they take `description` and `meta` like functions.
+- **Nouns, like the other definers:** `query`, `mutation`, `action`, `event`, `listener`, in a file called `listeners.ts`. The field is `event`, matching the `event()` it points at. Fable preferred keeping the name `on`; we chose consistency.
+- **The CLI reads object keys,** which is simpler and sturdier than positional arguments.
+- **The thunk stays.** Listeners run at module evaluation and module barrels import each other; accepting both `placed` and `() => placed` would be two ways to do one thing. What would change it: a typed string id (`event: "orders.placed"`) checked against the registry type, which costs the one-way type flow.
+- **Options are flat,** like `authorize` and `expose`, not under `config: {}` (which already means `ctx.config`). They arrive with durable delivery (below).
+
+### No per-function middleware
+
+tRPC, oRPC and TanStack Start chain `.use(mw)` because they are the HTTP edge: middleware resolves the session or organization and adds it to ctx. Here that work happens once, at the entry, into `scope`, the way Phoenix 1.8 builds `%Scope{}` in a plug and passes it first to every context function. What's left per function is covered without a chain:
+
+- **who may call it:** `authorize`, a type guard that narrows `ctx.scope`
+- **load what it needs:** a helper, `findProject(ctx, id)`, inside the transaction (Rails' `before_action :set_project`, but retried and account-scoped)
+- **cross-cutting:** `wrap` with typed `meta`, and plugins (below)
+
+What would change it: a real app needing ctx types that depend on per-function middleware order. Neither we nor Fable could construct one a helper doesn't cover.
+
+**Type-check cost, measured.** A generated app of N modules, each with 2 queries, 2 mutations (calling `ctx.run` across modules and `emit`), an event and a listener, plus a registry and one `caller.run` per function. The baseline is the same zod schemas as plain async functions, without authorize narrowing, output checks, events or a registry, so it's a floor, not an equal. Check time, best of 2 or 3 runs:
+
+| Modules (functions) | Plain, TS 7 / 5.9 | Five overloads (0.4.0), TS 7 / 5.9 | One signature, TS 7 / 5.9 |
+|---|---|---|---|
+| 150 (600) | 0.09s / 0.58s | 0.40s / 1.56s | 0.36s / 1.37s |
+| 300 (1,200) | 0.30s / 1.07s | 0.88s / 2.52s | 0.75s / 2.64s |
+
+- **Linear,** about 2.5x to 4x the floor: about 0.4ms per function over it on TS 7. The real shop checks in 0.32s on TS 7, most of it Next.js.
+- **One signature replaced the five `Constructor` overloads.** Same speed (within 10%), much clearer mistakes: `expose: true` without `output` now says "Property 'output' is missing" instead of "No overload matches this call", and a wrong return type points at the handler. The trace showed overloads re-checking a definition per failed candidate, but that wasn't where the time went.
+- **A 10x trap:** typing the exposed `output` as `OS & Schema` made TypeScript compare each zod type structurally against Standard Schema on every definition (0.40s became 4.4s at 600 functions). The field stays `output: OS`, with a comment.
+- **Variance annotations** (`out` on `Fn` and `EventDef`, the trick TanStack Start uses with `in out`): no measurable change (874,099 vs 874,579 instantiations), so not adopted.
+- **`any` compared with the chain libraries:** 10 in our 832-line core; tRPC 40 in 792 (`procedureBuilder.ts`); oRPC 16 in 327 (`builder.ts`) and 29 in 105 (`router.ts`); Convex 89 in 772; TanStack Start about 35 in 934 (`createServerFn.ts`). Chains erase at every step because each step changes the builder's type.
+
+### Plugins without a chain
+
+Plugin contributions are app-wide and known at `init`, so the object model carries them:
+
+```ts
+type Config = { scope: Scope; db: Tx; services: Services; plugins: [Audit, RateLimit] };   // types only
+export const { query, mutation, listener, createRegistry } = init<Config>();
+
+mutation({
+  meta: { rateLimit: { max: 10 } },          // typed by the plugin, under its name
+  async handler(ctx, input) {
+    await ctx.audit.log("refund", { orderId: input.orderId });   // ctx added by the plugin, under its name
+  },
+});
+
+createRegistry({ modules, plugins: [audit(), rateLimit({ store })] });  // a value for each declared plugin, like services
+```
+
+- **Namespaced by plugin name** on both sides (`meta.rateLimit`, `ctx.audit`): no collisions, and it greps.
+- **Types:** `MetaOf<C>` adds `{ [P in Plugins as P["name"]]?: P["meta"] }`, and the ctx per kind adds `{ [P in Plugins as P["name"]]: P["ctx"][K] }`, so a plugin can add to mutations only.
+- **Runtime:** `{ name, wrap?, ctx?: { query?, mutation?, action? }, onRegister? }`. `wrap` is the existing hook; `onRegister` sees every definition, for checks like "every exposed mutation has a rate limit".
+- **Jobs are core, not a plugin.** Scheduling needs the transaction handle, which is the dispatcher's seam.
+- **What would change it:** a plugin whose ctx type depends on per-function order. Same test as middleware above.
+
+### Durable events: a ladder, composed by wrapping
+
+Configured once, where the registry is created:
+
+```ts
+createRegistry({ modules, events: inProcess() });                        // default: zero infra, lost on a crash
+createRegistry({ modules, events: cloudflareQueue(env.EVENTS) });        // sent after commit: the Rails/Laravel model, lossy
+createRegistry({ modules, events: outbox() });                           // durable, Postgres only
+createRegistry({ modules, events: outbox(cloudflareQueue(env.EVENTS)) }); // durable handoff, plus queue retries, DLQ, concurrency
+createRegistry({ modules, events: pgBoss(boss) });                       // transactional natively, no outbox needed
+```
+
+- **Ship the lossy mode.** It's the Rails 8.2 and Laravel `after_commit` model, and fine for consequences you can lose (a live update, a cache warm-up). Fizzy uses it on purpose.
+- **`outbox()` is the durable path:** it inserts rows in the mutation's transaction, flushes them after commit through `waitUntil` (which the registry already takes), and a sweeper retries what a crash left behind. It's Fizzy's "state row plus recurring sweep", without writing it by hand. It needs only Postgres, which every app with mutations has, so it behaves the same on Node, Workers and Vercel; a queue on top adds isolation, concurrency and a DLQ.
+- **pg-boss needs no outbox:** `send(..., { db })` joins the transaction, like Oban or Laravel's database driver.
+- **Every dispatcher declares its guarantee** (`at-most-once` or `at-least-once`), and `logic-sdk check` prints it, so the choice is visible.
+- **Adapters per provider, as subpaths** with optional peer dependencies: `logic-sdk/pg-boss`, `logic-sdk/outbox`, `logic-sdk/cloudflare`, `logic-sdk/vercel`. Runtime is the host entry's job, and each provider's adapter covers both events and crons. Inngest and Upstash ship the same way: one core, a thin adapter per target.
+- **Cost:** the first table the library owns, and the sweeper needs crons.
+
+### Crons: a definer, discovered like listeners
+
+```ts
+// orders/crons.ts
+export const expireCarts = cron({
+  description: "Expire carts nobody touched for a day",
+  schedule: "*/15 * * * *",
+  run: expireStale,          // a function, run with its policy, validation and tracing
+  scope: system,             // required: a cron has no caller, so it says who it runs as
+});
+```
+
+- **One unit per export,** exported through the module's `index.ts` and found by `createRegistry({ modules })` like listeners, so a new cron can't be forgotten. No central file and no `define` prefix: it reads like `query`, `event` and `listener`.
+- **The library declares; the platform triggers:**
+  - Node with pg-boss: the adapter calls `boss.schedule`, which dedupes across instances.
+  - Cloudflare: `scheduled: (c) => registry.crons.handle(c.cron)`, with the expressions listed in wrangler `triggers.crons`.
+  - Vercel: one route, `/api/logic/cron/[name]`, listed under `schedules` in `vercel.json` (Cron Jobs are now legacy there).
+- **Open:** a CLI drift check (a wrangler deploy replaces all triggers, so a missing one is a silently dead cron). Maybe later, maybe too much.
+
+### Options: correctness in code, tuning in infra
+
+**The rule:** if an option changes whether the result is correct, it belongs on the listener, in code, chosen by you. If it changes capacity or operations, it belongs to the transport or the platform config. Laravel draws the same line: a job's `$tries` beats the worker's `--tries`, while Cloudflare and Oban put concurrency in queue config.
+
+| On the listener | Meaning |
+|---|---|
+| `retries` | how many times to retry after a failure |
+| `delay` | run it N seconds after the event |
+| `key` | same key runs one at a time, in order (per conversation, per account) |
+| `dedupe` | never run twice for the same event; defaults to event id plus listener id |
+| `timeout` | give up after N seconds |
+
+Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retention.
+
+**Not every transport supports every option.** pg-boss covers all of them, going by its docs and a real app's use (retry options per job, `singletonKey`, the `key_strict_fifo` policy, `startAfter`). Cloudflare Queues takes delay per message but retries, concurrency and the DLQ per consumer; we found no per-key ordering guarantee (unverified either way; a real app's notes say per-key FIFO needs a Durable Object or ordering in Postgres). Vercel Queues has retry callbacks, delay and idempotency keys; per-key ordering is unknown. So:
+
+- each transport declares **capabilities**
+- a correctness option it can't honour (`key`, `dedupe`) **throws at `createRegistry`** and fails `check`
+- a tuning option it can't honour is emulated where the library can (retries via ack and retry), otherwise warned once
+- **never ignored silently.** `inProcess()` emulates everything naively, so tests behave the same whatever production uses.
+
+### Before durable events ship
+
+From Fable's review, each with what the mature stacks already learned:
+
+1. **Deliver per (event, listener), not per event.** Today one failing listener makes the healthy ones re-run on retry. Rails, Laravel and Oban all make the job the unit; a listener is our job.
+2. **Let transports acknowledge.** `deliver` gets a `dispatch` that never throws, so a queue adapter can't ack or retry a message, while `registry.dispatch` throws: two paths with different rules. One dispatch that returns per-listener results, with `inProcess` doing the swallowing.
+3. **Stable listener ids.** Ids are export names; with durable delivery they become queue or consumer names, and a rename orphans messages in flight. Inngest's function id "should not change between deploys". An optional `id`, or a CLI check on renames.
+4. **Scope at rest goes stale.** A retry days later re-checks old roles. Decide a projection of the scope for events before storing it.
+5. **Old payloads after a deploy.** Payloads are validated again at delivery, so a schema change can turn queued messages into poison that retries forever. Laravel stores exhausted jobs in `failed_jobs` (`queue:retry` re-runs them) and can discard jobs whose model is gone; Oban marks jobs `discarded` after `max_attempts`; Solid Queue doesn't auto-retry a job whose process died. We need the same: a failed state you can list and retry, and a versioning rule for payloads.
+6. **A real event depth on the durable path.** `Envelope` needs `depth` and `attempt`; today `registry.dispatch` starts every stored envelope at depth 1, which loses the loop limit across hops. (Listener `meta` in `wrap` landed with `listener({...})`.)

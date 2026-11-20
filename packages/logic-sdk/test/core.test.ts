@@ -7,7 +7,7 @@ import { expect, test } from "bun:test";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; locale: string };
-const { query, mutation, action, event, on } = init<{ scope: Scope; db: Store; services: { log: string[] } }>();
+const { query, mutation, action, event, listener } = init<{ scope: Scope; db: Store; services: { log: string[] } }>();
 const anyone = () => true;
 const signedIn = (s: Scope): s is Scope & { actor: string } => s.actor !== null;
 
@@ -71,10 +71,10 @@ const greet = action({
 });
 const items = { added, list, add, addTwo, typed, locale, whoami, greet };
 
-const onAdded = on(() => added, async ({ services, event, scope }, { name }) => {
+const onAdded = listener({ event: () => added, description: "Reacts to added", handler: async ({ services, event, scope }, { name }) => {
   if (name === "listener-fails") throw new Error("listener exploded");
   services.log.push(`added ${name} (${event.name}, ${scope.locale})`);
-});
+} });
 const log = { onAdded };
 
 function setup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
@@ -453,7 +453,7 @@ const reg = {
   }),
 } as const;
 const seen: { at: unknown }[] = [];
-const regListeners = { onStamped: on(() => stamped, async (_, payload) => { seen.push(payload); }) };
+const regListeners = { onStamped: listener({ event: () => stamped, description: "Reacts to stamped", handler: async (_, payload) => { seen.push(payload); } }) };
 
 function regSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
   const db = memoryDatabase();
@@ -508,7 +508,7 @@ test("review #7: registry.dispatch throws when a listener fails (durable consume
 test("listener loops stop at maxEventDepth and are reported, not thrown", async () => {
   const ping = event({ payload: z.object({ n: z.number() }) });
   const bump = mutation({ description: "re-emit", input: z.object({ n: z.number() }), handler: async ({ emit }, { n }) => emit(ping, { n }) });
-  const loop = on(() => ping, async ({ run }, { n }) => { await run(bump, { n: n + 1 }); });
+  const loop = listener({ event: () => ping, description: "Reacts to ping", handler: async ({ run }, { n }) => { await run(bump, { n: n + 1 }); } });
   const errors: string[] = [];
   const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth: 5, onError: (e) => errors.push((e as Error).message) });
   await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
@@ -601,7 +601,7 @@ test("the default listener-loop limit is 8 hops", async () => {
   const ping = event({ payload: z.object({ n: z.number() }) });
   const bump = mutation({ description: "re-emit", input: z.object({ n: z.number() }), handler: async ({ emit }, { n }) => emit(ping, { n }) });
   const hops: number[] = [];
-  const loop = on(() => ping, async ({ run }, { n }) => { hops.push(n); await run(bump, { n: n + 1 }); });
+  const loop = listener({ event: () => ping, description: "Reacts to ping", handler: async ({ run }, { n }) => { hops.push(n); await run(bump, { n: n + 1 }); } });
   const errors: string[] = [];
   const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
   await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
@@ -619,6 +619,28 @@ test("meta is set per function and visible in wrap and the registry", async () =
   expect(r.functions.find((f) => f.id === "billing.tagged")?.fn.meta).toEqual({ tags: ["billing"] });
 });
 
+test("listeners carry meta into wrap, like functions", async () => {
+  const m = init<{ scope: Scope; db: Store; meta: { tags: string[] } }>();
+  const happened = m.event({ payload: z.object({}) });
+  const doIt = m.mutation({ description: "emit", async handler(ctx) { ctx.emit(happened, {}); } });
+  const audit = m.listener({ event: () => happened, description: "audit it", meta: { tags: ["audit"] }, async handler() {} });
+  const seen: string[] = [];
+  const r = m.createRegistry({
+    modules: { x: { happened, doIt, audit } },
+    database: memoryDatabase(),
+    wrap: async (call, next) => { seen.push(`${call.kind}:${call.meta?.tags ?? "-"}`); return next(); },
+  });
+  await r.as({ actor: "a", locale: "es" }).run(doIt);
+  expect(seen).toEqual(["mutation:-", "listener:audit"]);
+});
+
+test("listener needs an event thunk and a handler", () => {
+  // @ts-expect-error the event must be a thunk
+  expect(() => listener({ event: added, description: "x", async handler() {} })).toThrow(/thunk/);
+  // @ts-expect-error handler is required
+  expect(() => listener({ event: () => added, description: "x" })).toThrow(/handler/);
+});
+
 test("emit snapshots the payload: mutating it afterwards changes nothing", async () => {
   const got: string[] = [];
   const happened = event({ payload: z.object({ name: z.string() }) });
@@ -627,7 +649,7 @@ test("emit snapshots the payload: mutating it afterwards changes nothing", async
     emit(happened, payload);
     payload.name = "after";
   } });
-  const listen = on(() => happened, async (_, { name }) => { got.push(name); });
+  const listen = listener({ event: () => happened, description: "Reacts to happened", handler: async (_, { name }) => { got.push(name); } });
   await createRegistry<Scope>({ modules: { x: { happened, doIt, listen } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" }).run(doIt, {});
   expect(got).toEqual(["before"]);
 });
