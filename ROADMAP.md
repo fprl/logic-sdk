@@ -18,10 +18,6 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Adoptable one mutation at a time.** No DDD vocabulary in the API or docs.
 - **Before publishing the claim,** check DBOS Transact, Effect with `@effect/sql`, and Emmett once more. Closest found so far: noddde, Kumiko, AdonisJS.
 
-## Releases
-
-0.x until people use it in production and it feels right; breaking changes ship as minors meanwhile. Merge PRs freely, release in coherent batches (the Version Packages PR waits). At 1.0, do what TanStack does: many minors, rare majors, every breaking change a major with a migration note.
-
 ## Done
 
 - **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call) plus `expose: true`; record rules as sync `can*` checks in the handler; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
