@@ -255,9 +255,18 @@ Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retent
 - a tuning option it can't honour is emulated where the library can (retries via ack and retry), otherwise warned once
 - **never ignored silently.** `inProcess()` emulates everything naively, so tests behave the same whatever production uses.
 
+### The delivery contract (step 1 of durable events)
+
+- **A delivery is one listener's share of one event:** `{ id: "<event id>:<listener id>", listener, envelope }`. Queues carry one message per delivery, so a failing listener retries alone and the id is the dedupe key every transport agrees on.
+- **Three outcomes, not two.** `registry.deliver` resolves `"done"` or `"failed"` and throws only when a retry might help. Domain errors other than `conflict` (and a payload that no longer matches its schema) are `failed`: deterministic, so retrying burns attempts. Precedents split: Rails retries nothing unless `retry_on`, Inngest retries four times and offers `NonRetriableError`, Cloudflare retries three times by default. What would change it: an app where `not_found` heals on retry; then a per-listener opt-in.
+- **`attempt` comes from the transport** (`registry.deliver(d, { attempt: message.attempts })`), not the stored delivery, 1-based like Cloudflare's `attempts`, and listeners see it as `ctx.event.attempt`.
+- **Plain JSON at emit, for payload and scope,** in every dispatcher: a `Date` that survives `structuredClone` in-process arrives as a string through any queue and fails its schema only in production.
+- **`ctx.event` carries no scope.** Once a durable dispatcher stores ids instead of the scope, listeners would otherwise see two scopes; `ctx.scope` is the one they run as.
+- **`depth` rides on the envelope,** so the loop limit (`maxEventDepth`) holds across queue hops; it's checked when deliveries are built, inside the transaction, before anything is enqueued.
+
 ### Before durable events ship
 
-From Fable's review, each with what the mature stacks already learned:
+From Fable's review, each with what the mature stacks already learned. **Landed with the delivery contract:** 1, 2 and 6, plus the stale-payload half of 5 (a payload that fails its schema at delivery is `failed`, not retried) and the plain-JSON check from 4. **With the first durable transport:** 3, `store`/`load` from 4, and the failed state from 5.
 
 1. **Deliver per (event, listener), not per event.** Today one failing listener makes the healthy ones re-run on retry. Rails, Laravel and Oban all make the job the unit; a listener is our job.
 2. **Let transports acknowledge.** `deliver` gets a `dispatch` that never throws, so a queue adapter can't ack or retry a message, while `registry.dispatch` throws: two paths with different rules. One dispatch that returns per-listener results, with `inProcess` doing the swallowing.

@@ -95,6 +95,35 @@ export interface Envelope<P = unknown, S = object> {
   payload: P;
   scope: S;
   occurredAt: string;
+  /** Hops in the chain: 1 for an event a caller's mutation emitted, +1 each time a listener's mutation emits. */
+  depth: number;
+}
+
+/**
+ * One listener's share of one event: what a queue carries, one message each, so a failing listener retries alone.
+ * `id` (`<event id>:<listener id>`) is the key to dedupe on.
+ */
+export interface Delivery<P = unknown, S = object> {
+  id: string;
+  /** The listener's id, `"<module>.<export>"`. */
+  listener: string;
+  envelope: Envelope<P, S>;
+}
+
+/**
+ * What delivering one resolved to. `failed`: a rule said no (`invalid`, `unauthenticated`, `forbidden`, `not_found`,
+ * `rejected`) or the payload no longer matches its schema. Retrying can't help, so acknowledge it; it's been reported.
+ */
+export type DeliveryOutcome = "done" | "failed";
+
+/** The event a listener is handling. No scope here: `ctx.scope` is the one it runs as. */
+export interface ListenerEvent<O = unknown> {
+  id: string;
+  name: string;
+  payload: O;
+  occurredAt: string;
+  /** 1 on the first try. Queues count their redeliveries. */
+  attempt: number;
 }
 
 export interface Listener<O = unknown> {
@@ -172,7 +201,7 @@ export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, 
   signal: AbortSignal | undefined;
 }
 export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C> {
-  event: Envelope<unknown, ScopeOf<C>> & { payload: O };
+  event: ListenerEvent<O>;
 }
 
 /**
@@ -287,17 +316,28 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   retryable?(error: unknown): boolean;
 }
 
+/** Delivers one: resolves when the listener is done or failed for good (acknowledge it), throws when a retry might help. */
+export type RunDelivery = (delivery: Delivery, options?: { attempt?: number }) => Promise<DeliveryOutcome>;
+
 export interface Dispatcher {
-  /** Inside the transaction, before commit. In-process: nothing. Outbox: insert rows with `tx`. */
-  enqueue?(tx: unknown, envelopes: Envelope[]): Promise<void>;
-  /** After commit. `dispatch` runs the listeners for one envelope and never throws (failures go to `onError`). */
-  deliver(envelopes: Envelope[], dispatch: (envelope: Envelope) => Promise<void>): Promise<void>;
+  /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
+  enqueue?(tx: unknown, deliveries: Delivery[]): Promise<void>;
+  /** After commit. Every failure `run` meets is already reported to `onError`; a throw means "retry it". */
+  deliver(deliveries: Delivery[], run: RunDelivery): Promise<void>;
 }
 
-/** Default dispatcher: delivers right after commit, in this process. Lost on crash: use an outbox when that matters. */
+/** What `onError` gets with a failure after commit. `delivery` and `attempt` are set when one listener's delivery failed. */
+export interface FailureInfo {
+  listener: string;
+  envelope: Envelope | undefined;
+  delivery?: string;
+  attempt?: number;
+}
+
+/** Default dispatcher: delivers right after commit, in this process, once. Lost on crash: use an outbox when that matters. */
 export const inProcess = (): Dispatcher => ({
-  async deliver(envelopes, dispatch) {
-    for (const e of envelopes) await dispatch(e);
+  async deliver(deliveries, run) {
+    for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
   },
 });
 
@@ -329,7 +369,7 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Failures after commit land here (listeners, dispatcher). They never fail the caller. */
-  onError?: (error: unknown, info: { listener: string; envelope: Envelope | undefined }) => void;
+  onError?: (error: unknown, info: FailureInfo) => void;
   now?: () => Date;
   /** Max chain of listener → mutation → event → listener… before delivery stops. Default 8 (real chains are 2 or 3). */
   maxEventDepth?: number;
@@ -475,8 +515,11 @@ export interface Registry<S extends object = object, Mods extends Record<string,
   readonly listeners: readonly RegisteredListener[];
   /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
   idOf(fnOrEvent: object): string;
-  /** Deliver one stored envelope to its listeners (durable dispatchers). Throws if any listener failed, so you can retry. */
-  dispatch(envelope: Envelope): Promise<void>;
+  /**
+   * Run one stored delivery (queue consumers): `await registry.deliver(message.body, { attempt: message.attempts })`.
+   * Resolves `"done"` or `"failed"` (acknowledge both), throws when a retry might help.
+   */
+  deliver: RunDelivery;
   /** @internal used by `logic-sdk/testing` */
   readonly [INTERNAL]: {
     options: RegistryOptions<Mods>;
@@ -521,6 +564,36 @@ function freezeConfig(value: unknown, path = "config"): unknown {
 
 const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
   issues.map((i) => ({ message: i.message, path: i.path?.map((p) => (typeof p === "object" ? p.key : p)) }));
+
+/** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
+class StalePayload extends Error {}
+
+/** What survives a queue: JSON. Plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped). */
+function assertPlainJson(value: unknown, what: string, hint: string): void {
+  const seen = new Set<object>();
+  const check = (v: unknown, path: string): void => {
+    const fail = (found: string): never => {
+      throw new Error(`[logic-sdk] ${what} isn't plain JSON${path ? ` at ${path}` : ""}: ${found}. Events go through queues as JSON; ${hint}.`);
+    };
+    if (v === null || v === undefined || typeof v === "string" || typeof v === "boolean") return;
+    if (typeof v === "number") {
+      if (!Number.isFinite(v)) fail(String(v));
+      return;
+    }
+    if (typeof v !== "object") fail(`a ${typeof v}`);
+    const obj = v as object;
+    if (seen.has(obj)) fail("a circular reference");
+    seen.add(obj);
+    if (Array.isArray(obj)) obj.forEach((item, i) => check(item, `${path}[${i}]`));
+    else {
+      const proto = Object.getPrototypeOf(obj);
+      if (proto !== Object.prototype && proto !== null) fail(`a ${obj.constructor?.name ?? "class instance"}`);
+      for (const [k, item] of Object.entries(obj)) check(item, path ? `${path}.${k}` : k);
+    }
+    seen.delete(obj);
+  };
+  check(value, "");
+}
 
 const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v === "object" && BRAND in v;
 
@@ -581,7 +654,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const attempts = Math.max(1, options.retry?.attempts ?? 3);
   const reportRaw =
     options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.listener} failed`, e));
-  const report = (e: unknown, info: { listener: string; envelope: Envelope | undefined }) => {
+  const report = (e: unknown, info: FailureInfo) => {
     try {
       reportRaw(e, info);
     } catch (inner) {
@@ -630,37 +703,48 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
   const eventByName = new Map(events.map((e) => [e.id, e.event]));
 
-  /** Run every listener for one envelope. Returns the failures instead of throwing. */
-  async function runListeners(envelope: Envelope, eventDepth: number) {
-    const failures: { listener: string; error: unknown }[] = [];
-    const event = eventByName.get(envelope.name);
-    for (const l of byEvent.get(envelope.name) ?? []) {
-      const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth };
-      try {
-        await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
-          const payload = event ? await parseOwn(event.payload, envelope.payload, `${envelope.name} payload`) : envelope.payload;
-          return l.listener.handler({ ...actionCtx(frame, l.id), event: { ...envelope, payload } } as never, payload); // SAFETY: as in invoke
-        });
-      } catch (error) {
-        failures.push({ listener: l.id, error });
-      }
+  const listenerById = new Map(listeners.map((l) => [l.id, l]));
+
+  /** One delivery per listener of each event, unless the chain is too deep (a listener loop). */
+  function toDeliveries(envelopes: Envelope[]): Delivery[] {
+    const tooDeep = envelopes.find((e) => e.depth > maxEventDepth);
+    if (tooDeep) {
+      report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), { listener: "(dispatcher)", envelope: tooDeep });
+      return [];
     }
-    return failures;
+    return envelopes.flatMap((e) => (byEvent.get(e.name) ?? []).map((l) => ({ id: `${e.id}:${l.id}`, listener: l.id, envelope: e })));
   }
 
-  /** In-process delivery: failures go to onError. */
-  const deliverOne = (eventDepth: number) => async (envelope: Envelope) => {
-    for (const f of await runListeners(envelope, eventDepth)) report(f.error, { listener: f.listener, envelope });
-  };
-
-  /** Public: for durable dispatchers. Throws an AggregateError if any listener failed, so the consumer can retry. */
-  async function dispatch(envelope: Envelope) {
-    const failures = await runListeners(envelope, 1);
-    if (failures.length)
-      throw new AggregateError(
-        failures.map((f) => f.error),
-        `[logic-sdk] ${failures.length} listener(s) failed for ${envelope.name}: ${failures.map((f) => f.listener).join(", ")}`,
-      );
+  /** Run one listener for one event. Reports every failure; throws only when a retry might help. */
+  async function deliver(delivery: Delivery, options: { attempt?: number } = {}): Promise<DeliveryOutcome> {
+    const { envelope } = delivery;
+    const attempt = options.attempt ?? 1;
+    const info: FailureInfo = { listener: delivery.listener, envelope, delivery: delivery.id, attempt };
+    const l = listenerById.get(delivery.listener);
+    if (!l) {
+      const e = new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
+      report(e, info);
+      throw e;
+    }
+    const event = eventByName.get(envelope.name);
+    const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth: envelope.depth };
+    try {
+      await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
+        let payload = envelope.payload;
+        if (event) {
+          const r = await event.payload["~standard"].validate(payload);
+          if (r.issues) throw new StalePayload(`[logic-sdk] ${envelope.name} payload no longer matches its schema: ${JSON.stringify(describeIssues(r.issues))}`);
+          payload = r.value;
+        }
+        const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
+        return l.listener.handler({ ...actionCtx(frame, l.id), event: ctxEvent } as never, payload); // SAFETY: as in invoke
+      });
+      return "done";
+    } catch (error) {
+      report(error, info);
+      if (error instanceof StalePayload || (isDomainError(error) && error.kind !== "conflict")) return "failed";
+      throw error;
+    }
   }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
@@ -692,6 +776,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       db: tx.db,
       emit: (event, payload) => {
         const name = idOf(event);
+        // a queue carries JSON: a Date or a class instance would work in-process and break only in production
+        assertPlainJson(payload, `${name} payload`, "send an ISO string and let the schema turn it into a Date");
+        assertPlainJson(frame.scope, `the scope emitting ${name}`, "keep the scope to ids and plain values");
         payload = structuredClone(payload); // what was emitted is what gets delivered, even if the caller mutates it after
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope: Envelope = {
@@ -700,6 +787,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           payload,
           scope: structuredClone(frame.scope),
           occurredAt: now().toISOString(),
+          depth: (frame.eventDepth ?? 0) + 1,
         };
         tx.outbox.push(envelope);
         const check = parseOwn(event.payload, payload, `${name} payload`).then(() => {});
@@ -764,7 +852,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       // top-level mutation: open the transaction, commit, then deliver events.
       // A lost race (deadlock, serialization failure) re-runs it in a fresh transaction.
       const input = await prepare();
-      let committed: { out: unknown; outbox: Envelope[] };
+      let committed: { out: unknown; outbox: Envelope[]; deliveries: Delivery[] };
       for (let attempt = 1; ; attempt++) {
         let state: TxState | undefined;
         try {
@@ -774,8 +862,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
             const out = await execute(input, mutationCtx({ ...frame, tx }, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
-            await dispatcher.enqueue?.(txDb, tx.outbox);
-            return { out, outbox: tx.outbox };
+            const deliveries = toDeliveries(tx.outbox);
+            if (deliveries.length) await dispatcher.enqueue?.(txDb, deliveries);
+            return { out, outbox: tx.outbox, deliveries };
           });
           break;
         } catch (e) {
@@ -791,23 +880,16 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       }
 
       // committed. Nothing below may fail the caller.
-      if (committed.outbox.length) await afterCommit(committed.outbox, frame);
+      if (committed.outbox.length) await afterCommit(committed.outbox, committed.deliveries);
       return committed.out;
     });
   }
 
-  async function afterCommit(outbox: Envelope[], frame: Frame) {
+  async function afterCommit(outbox: Envelope[], deliveries: Delivery[]) {
     try {
       for (const e of outbox) o.record?.(e);
-      const eventDepth = (frame.eventDepth ?? 0) + 1;
-      if (eventDepth > maxEventDepth) {
-        report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), {
-          listener: "(dispatcher)",
-          envelope: outbox[0],
-        });
-        return;
-      }
-      const delivery = (async () => dispatcher.deliver(outbox, deliverOne(eventDepth)))().catch((e) =>
+      if (!deliveries.length) return;
+      const delivery = (async () => dispatcher.deliver(deliveries, deliver))().catch((e) =>
         report(e, { listener: "(dispatcher)", envelope: outbox[0] }),
       );
       if (options.waitUntil) {
@@ -835,7 +917,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     events,
     listeners,
     idOf,
-    dispatch,
+    deliver,
     [INTERNAL]: {
       options,
       config,

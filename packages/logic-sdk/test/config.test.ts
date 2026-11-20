@@ -104,7 +104,7 @@ test("config: not in event envelopes; a listener reads its registry's config", a
   await t.transaction(async (tx) => {
     await tx.as(anon).run(place, { items: 5 });
     const envelope: Envelope = tx.events[0]!;
-    expect(Object.keys(envelope).sort()).toEqual(["id", "name", "occurredAt", "payload", "scope"]);
+    expect(Object.keys(envelope).sort()).toEqual(["depth", "id", "name", "occurredAt", "payload", "scope"]);
     expect(JSON.stringify(envelope)).not.toContain("shop.test");
     expect((seen.listener as AppConfig).orders.maxItems).toBe(5);
   });

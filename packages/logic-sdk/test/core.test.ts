@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  createRegistry, init, isDomainError, type Call, type DomainError, type Envelope,
+  createRegistry, init, isDomainError, type Call, type Delivery, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
@@ -240,24 +240,26 @@ test("wrap sees every call with depth", async () => {
   expect(calls).toEqual(["0:mutation:items.addTwo", "1:mutation:items.add", "1:mutation:items.add", "0:listener:log.onAdded", "0:listener:log.onAdded"]);
 });
 
-test("custom dispatcher: enqueue inside the transaction, deliver after", async () => {
+test("custom dispatcher: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
   const seen: string[] = [];
   const { app } = setup({
     events: {
-      async enqueue(tx, envs) { seen.push(`enqueue ${envs.map((e) => e.name)} in tx=${tx !== undefined}`); },
-      async deliver(envs: Envelope[], dispatch) { seen.push("deliver"); for (const e of envs) await dispatch(e); },
+      async enqueue(tx, deliveries) { seen.push(`enqueue ${deliveries.map((d) => `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
+      async deliver(deliveries, run) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
     },
   });
   await app.run(items.add, { name: "q" });
-  expect(seen).toEqual(["enqueue items.added in tx=true", "deliver"]);
+  expect(seen).toEqual(["enqueue items.added→log.onAdded in tx=true", "deliver", "done"]);
 });
 
-test("envelopes are JSON-serializable", async () => {
-  const envs: Envelope[] = [];
-  const { app } = setup({ events: { async deliver(e) { envs.push(...e); } } });
+test("deliveries are JSON: what a queue carries comes back and runs", async () => {
+  const deliveries: Delivery[] = [];
+  const { app, registry } = setup({ events: { async deliver(d) { deliveries.push(...d); } } });
   await app.run(items.add, { name: "j" });
-  const e = JSON.parse(JSON.stringify(envs[0]));
-  expect(typeof e.id === "string" && e.name === "items.added" && e.scope.locale === "es" && e.payload.name === "j").toBe(true);
+  const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
+  expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
+  expect(d.id).toEqual(`${d.envelope.id}:log.onAdded`);
+  expect(await registry.deliver(d, { attempt: 2 })).toEqual("done");
 });
 
 test("abort signal: checked before the call starts, never between its steps", async () => {
@@ -295,7 +297,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: memoryDatabase(),
     services: { log: [] },
-    events: { deliver: async (envelopes: Envelope[]) => void seen.push(...envelopes) },
+    events: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -484,11 +486,63 @@ test("review #6: a caught nested invalid-input failure dooms the transaction too
   expect(db.store.rows.t).toEqual(undefined);
 });
 
-test("review #7: registry.dispatch throws when a listener fails (durable consumers can retry)", async () => {
-  const { d } = regSetup();
-  const envelope = { id: "e1", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "" };
-  await expect(d.dispatch(envelope)).rejects.toThrow(/log\.onAdded/);
-  await d.dispatch({ ...envelope, payload: { name: "fine" } });
+test("registry.deliver: done, failed for good, or throws to retry", async () => {
+  const reported: FailureInfo[] = [];
+  const { d } = regSetup({ onError: (_e, info) => reported.push(info) });
+  const envelope = { id: "e1", name: "items.added", payload: { name: "fine" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 };
+  const delivery = (payload: object, listener = "log.onAdded") => ({ id: `e1:${listener}`, listener, envelope: { ...envelope, payload } });
+  expect(await d.deliver(delivery({ name: "fine" }))).toEqual("done");
+  // an unexpected error: a retry might help, so it throws (the queue redelivers)
+  await expect(d.deliver(delivery({ name: "listener-fails" }), { attempt: 3 })).rejects.toThrow(/listener exploded/);
+  expect(reported.at(-1)).toMatchObject({ listener: "log.onAdded", delivery: "e1:log.onAdded", attempt: 3 });
+  // a payload that no longer matches its schema: retrying can't help
+  expect(await d.deliver(delivery({ nope: 1 }))).toEqual("failed");
+  // a renamed or removed listener throws, so the message ends in the dead-letter queue
+  await expect(d.deliver(delivery({ name: "fine" }, "log.gone"))).rejects.toThrow(/log\.gone isn't a registered listener/);
+});
+
+test("a listener's domain error is final (failed, reported); a conflict throws to retry", async () => {
+  const happened = event({ payload: z.object({ kind: z.string() }) });
+  const react = listener({
+    event: () => happened,
+    async handler(ctx, { kind }) {
+      if (kind === "gone") throw ctx.errors.notFound();
+      if (kind === "taken") throw ctx.errors.conflict("taken");
+    },
+  });
+  const errors: string[] = [];
+  const r = createRegistry<Scope>({ modules: { x: { happened, react } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
+  const delivery = (kind: string) => ({ id: "e:x.react", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: { kind }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
+  expect(await r.deliver(delivery("gone"))).toEqual("failed");
+  await expect(r.deliver(delivery("taken"))).rejects.toMatchObject({ kind: "conflict" });
+  expect(errors).toHaveLength(2);
+});
+
+test("emit takes plain JSON only, so what works in-process works through a queue", async () => {
+  const at = event({ payload: z.object({ at: z.any() }) });
+  const emitDate = mutation({ handler: async (ctx) => ctx.emit(at, { at: new Date() }) });
+  const emitString = mutation({ handler: async (ctx) => ctx.emit(at, { at: "2026-07-01T00:00:00Z" }) });
+  const r = createRegistry<Scope>({ modules: { x: { at, emitDate, emitString } }, database: memoryDatabase() });
+  await expect(r.as({ actor: "a", locale: "es" }).run(emitDate)).rejects.toThrow(/x\.at payload isn't plain JSON at at: a Date/);
+  await expect(r.as({ actor: "a", locale: "es", when: new Date() } as Scope).run(emitString)).rejects.toThrow(/scope emitting x\.at isn't plain JSON at when: a Date/);
+  await r.as({ actor: "a", locale: "es" }).run(emitString);
+  const loop: Record<string, unknown> = {};
+  loop.self = loop;
+  const emitLoop = mutation({ handler: async (ctx) => ctx.emit(at, { at: loop }) });
+  const shared = { a: 1 };
+  const emitShared = mutation({ handler: async (ctx) => ctx.emit(at, { at: [shared, shared] }) }); // shared isn't circular
+  const r2 = createRegistry<Scope>({ modules: { x: { at, emitLoop, emitShared } }, database: memoryDatabase() });
+  await expect(r2.as({ actor: "a", locale: "es" }).run(emitLoop)).rejects.toThrow(/at at\.self: a circular reference/);
+  await r2.as({ actor: "a", locale: "es" }).run(emitShared);
+});
+
+test("listeners see the event without a scope: ctx.scope is the one they run as", async () => {
+  const happened = event({ payload: z.object({}) });
+  const doIt = mutation({ handler: async (ctx) => ctx.emit(happened, {}) });
+  let seen: object | undefined;
+  const look = listener({ event: () => happened, async handler(ctx) { seen = ctx.event; } });
+  await createRegistry<Scope>({ modules: { x: { happened, doIt, look } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" }).run(doIt);
+  expect(Object.keys(seen!).sort()).toEqual(["attempt", "id", "name", "occurredAt", "payload"]);
 });
 
 test("listener loops stop at maxEventDepth and are reported, not thrown", async () => {
