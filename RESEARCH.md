@@ -131,11 +131,23 @@ Per-function ctx extension, as opposed to per request or per app, has no clear u
 
 The TanStack counts are a rough grep that includes a few words in comments. Every library erases types where it stores differently typed functions; chains erase at each step because each step changes the builder's type. TanStack Start also casts in `handler` because a Babel transform rewrites its signature at build time.
 
+## Scope at rest: who a job runs as
+
+A job may run hours later, after retries. None of these stacks carry the caller's identity or permissions into it as a snapshot.
+
+- **Rails:** records go by reference (GlobalID) and are loaded again when the job runs; a deleted record raises `ActiveJob::DeserializationError`, handled with `discard_on` ([guide](https://guides.rubyonrails.org/active_job_basics.html)). `I18n.locale` and the timezone are written into the payload and restored ([`core.rb`](https://github.com/rails/rails/blob/main/activejob/lib/active_job/core.rb)). `Current` attributes are not carried: they reset around each job, and the API docs show a job setting `Current.person` from its own arguments ([CurrentAttributes](https://api.rubyonrails.org/classes/ActiveSupport/CurrentAttributes.html)).
+- **Fizzy:** `app/jobs/concerns/account_tenanted.rb`, prepended to `ApplicationJob`, captures `Current.account` at enqueue as a GlobalID, finds it again at perform and wraps the job in `Current.with_account`. A missing account raises `DeserializationError` "where discard_on can handle it". It carries the account, never the user.
+- **Laravel:** `SerializesModels` queues only the model's id and re-fetches it fresh; a deleted model is `ModelNotFoundException`, or a quiet discard with `#[DeleteWhenMissingModels]` ([queues](https://laravel.com/docs/13.x/queues)). The `Context` facade is dehydrated into the job payload and hydrated when it runs, so you choose what crosses ([context](https://laravel.com/docs/12.x/context)). Tenancy packages restore the tenant per job ([stancl](https://tenancyforlaravel.com/docs/v3/queues), [spatie](https://spatie.be/docs/laravel-multitenancy/v4/basic-usage/making-queues-tenant-aware)). The queues docs re-check authorization inside the job (`$this->user->authorize(...)`) and fail it for good when "a user's permissions being revoked".
+- **Oban:** args are JSON ([worker](https://oban.hexdocs.pm/Oban.Worker.html)). The Phoenix scopes guide doesn't cover jobs; the community answer is to pass the user id and rebuild the scope in `perform/1`, with a privileged scope for system jobs ([forum](https://elixirforum.com/t/oban-on-phoenix-apps-with-scope-contexts/74021), unofficial).
+
+**The common pattern** (inference from all of the above): store identifiers, not snapshots; load them fresh at run time; treat "gone" as discard, not retry; restore ambient context (tenant, locale, timezone) explicitly; re-check permissions rather than trust the enqueuer.
+
 ## What we take from each
 
 - **Rails:** the after-commit default is the honest baseline for external queues, with the crash window documented, not hidden. Small adapter interface (enqueue, enqueue at).
 - **Fizzy:** where the consequence matters, a row plus a recurring sweep. We offer that as `outbox()`, so nobody writes it by hand.
 - **Laravel:** options that change correctness live on the job (`$tries`, backoff, uniqueness), not on the worker. Failures are rows you can list and retry. The database queue joins the transaction by default.
+- **Scope at rest:** store ids, rebuild the scope fresh at delivery, discard when what it points at is gone (Rails, Fizzy, Laravel). Our policies already re-run on every `ctx.run`, so a fresh scope gets Laravel's re-check for free.
 - **Phoenix and Oban:** transactional enqueue is worth headlining when the queue is in your database (pg-boss for us). Scope built at the edge, passed first: our `scope`.
 - **Convex:** schedule from a mutation, atomically; crons declared in code, one run at a time.
 - **Inngest and Upstash:** one core, a thin adapter per target. Stable ids for anything a queue refers to.

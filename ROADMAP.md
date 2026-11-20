@@ -38,7 +38,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
 2. **Durable events, then crons.** The plan is in DESIGN.md ("Next: listeners, plugins, durable events, crons").
-   - **First, the blockers:** deliver per (event, listener); one dispatch that lets transports ack or retry; `depth` and `attempt` on `Envelope` (the loop limit is lost on the durable path today); stable listener ids; a projection of the scope stored with events; a failed state you can list and retry, plus a versioning rule for payloads.
+   - **First, the blockers:** deliver per (event, listener); one dispatch that lets transports ack or retry; `depth` and `attempt` on `Envelope` (the loop limit is lost on the durable path today); stable listener ids; ids stored with events and the scope rebuilt fresh at delivery (`scope: { store, load }`); a failed state you can list and retry, plus a versioning rule for payloads.
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `retries`, `delay`, `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. Transports declare capabilities; an option they can't honour fails at startup, never silently.
    - **Crons:** `cron({ schedule, run, scope })` exported from a module and discovered like listeners. pg-boss schedules on Node; `registry.crons.handle(c.cron)` on Cloudflare; one route on Vercel Schedules.
