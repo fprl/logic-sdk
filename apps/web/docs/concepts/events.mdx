@@ -72,7 +72,16 @@ A listener whose mutation emits the event it listens to would loop forever. Deli
 
 ## Durability
 
-The default dispatcher delivers in-process, right after commit. If the process crashes between commit and delivery, the events are lost. Durable dispatchers (an outbox, a queue) are coming; the contract they plug into is already here:
+The default dispatcher delivers in-process, right after commit. If the process crashes between commit and delivery, the events are lost. When that matters, use the [outbox](/docs/adapters/drizzle#outbox): deliveries are rows written in the mutation's transaction, run after commit and retried until done.
+
+```ts
+import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
+
+const events = outbox(db);
+const registry = createRegistry({ modules, database: drizzleAdapter(db), events });
+```
+
+The contract every dispatcher plugs into:
 
 - **One delivery per listener.** Each committed event becomes one `Delivery` per listener (`{ id, listener, envelope }`, where `id` is `<event id>:<listener id>`, the key to dedupe on), so a failing listener retries alone.
 - **`enqueue(tx, deliveries)`** runs inside the transaction; `deliver(deliveries, run)` runs after commit.

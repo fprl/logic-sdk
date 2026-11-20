@@ -68,7 +68,7 @@
     },
     "packages/cli": {
       "name": "@logic-sdk/cli",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "dependencies": {
         "@stricli/core": "^1.3.0",
         "jiti": "^2.7.0",
@@ -86,7 +86,7 @@
     },
     "packages/logic-sdk": {
       "name": "logic-sdk",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "bin": {
         "logic-sdk": "bin/logic-sdk.js",
       },
@@ -94,6 +94,7 @@
         "@standard-schema/spec": "^1.1.0",
       },
       "devDependencies": {
+        "@electric-sql/pglite": "^0.5.16",
         "@orpc/server": "2.0.0-beta.51",
         "@types/bun": "^1.4.4",
         "ai": "^7.0.177",
@@ -101,14 +102,16 @@
         "zod": "^4.6.7",
       },
       "peerDependencies": {
-        "@logic-sdk/cli": ">=0.3.0 <0.4.0",
+        "@logic-sdk/cli": ">=0.4.0 <0.5.0",
         "@orpc/server": ">=2.0.0-beta.51 <3",
         "ai": ">=7 <8",
+        "drizzle-orm": ">=1.0.0-rc.5 <2",
       },
       "optionalPeers": [
         "@logic-sdk/cli",
         "@orpc/server",
         "ai",
+        "drizzle-orm",
       ],
     },
   },
