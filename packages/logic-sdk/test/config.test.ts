@@ -73,13 +73,13 @@ test("config: read-only, and a copy, so nothing changes it under everyone else",
 
 test("config: plain data only, rejected with the path to the bad value", () => {
   const bad = (app: object) => () => make({ ...base, app } as any);
-  expect(bad({ url: "x", client: () => {} })).toThrow("config.app.client is a function. config holds plain data");
-  expect(bad({ url: "x", launch: new Date() })).toThrow("config.app.launch is Date"); // as an ISO string instead
-  expect(bad({ url: "x", hosts: new Map() })).toThrow("config.app.hosts is Map");
-  expect(bad({ url: "x", key: new Uint8Array([1]) })).toThrow("config.app.key is Uint8Array");
-  expect(bad({ url: "x", list: [1, new Set()] })).toThrow("config.app.list[1] is Set");
+  expect(bad({ url: "x", client: () => {} })).toThrow("config isn't plain data at app.client: a function. config holds plain data");
+  expect(bad({ url: "x", launch: new Date() })).toThrow("config isn't plain data at app.launch: a Date"); // as an ISO string instead
+  expect(bad({ url: "x", hosts: new Map() })).toThrow("config isn't plain data at app.hosts: a Map");
+  expect(bad({ url: "x", key: new Uint8Array([1]) })).toThrow("config isn't plain data at app.key: a Uint8Array");
+  expect(bad({ url: "x", list: [1, new Set()] })).toThrow("config isn't plain data at app.list[1]: a Set");
   class Client { url = "x"; }
-  expect(bad(new Client())).toThrow("config.app is Client");
+  expect(bad(new Client())).toThrow("config isn't plain data at app: a Client");
 });
 
 test("config: arrays are frozen too; merging keeps odd keys and lets null replace a section", async () => {

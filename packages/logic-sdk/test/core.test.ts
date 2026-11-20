@@ -140,29 +140,21 @@ test("run options: { scope } changes who is calling for that call, and checks se
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
 });
 
-test("definitions the types reject also fail at runtime, naming the function", () => {
+test("expose: true without authorize or output fails at createRegistry, naming the function", () => {
   const msg = (fn: object) => { try { createRegistry<Scope>({ modules: { orders: { fn } }, database: memoryDatabase() }); return ""; } catch (e) { return (e as Error).message; } };
   // @ts-expect-error expose without authorize
   expect(msg(query({ output: z.number(), expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no authorize/);
   // @ts-expect-error expose without output
   expect(msg(query({ authorize: anyone, expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no output/);
-  // @ts-expect-error a policy name is not a policy
-  expect(msg(query({ authorize: "staff", handler: async () => 1 }))).toMatch(/orders\.fn has an authorize that isn't a policy function/);
-  // @ts-expect-error the event must be a thunk
-  expect(msg(listener({ event: added, async handler() {} }))).toMatch(/orders\.fn needs `event` as a thunk/);
-  // @ts-expect-error handler is required
-  expect(msg(listener({ event: () => added }))).toMatch(/orders\.fn needs a handler/);
 });
 
-test("a policy must return exactly true, and must be sync", async () => {
+test("a policy must return exactly true: truthy or a Promise is a denial", async () => {
   const truthy = query({ authorize: (() => "yes") as any, handler: async () => 1 });
   const asyncy = query({ authorize: (async () => true) as any, handler: async () => 1 });
   const r = createRegistry<Scope>({ modules: { p: { truthy, asyncy } }, database: memoryDatabase() });
   const app = r.as({ actor: "a", locale: "es" });
   await expect(app.run(truthy)).rejects.toMatchObject({ kind: "forbidden", code: "p.truthy.forbidden" });
-  const err = await app.run(asyncy).catch((e: unknown) => e);
-  expect(isDomainError(err)).toBe(false);
-  expect(err).toHaveProperty("message", expect.stringMatching(/returned a Promise/));
+  await expect(app.run(asyncy)).rejects.toMatchObject({ kind: "forbidden", code: "p.asyncy.forbidden" });
 });
 
 test("an internal function with authorize is checked too, even when your own code runs it", async () => {
@@ -523,8 +515,8 @@ test("emit takes plain JSON only, so what works in-process works through a queue
   const emitDate = mutation({ handler: async (ctx) => ctx.emit(at, { at: new Date() }) });
   const emitString = mutation({ handler: async (ctx) => ctx.emit(at, { at: "2026-07-01T00:00:00Z" }) });
   const r = createRegistry<Scope>({ modules: { x: { at, emitDate, emitString } }, database: memoryDatabase() });
-  await expect(r.as({ actor: "a", locale: "es" }).run(emitDate)).rejects.toThrow(/x\.at payload isn't plain JSON at at: a Date/);
-  await expect(r.as({ actor: "a", locale: "es", when: new Date() } as Scope).run(emitString)).rejects.toThrow(/scope emitting x\.at isn't plain JSON at when: a Date/);
+  await expect(r.as({ actor: "a", locale: "es" }).run(emitDate)).rejects.toThrow(/x\.at payload isn't plain data at at: a Date/);
+  await expect(r.as({ actor: "a", locale: "es", when: new Date() } as Scope).run(emitString)).rejects.toThrow(/scope emitting x\.at isn't plain data at when: a Date/);
   await r.as({ actor: "a", locale: "es" }).run(emitString);
   const loop: Record<string, unknown> = {};
   loop.self = loop;

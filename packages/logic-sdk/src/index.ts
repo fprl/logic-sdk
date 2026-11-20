@@ -423,8 +423,7 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed signature of `Constructor`. Its runtime half, for JS callers and casts,
-  // is `checkDefinition`, run when the registry names the function, so the errors can say which one.
+  // One implementation behind the typed signature of `Constructor`; `checkExposure` is the runtime half that matters.
   const make =
     <K extends Kind>(kind: K) =>
     (def: any): any =>
@@ -546,20 +545,17 @@ function mergeConfig(base: unknown, patch: unknown): unknown {
   return Object.fromEntries([...keys].map((k) => [k, mergeConfig(base[k], patch[k])])); // fromEntries: `__proto__` stays a key
 }
 
-/**
- * A frozen copy of plain data: strings, numbers, booleans, null, plain objects and arrays. Anything else (a Date, a Map,
- * a client, a class) is rejected with its path, so settings can't change under everyone else or hide behavior.
- */
-function freezeConfig(value: unknown, path = "config"): unknown {
-  if (value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)) return value;
-  if (Array.isArray(value)) return Object.freeze(value.map((v, i) => freezeConfig(v, `${path}[${i}]`)));
-  if (isPlain(value))
-    return Object.freeze(Object.fromEntries(Object.entries(value).map(([k, v]) => [k, freezeConfig(v, `${path}.${k}`)])));
-  const what = typeof value === "function" ? "a function" : (value as object).constructor?.name ?? typeof value;
-  throw new Error(
-    `[logic-sdk] ${path} is ${what}. config holds plain data (strings, numbers, booleans, null, objects, arrays): ` +
-      "pass a Date as an ISO string, and put clients in services.",
-  );
+/** A frozen copy of plain data, so settings can't change under everyone else or hide behavior (a client, a class). */
+function freezeConfig(value: unknown): unknown {
+  assertPlain(value, "config", "config holds plain data: pass a Date as an ISO string, and put clients in services");
+  const freeze = (v: unknown): unknown => {
+    if (v && typeof v === "object") {
+      for (const item of Object.values(v)) freeze(item);
+      Object.freeze(v);
+    }
+    return v;
+  };
+  return freeze(structuredClone(value));
 }
 
 const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
@@ -568,12 +564,15 @@ const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 class StalePayload extends Error {}
 
-/** What survives a queue: JSON. Plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped). */
-function assertPlainJson(value: unknown, what: string, hint: string): void {
+/**
+ * Plain data, what survives JSON: plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped).
+ * Anything else (a Date, a Map, a class instance, a function, a cycle) is rejected with its path.
+ */
+function assertPlain(value: unknown, what: string, hint: string): void {
   const seen = new Set<object>();
   const check = (v: unknown, path: string): void => {
     const fail = (found: string): never => {
-      throw new Error(`[logic-sdk] ${what} isn't plain JSON${path ? ` at ${path}` : ""}: ${found}. Events go through queues as JSON; ${hint}.`);
+      throw new Error(`[logic-sdk] ${what} isn't plain data${path ? ` at ${path}` : ""}: ${found}. ${hint}.`);
     };
     if (v === null || v === undefined || typeof v === "string" || typeof v === "boolean") return;
     if (typeof v === "number") {
@@ -598,26 +597,18 @@ function assertPlainJson(value: unknown, what: string, hint: string): void {
 const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v === "object" && BRAND in v;
 
 /**
+ * Publishing needs `authorize` and `output`. The types say so; this holds for JS callers and casts too, because an
+ * exposed function nobody authorizes is a hole, not a type error.
+ */
+function checkExposure(id: string, fn: Fn) {
+  if (fn.expose && !fn.authorize) throw new Error(`[logic-sdk] ${id} has expose: true but no authorize. Say who may call it.`);
+  if (fn.expose && !fn.output) throw new Error(`[logic-sdk] ${id} has expose: true but no output. Say what callers may see.`);
+}
+
+/**
  * What `createRegistry` finds in your modules, without a database or services: every function, event and
  * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
-/** What the types already say, checked at runtime too (JS callers, casts), naming the function: `orders.cancel`. */
-function checkDefinition(id: string, value: Fn | Listener) {
-  const fail = (why: string) => {
-    throw new Error(`[logic-sdk] ${id} ${why}`);
-  };
-  if (value.kind === "listener") {
-    if (typeof value.event !== "function") fail("needs `event` as a thunk: `event: () => orders.placed`.");
-    if (typeof value.handler !== "function") fail("needs a handler(ctx, payload).");
-    return;
-  }
-  if (value.authorize !== undefined && typeof value.authorize !== "function") fail("has an authorize that isn't a policy function. Use one, like `authorize: member`.");
-  if (value.expose !== undefined && value.expose !== true) fail("has expose set to something other than `true`. Set it to `true` or leave it out.");
-  if (value.expose && !value.authorize) fail("has expose: true but no authorize. Say who may call it.");
-  if (value.expose && !value.output) fail("has expose: true but no output. Say what callers may see.");
-  if (typeof value.handler !== "function") fail("needs a handler(ctx, input).");
-}
-
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
   const functions: RegisteredFn[] = [];
@@ -628,11 +619,13 @@ export function describeModules(modules: Record<string, object>) {
     for (const [name, value] of Object.entries(ns)) {
       if (!isBranded(value) || ids.has(value)) continue;
       const id = `${module}.${name}`;
-      if (value.kind !== "event") checkDefinition(id, value);
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
-      else functions.push({ id, module, name, kind: value.kind, fn: value, exposed: value.expose === true });
+      else {
+        checkExposure(id, value);
+        functions.push({ id, module, name, kind: value.kind, fn: value, exposed: value.expose === true });
+      }
     }
   }
   return { ids, functions, events, listeners };
@@ -777,8 +770,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       emit: (event, payload) => {
         const name = idOf(event);
         // a queue carries JSON: a Date or a class instance would work in-process and break only in production
-        assertPlainJson(payload, `${name} payload`, "send an ISO string and let the schema turn it into a Date");
-        assertPlainJson(frame.scope, `the scope emitting ${name}`, "keep the scope to ids and plain values");
+        assertPlain(payload, `${name} payload`, "Events travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
+        assertPlain(frame.scope, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids and plain values");
         payload = structuredClone(payload); // what was emitted is what gets delivered, even if the caller mutates it after
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope: Envelope = {
@@ -815,10 +808,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       frame.abortOn?.throwIfAborted();
       if (fn.authorize) {
         // SAFETY: the registry erases each policy's scope type; the caller's scope is the app's Scope by construction
-        const verdict: unknown = fn.authorize(frame.scope as never);
-        if (verdict instanceof Promise)
-          throw new Error(`[logic-sdk] The policy on ${id} returned a Promise. Policies are sync and read only the scope.`);
-        if (verdict !== true) throw new DomainError("forbidden", `${id}.forbidden`);
+        if (fn.authorize(frame.scope as never) !== true) throw new DomainError("forbidden", `${id}.forbidden`);
       }
       // no `input`: the function takes nothing, whatever an adapter sends (AI tools send `{}`)
       return fn.input ? parseInput(fn.input, rawInput, id, frame.depth > 0) : undefined;
