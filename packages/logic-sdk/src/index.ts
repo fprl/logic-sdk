@@ -53,7 +53,6 @@ const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean> {
   readonly [BRAND]: K;
   readonly kind: K;
-  readonly description: string;
   /** What callers pass, validated on every call. Left out: the function takes nothing (`run(fn)`). */
   readonly input?: Schema;
   /** What callers get back, checked before it leaves. */
@@ -83,7 +82,6 @@ export interface EventDef<I = unknown, O = I> {
   readonly kind: "event";
   /** The payload's schema, checked when emitted and again at delivery. */
   readonly payload: Schema;
-  readonly description?: string;
   readonly [types]?: { input: I; payload: O };
 }
 
@@ -104,7 +102,7 @@ export interface Listener<O = unknown> {
   readonly kind: "listener";
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
   readonly event: () => EventDef<unknown, O>;
-  readonly description?: string;
+  readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }
 
@@ -192,39 +190,48 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 
 /** What a function without `input` gets: nothing. */
 type NoInput = StandardSchemaV1<undefined, undefined>;
-type Def<IS extends Schema, Ctx, R> = {
-  /** One sentence, shown to humans, adapters and AI tools. */
-  description: string;
+type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
   input?: IS;
-  handler: (ctx: Ctx, input: Out<IS>) => Promise<R>;
+  /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
+  authorize?: P;
+  meta?: MetaOf<C>;
+  handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
 };
-type NotExposed = { expose?: undefined };
-type NoPolicy = { authorize?: undefined };
-type WithMeta<C extends Config> = { meta?: MetaOf<C> };
-type WithOutput<OS extends Schema> = { output: OS };
+/**
+ * `expose: true` makes `authorize` and `output` required: you can't publish something without saying who may call it,
+ * and what leaves your process is a contract. `expose` itself is then required too, so a maybe-undefined flag is an
+ * error and the types agree with what adapters publish. Internal functions may skip both; `authorize` still runs if set.
+ */
+type Exposure<C extends Config, OS, X> = [X] extends [true]
+  ? {
+      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). */
+      expose: true;
+      authorize: Policy<ScopeOf<C>>;
+      /** What callers get back, checked before it leaves. */
+      output: OS;
+    }
+  : {
+      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Leave it out for internal functions. */
+      expose?: X;
+      /** What callers get back, checked before it leaves. */
+      output?: OS;
+    };
 
 /**
- * `expose: true` needs `authorize` and `output`: you can't publish something without saying who may call it,
- * and what leaves your process is a contract. Internal functions may skip both; `authorize` still runs if set.
+ * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'output' is missing")
+ * instead of "No overload matches this call". Keep `output: OS` plain: `OS & Schema` makes TypeScript compare the whole
+ * schema type structurally on every definition (about 10x slower to check).
  */
-interface Constructor<C extends Config, K extends Kind> {
-  <IS extends Schema = NoInput, OS extends Schema = Schema, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> &
-      WithOutput<OS> &
-      WithMeta<C> & { authorize: P; expose: true },
-  ): Fn<K, In<IS>, Out<OS>, true>;
-  <IS extends Schema = NoInput, OS extends Schema = Schema, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, In<OS>> & WithOutput<OS> & WithMeta<C> & { authorize: P } & NotExposed,
-  ): Fn<K, In<IS>, Out<OS>, false>;
-  <IS extends Schema = NoInput, R = unknown, P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>>(
-    def: Def<IS, CtxOf<C, K, Guarded<P, ScopeOf<C>>>, R> & WithMeta<C> & { authorize: P } & NotExposed,
-  ): Fn<K, In<IS>, R, false>;
-  <IS extends Schema = NoInput, OS extends Schema = Schema>(
-    def: Def<IS, CtxOf<C, K, ScopeOf<C>>, In<OS>> & WithOutput<OS> & WithMeta<C> & NoPolicy & NotExposed,
-  ): Fn<K, In<IS>, Out<OS>, false>;
-  <IS extends Schema = NoInput, R = unknown>(def: Def<IS, CtxOf<C, K, ScopeOf<C>>, R> & WithMeta<C> & NoPolicy & NotExposed): Fn<K, In<IS>, R, false>;
-}
+type Constructor<C extends Config, K extends Kind> = <
+  IS extends Schema = NoInput,
+  OS extends Schema | undefined = undefined,
+  R = unknown,
+  P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>,
+  X extends true | undefined = undefined,
+>(
+  def: Def<C, K, IS, OS, R, P> & Exposure<C, OS, X>,
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false>;
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Errors
@@ -297,7 +304,7 @@ export const inProcess = (): Dispatcher => ({
 export interface Call<M = unknown> {
   id: string;
   kind: Kind | "listener";
-  /** The function's `meta` (undefined for listeners and functions without it). */
+  /** The function's or listener's `meta` (undefined when it has none). */
   meta: M | undefined;
   /** Raw input as received (before validation). */
   input: unknown;
@@ -372,26 +379,16 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * Typed constructors for your app:
  *
  * ```ts
- * export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+ * export const { query, mutation, action, event, listener, createRegistry } = init<Config>();
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed overloads of `Constructor`: the checks here are the runtime half of those types.
+  // One implementation behind the typed signature of `Constructor`. Its runtime half, for JS callers and casts,
+  // is `checkDefinition`, run when the registry names the function, so the errors can say which one.
   const make =
     <K extends Kind>(kind: K) =>
-    (def: any): any => {
-      const where = def?.description ? `"${def.description}"` : `a ${kind}`;
-      if (def.authorize !== undefined && typeof def.authorize !== "function")
-        throw new Error(`[logic-sdk] authorize on ${where} must be a policy function, like \`authorize: member\`.`);
-      if (def.expose !== undefined && def.expose !== true)
-        throw new Error(`[logic-sdk] expose on ${where} must be \`true\` or left out.`);
-      if (def.expose && !def.authorize)
-        throw new Error(`[logic-sdk] ${where} has expose: true but no authorize. Say who may call it.`);
-      if (def.expose && !def.output)
-        throw new Error(`[logic-sdk] ${where} has expose: true but no output. Say what callers may see.`);
-      if (typeof def.handler !== "function") throw new Error(`[logic-sdk] ${where} needs a handler(ctx, input).`);
-      return Object.freeze({ [BRAND]: kind, kind, ...def });
-    };
+    (def: any): any =>
+      Object.freeze({ [BRAND]: kind, kind, ...def });
 
   return {
     /** Create the registry once at startup: `createRegistry({ modules, database, services })`. */
@@ -404,21 +401,22 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /** Talks to the outside world (payments, email, AI). No transaction; each mutation it runs commits on its own. */
     action: make("action") as Constructor<C, "action">,
     /** Something that happened. Emitted by mutations, delivered after commit. */
-    event: <S extends Schema>(def: { payload: S; description?: string }): EventDef<In<S>, Out<S>> =>
+    event: <S extends Schema>(def: { payload: S }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
-    /** React to an event after commit, like an action. Must be idempotent. `on(() => bookings.confirmed, async (ctx, payload) => …)` */
-    on: <O>(
-      event: () => EventDef<unknown, O>,
-      handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>,
-      opts: { description?: string } = {},
-    ): Listener<O> =>
-      Object.freeze({
-        [BRAND]: "listener" as const,
-        kind: "listener" as const,
-        event,
-        description: opts.description,
-        handler,
-      }),
+    /**
+     * React to an event after commit, like an action. Must be idempotent.
+     * `listener({ event: () => bookings.confirmed, async handler(ctx, payload) {…} })`
+     */
+    listener: <O>(def: {
+      /** The event it reacts to, as a thunk so modules can import each other's barrels without cycles. */
+      event: () => EventDef<unknown, O>;
+      meta?: MetaOf<C>;
+      handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
+    }): Listener<O> => {
+      const { event, meta, handler } = def;
+      // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, meta: meta as Listener["meta"], handler });
+    },
   };
 }
 
@@ -530,6 +528,23 @@ const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v
  * What `createRegistry` finds in your modules, without a database or services: every function, event and
  * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
+/** What the types already say, checked at runtime too (JS callers, casts), naming the function: `orders.cancel`. */
+function checkDefinition(id: string, value: Fn | Listener) {
+  const fail = (why: string) => {
+    throw new Error(`[logic-sdk] ${id} ${why}`);
+  };
+  if (value.kind === "listener") {
+    if (typeof value.event !== "function") fail("needs `event` as a thunk: `event: () => orders.placed`.");
+    if (typeof value.handler !== "function") fail("needs a handler(ctx, payload).");
+    return;
+  }
+  if (value.authorize !== undefined && typeof value.authorize !== "function") fail("has an authorize that isn't a policy function. Use one, like `authorize: member`.");
+  if (value.expose !== undefined && value.expose !== true) fail("has expose set to something other than `true`. Set it to `true` or leave it out.");
+  if (value.expose && !value.authorize) fail("has expose: true but no authorize. Say who may call it.");
+  if (value.expose && !value.output) fail("has expose: true but no output. Say what callers may see.");
+  if (typeof value.handler !== "function") fail("needs a handler(ctx, input).");
+}
+
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
   const functions: RegisteredFn[] = [];
@@ -540,6 +555,7 @@ export function describeModules(modules: Record<string, object>) {
     for (const [name, value] of Object.entries(ns)) {
       if (!isBranded(value) || ids.has(value)) continue;
       const id = `${module}.${name}`;
+      if (value.kind !== "event") checkDefinition(id, value);
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
@@ -621,7 +637,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     for (const l of byEvent.get(envelope.name) ?? []) {
       const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth };
       try {
-        await wrap({ id: l.id, kind: "listener", meta: undefined, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
+        await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
           const payload = event ? await parseOwn(event.payload, envelope.payload, `${envelope.name} payload`) : envelope.payload;
           return l.listener.handler({ ...actionCtx(frame, l.id), event: { ...envelope, payload } } as never, payload); // SAFETY: as in invoke
         });

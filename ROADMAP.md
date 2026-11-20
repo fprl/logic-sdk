@@ -1,6 +1,6 @@
 # Roadmap (Nov 2026)
 
-What's done, what's next, and what's known to be missing. Decisions and their reasons live in DESIGN.md.
+What's done, what's next, and what's known to be missing. Decisions and their reasons live in DESIGN.md; how Rails, Laravel, Phoenix and the JS platforms do the same things lives in RESEARCH.md.
 
 ## Positioning
 
@@ -30,19 +30,22 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Node 24 and 26** supported by the packages (CI runs both); the repo develops on 26.
 - **Config and run options (0.3.0):** `ctx.config` (declared in `init`, filled at the entry, frozen, overridable per test) and `run(fn, input, { scope, signal })`; the CLI's `env-in-module` rule.
 - **`input`/`output`/`handler(ctx, input)` (0.4.0):** names from app-logic libraries, ctx first everywhere, optional `input` and `run(fn)`, events declare `payload`.
+- **Unreleased:** `listener({ event: () => placed, meta, handler })` replaces `on(...)`; `description` is gone (JSDoc for humans, `meta.ai.description` for tools); the agent skill ships in the package; `query`/`mutation`/`action` have one typed signature instead of five overloads (clearer errors, same type-check speed).
 - **Published:** `logic-sdk` and `@logic-sdk/cli` on npm through trusted publishing from github.com/fprl/logic-sdk.
 - **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js; its Worker tested in workerd) and `examples/bookings` (six modules; Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test); docs site on Blume; oxlint repo-wide.
 
 ## Next
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
-2. **Durable events, starting with pg-boss.** `Dispatcher.enqueue` sends the envelope with pg-boss inside the mutation's transaction (`send(..., { db })`), and a pg-boss worker calls `registry.dispatch`. Then a plain Postgres outbox, Workflow DevKit and queues. Fix two known gaps first:
-   - the loop limit is lost on the durable path: `dispatch` starts at depth 1 and `Envelope` has no depth field
-   - `dispatch` is all-or-nothing: one failing listener makes the healthy ones re-run on retry (dispatch per listener instead)
+2. **Durable events, then crons.** The plan is in DESIGN.md ("Next: listeners, plugins, durable events, crons").
+   - **First, the blockers:** deliver per (event, listener); one dispatch that lets transports ack or retry; `depth` and `attempt` on `Envelope` (the loop limit is lost on the durable path today); stable listener ids; scope at rest on the dispatcher (snapshot by default, optional `store`/`load`); a failed state you can list and retry, plus a versioning rule for payloads.
+   - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
+   - **Listener options:** `retries`, `delay`, `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. Transports declare capabilities; an option they can't honour fails at startup, never silently.
+   - **Crons:** `cron({ schedule, run, scope })` exported from a module and discovered like listeners. pg-boss schedules on Node; `registry.crons.handle(c.cron)` on Cloudflare; one route on Vercel Schedules.
 
-   Durable delivery brings per-listener options (concurrency, retries). That's when one listener for several events is worth revisiting: Inngest groups triggers so they share a concurrency key and retries. Until then, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
+   Until per-listener options exist, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
 3. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
-4. **Plugins:** first the contract (`plugins: [...]`, composing in order, `call.parent` for nesting, what runs inside vs after the transaction, typed `meta` per plugin, behavior in `createTestRegistry`). Then, as subpath exports, only once a real app asks for them:
+4. **Plugins,** no chain: plugin types declared in `Config`, values in `createRegistry({ plugins })`, typed `meta` and ctx namespaced by plugin name, runtime `{ name, wrap?, ctx?, onRegister? }` (DESIGN.md has the shape). Still to settle: composing in order, `call.parent` for nesting, what runs inside vs after the transaction, behavior in `createTestRegistry`. Then, as subpath exports, only once a real app asks for them:
    - `tracing()`: an OpenTelemetry span per function, nested like the calls
    - `audit()`: who ran which mutation, as whom, with what outcome, denied attempts included
    - `errors()`: unexpected errors to Sentry or similar, with the call chain; domain errors skipped
@@ -50,12 +53,15 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - `usage()`: calls per account per function, for billing or plan limits
    - `idempotency()`: a replayed webhook or double click returns the first result
    - `inspect()`: dev only, a live tree of calls, opened by the CLI
-5. **CLI later:** `init` (logic.ts, registry.ts, lint config, AGENTS.md), `add module`.
+5. **Ship the agent skill with the package.** Done: `skills/logic-sdk/SKILL.md` is in the tarball and the repo `AGENTS.md` is contributor-only. Next, two channels that stay in step with the installed version:
+   - **TanStack Intent-compatible:** add the `tanstack-intent` keyword and `metadata.library_version` (kept current by the release), so `intent install` and `npx skills experimental_sync` find it. About 560 npm packages carry the keyword, tRPC and trigger.dev among them; Prisma ships `skills/` in its tarball the same way, without it.
+   - **A managed block in the app's AGENTS.md,** written by `logic-sdk init` (or `logic-sdk agents`), Next.js style (`next dev` writes `<!-- BEGIN:nextjs-agent-rules -->`): the rules in short, plus a pointer to `node_modules/logic-sdk/skills/logic-sdk/`. `check` warns when it's stale. Vercel's evals (Jan 2026) scored an always-on AGENTS.md index at 100% against 53 to 79% for skills alone, which were never invoked in 56% of runs, so the rules stay always-on and the skill holds the depth.
+6. **CLI later:** `init` (logic.ts, registry.ts, lint config, the AGENTS.md block), `add module`.
 
 ## Later
 
-- **Listener timeout.** Delivery is serial with no timeout.
-- **Jobs and a scheduler** (ActiveJob, Laravel queues): `schedule(fn, input, { at })` from mutations, and a cron list. Through the dispatcher contract below.
+- **Scheduled calls** (Convex `runAfter`, Active Job `wait:`): `ctx.schedule(fn, input, { at })` from mutations, written in the transaction through the dispatcher. Crons are in Next.
+- **A CLI drift check** for crons against wrangler and `vercel.json` (a deploy replaces all triggers). Maybe; maybe too much.
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.
 - **Opt-in savepoint `run`** for "try, and continue on failure" (e.g. coupons). `nest` already exists in the Drizzle adapter.
 - **A second database adapter** (Kysely or Prisma) before 1.0.
@@ -69,24 +75,25 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 
 ## Dispatcher contract
 
-- `enqueue(tx, envelopes)` inside the transaction, `registry.dispatch(envelope)` from any worker (throws if a listener failed, so the worker retries).
-- **Transactional queues** (pg-boss, Graphile Worker): enqueue in the same transaction. **External queues** (Inngest, Trigger.dev, SQS, Cloudflare Queues): an outbox table plus a relay.
+- `enqueue(tx, envelopes)` inside the transaction, `deliver` after commit, `registry.dispatch(envelope)` from any worker. Being reworked before durable ships (see Next, item 2).
+- **Transactional queues** (pg-boss, Graphile Worker): enqueue in the same transaction. **External queues** (Cloudflare Queues, Vercel Queues, Inngest, SQS): after commit (lossy), or an outbox table plus a relay (durable).
 - Tests use the in-memory dispatcher, so they're the same whatever production uses.
 - Every adapter (database and dispatcher) runs a shipped conformance suite.
 
 ## Open
 
 - **Tenancy sugar (maybe):** a typed `owned(table)` condition in `logic-sdk/drizzle`, bound to the scope, that fails to compile on tables without `accountId`. Sugar only.
-- **Scope in envelopes** stores actor data at rest and replays stale roles later. Consider a projection hook for events.
 - **Top-level queries** read outside a transaction, so a query with several selects can see different snapshots. A `READ ONLY` transaction flag on the adapter would fix it.
 - **A typed proxy** (`caller.bookings.confirm(input)`) as sugar over `run`, after a type-cost prototype.
 
 ## Sources
 
+- Agent skills: [TanStack Intent](https://tanstack.com/intent/latest/docs/overview), [vercel-labs/skills](https://github.com/vercel-labs/skills), [Next.js AI agents guide](https://nextjs.org/docs/app/guides/ai-agents), [AGENTS.md outperforms skills](https://vercel.com/blog/agents-md-outperforms-skills-in-our-agent-evals), [Agent Skills spec](https://agentskills.io/specification)
 - Convex: [runtimes](https://docs.convex.dev/functions/runtimes), [OCC](https://docs.convex.dev/database/advanced/occ), [actions](https://docs.convex.dev/functions/actions), [scheduling](https://docs.convex.dev/scheduling/scheduled-functions), [application errors](https://docs.convex.dev/functions/error-handling/application-errors)
 - Frameworks: [Rails transactions](https://api.rubyonrails.org/classes/ActiveRecord/Transactions/ClassMethods.html), [Rails rescue_responses](https://guides.rubyonrails.org/configuring.html), [Laravel transactions](https://laravel.com/docs/database#database-transactions), [Laravel errors](https://laravel.com/docs/errors), [Ecto.Repo](https://ecto.hexdocs.pm/Ecto.Repo.html), [Oban](https://hexdocs.pm/oban/Oban.html), [Postgres isolation](https://www.postgresql.org/docs/current/transaction-iso.html)
 - RPC: [tRPC metadata](https://trpc.io/docs/server/metadata), [oRPC metadata](https://orpc.dev/docs/metadata), [oRPC errors](https://orpc.dev/docs/error-handling), [AI SDK tool()](https://ai-sdk.dev/docs/reference/ai-sdk-core/tool)
 - Platforms: [Cloudflare Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/), [Hyperdrive with postgres.js](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-drivers-and-libraries/postgres-js/), [Vercel waitUntil](https://vercel.com/changelog/waituntil-is-now-available-for-vercel-functions)
+- Jobs and events: see RESEARCH.md
 - Comparables: [NestJS outbox](https://docs.nestjs.com/reliability/outbox), [DBOS](https://docs.dbos.dev/typescript/tutorials/transaction-tutorial), [pg-boss](https://github.com/timgit/pg-boss)
 - Boundaries: [Packwerk](https://github.com/Shopify/packwerk/blob/main/USAGE.md), [Elixir boundary](https://boundary.hexdocs.pm/Boundary.html), [dependency-cruiser](https://github.com/sverweij/dependency-cruiser/blob/main/doc/rules-reference.md)
 - Tooling: [TanStack Intent](https://tanstack.com/intent/latest/docs/overview), [Stately Inspector](https://stately.ai/blog/2024-01-15-introducing-stately-inspector), [files-sdk repo](https://github.com/haydenbleasel/files-sdk)

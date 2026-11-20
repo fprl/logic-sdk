@@ -5,8 +5,8 @@ import { reserved } from "../stock/data"; // ✗ another module's internal file
 
 export const shipped = event({ payload: z.object({ id: z.string() }) });
 
+/** Place an order */
 export const place = defineMutation({
-  description: "Place an order",
   input: z.object({ sku: z.string() }),
   async handler({ run }, { sku }) {
     await fetch("https://payments.example.com"); // ✗ network inside a transaction
@@ -15,8 +15,8 @@ export const place = defineMutation({
   },
 });
 
+/** Refund an order */
 export const refund = defineMutation({
-  description: "Refund an order",
   input: z.object({ id: z.string() }),
   handler: async (_, { id }) => ({ id }),
 });

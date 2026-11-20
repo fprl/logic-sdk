@@ -2,8 +2,8 @@ import { z } from "zod";
 import process2, { env as nodeEnv } from "node:process";
 import { mutation } from "../logic";
 
+/** Every way to reach env that check must catch */
 export const variants = mutation({
-  description: "Every way to reach env that check must catch",
   input: z.object({}),
   async handler() {
     const a = process["env"].A; // flagged

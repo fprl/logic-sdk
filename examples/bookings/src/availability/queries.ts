@@ -7,8 +7,8 @@ export const Range = z
   .object({ propertyId: z.uuid(), from: z.iso.date(), to: z.iso.date() })
   .refine((r) => r.from < r.to, { message: "from must be before to", path: ["to"] });
 
+/** Is a property free for a date range? Check-out day is free for the next check-in. */
 export const check = query({
-  description: "Is a property free for a date range? Check-out day is free for the next check-in.",
   input: Range,
   authorize: anyone,
   expose: true,

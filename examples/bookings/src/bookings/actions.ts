@@ -6,6 +6,8 @@ import { confirmPaid } from "./mutations";
 import { Booking } from "./schema";
 
 /**
+ * Charge the guest and confirm the booking; refunds if confirming fails
+ *
  * Charge, then confirm. An action because it talks to a payment provider:
  * no transaction is held open during the network call.
  *
@@ -14,7 +16,6 @@ import { Booking } from "./schema";
  * pretends to be an admin, and the scope (account, locale) is still the guest's.
  */
 export const checkout = action({
-  description: "Charge the guest and confirm the booking; refunds if confirming fails",
   input: z.object({ bookingId: z.uuid() }),
   authorize: anyone,
   expose: true,

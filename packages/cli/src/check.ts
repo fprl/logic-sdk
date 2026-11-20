@@ -1,4 +1,4 @@
-// The rules from AGENTS.md, checked against the project. Each problem says where and how to fix it.
+// The rules from the logic-sdk skill (skills/logic-sdk/SKILL.md), checked against the project. Each problem says where and how to fix it.
 import { relative } from "node:path";
 import type { Loc } from "./analyze.ts";
 import type { Project } from "./project.ts";
@@ -57,7 +57,7 @@ export function check(project: Project): Problem[] {
       severity: "error",
       message: `Modules run each other in a circle: ${[...cycle, cycle[0]].join(" → ")} (${steps.join(", ")}).`,
       at: null,
-      fix: "Break the cycle with an event: emit it in one module, react with on() in the other.",
+      fix: "Break the cycle with an event: emit it in one module, react with a listener in the other.",
     });
   }
 

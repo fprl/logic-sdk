@@ -6,8 +6,8 @@ import { canCancel, findOrder, setStatus } from "./data";
 import { placed } from "./events";
 import { Order, orders } from "./schema";
 
+/** Order some products. Prices come from the catalog, never from the client. */
 export const place = mutation({
-  description: "Order some products. Prices come from the catalog, never from the client.",
   input: z.object({
     items: z.array(z.object({ sku: z.string(), quantity: z.int().min(1) })).min(1),
   }),
@@ -33,8 +33,8 @@ export const place = mutation({
   },
 });
 
+/** Cancel an order and put its items back in stock */
 export const cancel = mutation({
-  description: "Cancel an order and put its items back in stock",
   input: z.object({ orderId: z.uuid() }),
   authorize: signedIn,
   expose: true,
@@ -50,8 +50,8 @@ export const cancel = mutation({
   },
 });
 
+/** Mark an order as shipped */
 export const ship = mutation({
-  description: "Mark an order as shipped",
   input: z.object({ orderId: z.uuid() }),
   authorize: staff,
   expose: true,

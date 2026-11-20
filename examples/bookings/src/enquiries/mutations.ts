@@ -4,8 +4,8 @@ import { mutation } from "../logic";
 import { anyone } from "../policies";
 import { Enquiry, enquiries } from "./schema";
 
+/** A guest asks about a property */
 export const create = mutation({
-  description: "A guest asks about a property",
   input: z.object({ propertyId: z.uuid(), guestEmail: z.email(), message: z.string().min(1) }),
   authorize: anyone,
   expose: true,
@@ -16,8 +16,8 @@ export const create = mutation({
   },
 });
 
+/** An enquiry turned into a confirmed booking */
 export const markWon = mutation({
-  description: "An enquiry turned into a confirmed booking",
   input: z.object({ enquiryId: z.uuid() }),
   async handler(ctx, input) {
     await ctx.db

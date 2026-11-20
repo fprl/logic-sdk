@@ -5,8 +5,8 @@ import { signedIn } from "../policies";
 import { canCancel } from "./data";
 import { Order, orders } from "./schema";
 
+/** Your own orders, newest first, with what you may do with each */
 export const mine = query({
-  description: "Your own orders, newest first, with what you may do with each",
   authorize: signedIn,
   expose: true,
   output: z.array(Order.extend({ can: z.object({ cancel: z.boolean() }) })),

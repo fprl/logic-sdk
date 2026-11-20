@@ -14,17 +14,41 @@ export type AIToolsOf<Mods> = UnionToIntersection<
   }[keyof Mods & string]
 >;
 
-export interface AIToolOptions {
+/**
+ * What this adapter reads from a function's `meta`. Add it to your meta shape: `init<{ meta: AIMeta & AppMeta }>()`,
+ * then `meta: { ai: { tool: true, description: "Use when the customer asks to cancel an order" } }`.
+ */
+export type AIMeta = {
+  ai?: {
+    /** `toAITools` includes it (by default). The agent door is opt-in: exposed for your UI doesn't mean a tool. */
+    tool?: boolean;
+    /** What the model reads to decide when to call it. Optional, but models pick tools better with one. */
+    description?: string;
+  };
+};
+
+interface ErrorOption {
   /** Unexpected (non-domain) errors. The model only sees "internal_error". Default: console.error. */
   onError?: (error: unknown) => void;
 }
-export interface AIToolsOptions extends AIToolOptions {
-  /**
-   * Which exposed functions an agent may call. Required: the agent door is opt-in, so a function exposed
-   * for your UI doesn't become a tool by accident. E.g. `(f) => f.fn.meta?.agent === true`.
-   */
-  filter: (fn: RegisteredFn) => boolean;
+export interface AIToolOptions extends ErrorOption {
+  /** Overrides `meta.ai.description` for this tool. */
+  description?: string;
 }
+export interface AIToolsOptions extends ErrorOption {
+  /** Which exposed functions become tools. Default: those with `meta: { ai: { tool: true } }`. */
+  filter?: (fn: RegisteredFn) => boolean;
+  /** Each tool's description, when it isn't in `meta.ai.description`: `(f) => f.fn.meta?.summary`. Wins over meta. */
+  describe?: (fn: RegisteredFn) => string | undefined;
+}
+
+/** `meta.ai`, read defensively: meta is stored loose, `AIMeta` only types where you write it. */
+const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }): { tool?: unknown; description?: unknown } =>
+  typeof fn.meta?.ai === "object" && fn.meta.ai !== null ? fn.meta.ai : {};
+const metaDescription = (fn: ExposedFn) => {
+  const d = aiMeta(fn).description;
+  return typeof d === "string" ? d : undefined;
+};
 
 /** What a function without input looks like to the model: an object with nothing in it. It sends `{}`, which run ignores. */
 const noInput = jsonSchema({ type: "object", properties: {}, additionalProperties: false });
@@ -49,7 +73,7 @@ export function toAITool<F extends ExposedFn>(
   const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
   if (fn.expose !== true) throw new Error("[logic-sdk] toAITool needs a function with expose: true.");
   return tool({
-    description: fn.description,
+    description: options.description ?? metaDescription(fn),
     inputSchema: fn.input ?? noInput,
     outputSchema: fn.output,
     async execute(input, { abortSignal }) {
@@ -65,21 +89,21 @@ export function toAITool<F extends ExposedFn>(
 }
 
 /**
- * The exposed functions your `filter` picks, as AI SDK tools named `<module>_<function>`.
+ * Exposed functions as AI SDK tools named `<module>_<function>`: by default the ones marked `meta: { ai: { tool: true } }`.
  *
  * ```ts
- * tools: toAITools(registry, caller, { filter: (f) => f.fn.meta?.agent === true })
+ * tools: toAITools(registry, caller)
  * ```
  */
 export function toAITools<S extends object, Mods extends Record<string, object>>(
   registry: Registry<S, Mods>,
   caller: Caller<S>,
-  options: AIToolsOptions,
+  options: AIToolsOptions = {},
 ): Partial<AIToolsOf<Mods>> {
-  if (typeof options?.filter !== "function")
-    throw new Error("[logic-sdk] toAITools needs a filter: the agent door is opt-in. E.g. { filter: (f) => f.fn.meta?.agent === true }");
+  const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn).tool === true);
   const tools: Record<string, Tool> = {};
   for (const f of registry.functions)
-    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, options);
+    if (f.exposed && filter(f))
+      tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, { onError: options.onError, description: options.describe?.(f) });
   return tools as Partial<AIToolsOf<Mods>>;
 }

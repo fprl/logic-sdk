@@ -4,8 +4,8 @@ import { query } from "../logic";
 import { agent } from "../policies";
 import { Enquiry, enquiries } from "./schema";
 
+/** Enquiries for the account, newest first */
 export const list = query({
-  description: "Enquiries for the account, newest first",
   input: z.object({}).optional(),
   authorize: agent,
   expose: true,

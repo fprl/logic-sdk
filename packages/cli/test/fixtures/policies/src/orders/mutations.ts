@@ -5,8 +5,8 @@ import { canRefund, findOrder, loadForCancel } from "./data";
 
 const Order = z.object({ id: z.string(), status: z.string() });
 
+/** Cancel an order */
 export const cancel = mutation({
-  description: "Cancel an order",
   input: z.object({ id: z.string() }),
   output: Order,
   authorize: member,
@@ -19,8 +19,8 @@ export const cancel = mutation({
   },
 });
 
+/** Refund an order */
 export const refund = mutation({
-  description: "Refund an order",
   input: z.object({ id: z.string() }),
   authorize: (s) => s.accountId !== "",
   async handler(ctx, { id }) {

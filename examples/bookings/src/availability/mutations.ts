@@ -13,15 +13,18 @@ const HoldInput = Range.and(
   }),
 );
 
-/** Internal (no expose): other modules call it with ctx.run. */
+/**
+ * Reserve a date range on a property's calendar
+ *
+ * Internal (no expose): other modules call it with ctx.run.
+ */
 export const hold = mutation({
-  description: "Reserve a date range on a property's calendar",
   input: HoldInput,
   handler: (ctx, input) => insertHold(ctx, input),
 });
 
+/** Free every date held by a source (e.g. a cancelled booking) */
 export const release = mutation({
-  description: "Free every date held by a source (e.g. a cancelled booking)",
   input: z.object({ sourceId: z.string() }),
   async handler(ctx, input) {
     const freed = await ctx.db.delete(holds).where(eq(holds.sourceId, input.sourceId)).returning();
@@ -29,9 +32,12 @@ export const release = mutation({
   },
 });
 
-/** Exposed: owners block their own calendar. Same rules as `hold`, through the same helper. */
+/**
+ * Block dates as the owner (personal use, maintenance)
+ *
+ * Exposed: owners block their own calendar. Same rules as `hold`, through the same helper.
+ */
 export const block = mutation({
-  description: "Block dates as the owner (personal use, maintenance)",
   input: Range.and(z.object({ reason: z.enum(["owner_block", "maintenance"]) })),
   authorize: owner,
   expose: true,

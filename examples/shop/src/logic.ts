@@ -28,7 +28,7 @@ type Config = {
   config: Settings;
 };
 
-export const { query, mutation, event, on, createRegistry } = init<Config>();
+export const { query, mutation, event, listener, createRegistry } = init<Config>();
 
 // What helpers take: `findOrder(ctx, id)`
 export type QueryCtx = Query<Config>;

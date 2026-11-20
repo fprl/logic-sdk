@@ -9,8 +9,8 @@ export const Booking = createSelectSchema(bookings).omit({
   accountId: true,
 });
 
+/** Get a booking */
 export const get = query({
-  description: "Get a booking",
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: staff,

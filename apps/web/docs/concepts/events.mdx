@@ -13,19 +13,20 @@ export const confirmed = event({
 ctx.emit(confirmed, { bookingId });
 
 // tasks/listeners.ts
-export const prepareStay = on(
-  () => bookings.confirmed,
-  async (ctx, payload) => {
+/** Create the handover task and email the guest */
+export const prepareStay = listener({
+  event: () => bookings.confirmed,
+  async handler(ctx, payload) {
     await ctx.run(tasks.create, { bookingId: payload.bookingId, title: "Prepare the house" });
     await ctx.services.mailer.send(...);
   },
-);
+});
 ```
 
 - **Delivered only after commit.** A rolled-back mutation emits nothing.
 - **Each listener runs like an action**, so every mutation it runs commits on its own.
 - **A failing listener never fails the caller.** The error goes to `onError`.
-- **`on` takes the event lazily** (`() => bookings.confirmed`), so two modules can import each other's index without an import-cycle crash.
+- **`event` is a thunk** (`() => bookings.confirmed`), so two modules can import each other's index without an import-cycle crash.
 - **What you emit is what's delivered.** `emit` takes a snapshot of the payload.
 - **Listeners must be idempotent.** They may run again; `ctx.event.id` is the key to dedupe on.
 - **Listeners run with the emitter's scope.** Have them run internal functions, not exposed ones. See [Authorization](/docs/concepts/authorization#nested-calls-and-listeners).

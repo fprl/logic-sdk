@@ -7,9 +7,12 @@ const Items = z.object({
   items: z.array(z.object({ sku: z.string(), quantity: z.int().min(1) })).min(1),
 });
 
-/** Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short. */
+/**
+ * Take items out of stock and price them
+ *
+ * Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short.
+ */
 export const reserve = mutation({
-  description: "Take items out of stock and price them",
   input: Items,
   async handler(ctx, input) {
     const lines = [];
@@ -30,9 +33,12 @@ export const reserve = mutation({
   },
 });
 
-/** Internal: put items back, when an order is cancelled. */
+/**
+ * Put items back in stock
+ *
+ * Internal: put items back, when an order is cancelled.
+ */
 export const release = mutation({
-  description: "Put items back in stock",
   input: Items,
   async handler(ctx, input) {
     for (const { sku, quantity } of input.items)

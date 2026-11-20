@@ -3,8 +3,8 @@ import { mutation } from "../logic";
 import { owner } from "../policies";
 import { Property, properties } from "./schema";
 
+/** Add a property to the account */
 export const create = mutation({
-  description: "Add a property to the account",
   input: z.object({
     name: z.string().min(1),
     nightlyRate: z.int().positive(),

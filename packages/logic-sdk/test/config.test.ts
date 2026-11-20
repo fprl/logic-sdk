@@ -6,20 +6,18 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null };
 type AppConfig = { app: { url: string }; orders: { maxItems: number; currency: "EUR" | "USD" } };
-const { query, mutation, action, event, on, createRegistry } = init<{ scope: Scope; db: Store; config: AppConfig }>();
+const { query, mutation, action, event, listener, createRegistry } = init<{ scope: Scope; db: Store; config: AppConfig }>();
 
 const seen: Record<string, unknown> = {};
 const placed = event({ payload: z.object({ items: z.number() }) });
 
 const limits = query({
-  description: "the limits",
   handler: async ({ config }) => {
     seen.query = config;
     return config.orders;
   },
 });
 const place = mutation({
-  description: "place an order",
   input: z.object({ items: z.number() }),
   async handler({ config, emit, errors }, { items }) {
     seen.mutation = config;
@@ -29,18 +27,16 @@ const place = mutation({
   },
 });
 const checkout = action({
-  description: "place, then return the link",
   input: z.object({ items: z.number() }),
   async handler({ config, run }, input) {
     seen.action = config;
     return run(place, input);
   },
 });
-const receipt = on(() => placed, async ({ config }) => {
+const receipt = listener({ event: () => placed, handler: async ({ config }) => {
   seen.listener = config;
-});
+} });
 const write = query({
-  description: "tries to change config",
   handler: async ({ config }) => {
     (config as any).orders.maxItems = 999;
   },
@@ -87,7 +83,7 @@ test("config: plain data only, rejected with the path to the bad value", () => {
 });
 
 test("config: arrays are frozen too; merging keeps odd keys and lets null replace a section", async () => {
-  const q = query({ description: "raw", handler: async ({ config }) => config as any });
+  const q = query({ handler: async ({ config }) => config as any });
   const registry = createRegistry({
     modules: { orders: { ...modules.orders, q } },
     database: memoryDatabase(),
@@ -127,6 +123,6 @@ test("testing: overrides merge section by section, and only for that test regist
 
 test("config: optional when the app doesn't declare it", async () => {
   const plain = init<{ scope: Scope }>();
-  const q = plain.query({ description: "q", handler: async ({ config }) => config });
+  const q = plain.query({ handler: async ({ config }) => config });
   expect(await plain.createRegistry({ modules: { m: { q } } }).as(anon).run(q)).toEqual({});
 });

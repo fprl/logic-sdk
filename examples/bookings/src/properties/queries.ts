@@ -4,8 +4,8 @@ import { anyone } from "../policies";
 import { findProperty } from "./data";
 import { Property } from "./schema";
 
+/** Get a property by id */
 export const get = query({
-  description: "Get a property by id",
   input: z.object({ propertyId: z.uuid() }),
   authorize: anyone,
   expose: true,

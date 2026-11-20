@@ -2,16 +2,16 @@ import { generateText, isStepCount } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { toAITool, toAITools } from "../src/ai.ts";
+import { toAITool, toAITools, type AIMeta } from "../src/ai.ts";
 import { init } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null };
-const { query, mutation, event, on, createRegistry } = init<{
+const { query, mutation, event, listener, createRegistry } = init<{
   scope: Scope;
   db: Store;
   services: { log: string[] };
-  meta: { agent?: boolean };
+  meta: AIMeta;
 }>();
 const anyone = () => true;
 const signedIn = (s: Scope): s is { actor: string } => s.actor !== null;
@@ -20,12 +20,11 @@ const added = event({ payload: z.object({ name: z.string() }) });
 const items = {
   added,
   add: mutation({
-    description: "Add an item",
     input: z.object({ name: z.string() }),
     output: z.object({ name: z.string() }),
     authorize: signedIn,
     expose: true,
-    meta: { agent: true },
+    meta: { ai: { tool: true, description: "Add an item" } },
     async handler({ db, emit, errors }, { name }) {
       if (name === "tiny") throw errors.reject("too_short", { min: 5, got: 4 });
       if (name === "crash") throw new Error("connection refused at 10.0.0.3:5432");
@@ -35,25 +34,21 @@ const items = {
     },
   }),
   count: query({
-    description: "Count items",
     output: z.number(),
     authorize: anyone,
     expose: true,
     handler: async ({ db }) => (db.rows.items ?? []).length,
   }),
-  wipe: mutation({ description: "internal", input: z.object({}), handler: async () => {} }),
+  wipe: mutation({ input: z.object({}), handler: async () => {} }),
 };
 const services = { log: [] as string[] };
-const audit = { onAdded: on(() => added, async ({ services }, { name }) => { services.log.push(name); }) };
+const audit = { onAdded: listener({ event: () => added, handler: async ({ services }, { name }) => { services.log.push(name); } }) };
 
 function setup() {
   const db = memoryDatabase();
   services.log.length = 0;
   return { db, registry: createRegistry({ modules: { items, audit }, database: db, services }) };
 }
-
-/** The agent door is opt-in: only functions marked for agents. */
-const forAgents = (f: { fn: { meta?: { agent?: boolean } } }) => f.fn.meta?.agent === true;
 
 /** A scripted model: calls one tool, then answers. */
 function agentCalling(toolName: string, input: unknown) {
@@ -74,16 +69,24 @@ function agentCalling(toolName: string, input: unknown) {
 const toolResultSeenBy = (model: MockLanguageModelV4) =>
   (model.doGenerateCalls[1]!.prompt.at(-1) as { content: { output: unknown }[] }).content[0]!.output;
 
-test("toAITools: only exposed functions the filter picks, named module_function; internal ones never", () => {
+test("toAITools: by default only exposed functions marked meta.ai.tool, named module_function; internal ones never", () => {
   const { registry } = setup();
-  const tools = toAITools(registry, registry.as({ actor: "ana" }), { filter: forAgents });
+  const tools = toAITools(registry, registry.as({ actor: "ana" }));
   expect(Object.keys(tools)).toEqual(["items_add"]);
   expect(tools.items_add?.description).toEqual("Add an item");
   expect(Object.keys(toAITools(registry, registry.as({ actor: "ana" }), { filter: () => true })).sort()).toEqual(["items_add", "items_count"]);
   // @ts-expect-error internal functions are not tools
   void tools.items_wipe;
-  // @ts-expect-error the filter is required: the agent door is opt-in
-  expect(() => toAITools(registry, registry.as({ actor: "ana" }))).toThrow(/needs a filter/);
+});
+
+test("descriptions: the call option wins, then describe, then meta.ai.description, else none", () => {
+  const { registry } = setup();
+  const caller = registry.as({ actor: "ana" });
+  const described = toAITools(registry, caller, { filter: () => true, describe: (f) => (f.name === "count" ? "How many items" : undefined) });
+  expect(described.items_count?.description).toEqual("How many items");
+  expect(described.items_add?.description).toEqual("Add an item");
+  expect(toAITools(registry, caller, { filter: () => true }).items_count?.description).toBeUndefined();
+  expect(toAITool(caller, items.add, { description: "Add one thing" }).description).toEqual("Add one thing");
 });
 
 test("toAITool: one exposed function as a tool you name; internal functions are a type error", async () => {
@@ -109,7 +112,7 @@ test("an agent's call runs as the caller: same transaction, events after commit"
   const model = agentCalling("items_add", { name: "lamp" });
   const result = await generateText({
     model,
-    tools: toAITools(registry, registry.as({ actor: "ana" }), { filter: forAgents }),
+    tools: toAITools(registry, registry.as({ actor: "ana" })),
     prompt: "Add a lamp",
     stopWhen: isStepCount(3),
   });
@@ -122,7 +125,7 @@ test("an agent's call runs as the caller: same transaction, events after commit"
 test("policies apply to agents too: a denied call reaches the model as an error", async () => {
   const { db, registry } = setup();
   const model = agentCalling("items_add", { name: "lamp" });
-  await generateText({ model, tools: toAITools(registry, registry.as({ actor: null }), { filter: forAgents }), prompt: "Add a lamp", stopWhen: isStepCount(3) });
+  await generateText({ model, tools: toAITools(registry, registry.as({ actor: null })), prompt: "Add a lamp", stopWhen: isStepCount(3) });
   expect(db.store.rows.items).toBeUndefined();
   expect(toolResultSeenBy(model)).toEqual({ type: "error-text", value: "DomainError: items.add.forbidden" });
 });
@@ -130,7 +133,7 @@ test("policies apply to agents too: a denied call reaches the model as an error"
 test("rules the agent broke reach it with their details, so it can recover", async () => {
   const { registry } = setup();
   const model = agentCalling("items_add", { name: "tiny" });
-  await generateText({ model, tools: toAITools(registry, registry.as({ actor: "ana" }), { filter: forAgents }), prompt: "Add tiny", stopWhen: isStepCount(3) });
+  await generateText({ model, tools: toAITools(registry, registry.as({ actor: "ana" })), prompt: "Add tiny", stopWhen: isStepCount(3) });
   expect(toolResultSeenBy(model)).toEqual({ type: "error-text", value: 'DomainError: items.too_short {"min":5,"got":4}' });
 });
 
@@ -138,7 +141,7 @@ test("unexpected errors never reach the model: it sees internal_error, onError g
   const { registry } = setup();
   const reported: string[] = [];
   const model = agentCalling("items_add", { name: "crash" });
-  const tools = toAITools(registry, registry.as({ actor: "ana" }), { filter: forAgents, onError: (e) => reported.push((e as Error).message) });
+  const tools = toAITools(registry, registry.as({ actor: "ana" }), { onError: (e) => reported.push((e as Error).message) });
   await generateText({ model, tools, prompt: "Add crash", stopWhen: isStepCount(3) });
   expect(toolResultSeenBy(model)).toEqual({ type: "error-text", value: "Error: internal_error" });
   expect(reported).toEqual(["connection refused at 10.0.0.3:5432"]);

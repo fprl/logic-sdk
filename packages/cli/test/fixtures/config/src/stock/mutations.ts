@@ -2,8 +2,8 @@ import { z } from "zod";
 import { mutation } from "../logic";
 import type { Reservation } from "../lib/reservation"; // type-only: never flagged
 
+/** Reserve stock */
 export const reserve = mutation({
-  description: "Reserve stock",
   input: z.object({ qty: z.number() }),
   async handler(_, { qty }): Promise<{ ok: boolean; debug: unknown; reservation?: Reservation }> {
     const max = Number(process.env.MAX_RESERVE ?? 10); // flagged
