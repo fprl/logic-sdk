@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import type { Db, Mailer, Scope } from "../src/logic";
-import { createShop } from "../src/shop";
+import { createShop } from "../src/registry";
 
 /** The real Postgres engine, in process (PGlite): no Docker needed. Each test is a rolled-back transaction. */
 const pg = new PGlite();

@@ -8,13 +8,13 @@ Logic SDK is for the layer between your routes and your database: the business l
 ```ts
 export const confirm = mutation({
   description: "Confirm a pending booking",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   authorize: staff,
   expose: true,
 
-  async execute({ bookingId }, ctx) {
-    const booking = await findBooking(ctx, bookingId);
+  async handler(ctx, input) {
+    const booking = await findBooking(ctx, input.bookingId);
     if (booking.status !== "pending") {
       throw ctx.errors.reject("not_pending");
     }
@@ -23,7 +23,7 @@ export const confirm = mutation({
     await ctx.run(availability.hold, rangeOf(booking));
 
     // Delivered to listeners only after commit
-    ctx.emit(confirmed, { bookingId });
+    ctx.emit(confirmed, { bookingId: input.bookingId });
 
     return setStatus(ctx, booking.id, "confirmed");
   },

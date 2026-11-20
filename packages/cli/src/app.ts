@@ -89,7 +89,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       lines.push(fn.description, dim(where(fn.at)), "");
       row("policy", fn.authorize ?? dim("none (no authorize)"));
       row("exposed", fn.exposed ? "yes (adapters may publish it)" : dim("no"));
-      row("input", shape(fn.input));
+      row("input", fn.takesInput ? shape(fn.input) : dim("none"));
       row("output", fn.output ? shape(fn.output) : dim(fn.exposed ? "unknown" : "not declared (internal)"));
       if (fn.checks.length) row("checks", fn.checks.join(", "));
       if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));

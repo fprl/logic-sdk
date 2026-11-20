@@ -3,7 +3,7 @@ import { Hono, type Context } from "hono";
 import * as catalog from "./catalog";
 import type { Scope } from "./logic";
 import * as orders from "./orders";
-import type { Shop } from "./shop";
+import type { Shop } from "./registry";
 
 type Env<Bindings> = { Bindings: Bindings; Variables: { caller: Caller<Scope> } };
 
@@ -17,14 +17,14 @@ export function createApi<Bindings extends object = object>(shopFor: (c: Context
     await next();
   });
 
-  app.get("/products", async (c) => c.json(await c.var.caller.run(catalog.list, undefined)));
+  app.get("/products", async (c) => c.json(await c.var.caller.run(catalog.list)));
 
   app.post("/orders", async (c) => {
     const order = await c.var.caller.run(orders.place, await c.req.json());
     return c.json(order, 201);
   });
 
-  app.get("/orders", async (c) => c.json(await c.var.caller.run(orders.mine, undefined)));
+  app.get("/orders", async (c) => c.json(await c.var.caller.run(orders.mine)));
 
   app.post("/orders/:id/cancel", async (c) => {
     return c.json(await c.var.caller.run(orders.cancel, { orderId: c.req.param("id") }));

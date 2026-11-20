@@ -11,8 +11,8 @@ const euros = (cents: number) => `€${(cents / 100).toFixed(2)}`;
 export default async function Page({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const { error } = await searchParams;
   const shop = caller();
-  const products = await shop.run(catalog.list, undefined);
-  const mine = await shop.run(orders.mine, undefined);
+  const products = await shop.run(catalog.list);
+  const mine = await shop.run(orders.mine);
 
   return (
     <main>

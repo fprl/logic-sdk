@@ -1,7 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createApi } from "./http";
-import { createShop, settingsFrom } from "./shop";
+import { createShop, settingsFrom } from "./registry";
 
 type Bindings = { HYPERDRIVE: { connectionString: string }; APP_URL: string; MAX_ITEMS: string };
 

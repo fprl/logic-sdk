@@ -10,8 +10,8 @@ export const loadStock = () => import("../stock/data"); // ✗ dynamic import of
 
 export const place = mutation({
   description: "Place an order",
-  inputSchema: z.object({ sku: z.string() }),
-  async execute({ sku }, ctx) {
+  input: z.object({ sku: z.string() }),
+  async handler(ctx, { sku }) {
     const byName: Record<string, typeof stock.reserve> = { reserve: stock.reserve };
     if (!(await canShip(sku))) throw ctx.errors.deny(); // ✗ async-can (awaited)
     canHold(sku); // ✗ unused-can

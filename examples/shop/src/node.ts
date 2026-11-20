@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createApi } from "./http";
-import { createShop, settingsFrom } from "./shop";
+import { createShop, settingsFrom } from "./registry";
 
 // Node: one shop and one pool for the whole process.
 const shop = createShop({

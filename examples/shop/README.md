@@ -17,22 +17,25 @@ The files:
 
 ```txt
 src/
-  logic.ts       types, policies (anyone, signedIn, staff), definers
+  logic.ts       types and definers
+  policies.ts    anyone, signedIn, staff
   catalog/       products: list, reserve, release
   orders/        orders: place, cancel, ship, mine, the receipt
-  shop.ts        createShop(): the registry. settingsFrom(): env in, config out
+  registry.ts    createShop(): the registry. settingsFrom(): env in, config out
   http.ts        the JSON API on Hono, shared by Node and Workers
-  node.ts        host 1: Node, one pool for the process
-  worker.ts      host 2: Cloudflare Workers, Hyperdrive per request, listeners via waitUntil
-  app/           host 3: Next.js, Server Actions and an AI assistant, listeners via after()
+  node.ts        host 1: Node or Bun, self-hosted. One pool for the process
+  worker.ts      host 2: Cloudflare Workers. Hyperdrive per request, listeners via waitUntil
+  app/           host 3: Next.js, on Vercel or anywhere. Server Actions and an AI assistant, listeners via after()
 ```
+
+In your app there's one host and this is just `src/`. Three hosts share one folder here only to show the modules don't change.
 
 ```bash
 bun run db && bun run db:migrate   # Postgres 17 in Docker on 127.0.0.1:5442
 bun run dev                        # Node on http://localhost:3000
 bun run dev:worker                 # Workers on http://localhost:8787
 ANTHROPIC_API_KEY=... bun run dev:next   # Next.js on http://localhost:3200
-bun run test                       # PGlite in-process: no Docker needed
+bun run test                       # PGlite in-process, plus the Worker inside workerd: no Docker needed
 bun run check                      # logic-sdk check: boundaries, rules, env
 ```
 

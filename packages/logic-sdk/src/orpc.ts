@@ -1,6 +1,6 @@
 import { ORPCError, os, type Procedure } from "@orpc/server";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { isDomainError, type Caller, type ErrorKind, type Fn, type Registry } from "./index.ts";
+import { isDomainError, type Caller, type ErrorKind, type ExposedOf, type Fn, type Registry } from "./index.ts";
 
 /** oRPC context the router expects: bind who is calling per request, in your handler or middleware. */
 export type ORPCContext<S extends object> = { caller: Caller<S> };
@@ -16,7 +16,6 @@ export type ORPCRouterOf<S extends object, Mods> = {
     [N in keyof ExposedOf<Mods[M]>]: ProcedureOf<S, Mods[M][N & keyof Mods[M]]>;
   };
 };
-type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<any, any, any, true> ? N : never]: T[N] };
 
 /** Domain error kind → oRPC error code (and so HTTP status through oRPC's handlers). */
 export const orpcCodeOf: Record<ErrorKind, string> = {
@@ -46,8 +45,8 @@ export function toORPCRouter<S extends object, Mods extends Record<string, objec
 
   for (const f of registry.functions) {
     if (!f.exposed) continue;
-    let b = base.input(f.fn.inputSchema as StandardSchemaV1);
-    if (f.fn.outputSchema) b = b.output(f.fn.outputSchema as StandardSchemaV1) as any;
+    let b = f.fn.input ? base.input(f.fn.input) : base;
+    if (f.fn.output) b = b.output(f.fn.output) as any;
     (router[f.module] ??= {})[f.name] = b.handler(async ({ input, context, signal }) => {
       try {
         return await context.caller.run(f.fn, input, { signal });

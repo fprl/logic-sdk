@@ -35,8 +35,8 @@ export const registry = createRegistry({
 // src/orders/mutations.ts
 export const place = mutation({
   ...
-  async execute({ items }, ctx) {
-    if (items.length > ctx.config.orders.maxItems)
+  async handler(ctx, input) {
+    if (input.items.length > ctx.config.orders.maxItems)
       throw ctx.errors.reject("too_many_items", { max: ctx.config.orders.maxItems });
     ...
     return { ...order, link: `${ctx.config.app.url}/orders/${order.id}` };

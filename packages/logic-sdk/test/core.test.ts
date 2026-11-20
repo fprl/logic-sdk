@@ -12,23 +12,23 @@ const anyone = () => true;
 const signedIn = (s: Scope): s is Scope & { actor: string } => s.actor !== null;
 
 // ── a tiny two-module registry (separate consts, like real module files) ─────
-const added = event({ schema: z.object({ name: z.string() }) });
+const added = event({ payload: z.object({ name: z.string() }) });
 
 const list = query({
   description: "list",
-  inputSchema: z.object({}).optional(),
+  input: z.object({}).optional(),
   authorize: anyone,
   expose: true,
-  outputSchema: z.array(z.string()),
-  execute: async (_, { db }) => (db.rows.items ?? []).map((r) => r.name as string),
+  output: z.array(z.string()),
+  handler: async ({ db }) => (db.rows.items ?? []).map((r) => r.name as string),
 });
 const add = mutation({
   description: "add",
-  inputSchema: z.object({ name: z.string().min(1) }),
+  input: z.object({ name: z.string().min(1) }),
   authorize: signedIn,
   expose: true,
-  outputSchema: z.object({ name: z.string() }),
-  async execute({ name }, { db, emit, errors, scope }) {
+  output: z.object({ name: z.string() }),
+  async handler({ db, emit, errors, scope }, { name }) {
     const actor: string = scope.actor; // narrowed by the policy
     if (name === "boom") throw errors.reject("boom");
     void actor;
@@ -39,8 +39,8 @@ const add = mutation({
 });
 const addTwo = mutation({
   description: "add two, swallowing the failure of the second",
-  inputSchema: z.object({ a: z.string(), b: z.string() }),
-  async execute({ a, b }, { run }) {
+  input: z.object({ a: z.string(), b: z.string() }),
+  async handler({ run }, { a, b }) {
     await run(add, { name: a });
     try { await run(add, { name: b }); } catch { /* caught, but the transaction is doomed */ }
     return "done";
@@ -48,31 +48,30 @@ const addTwo = mutation({
 });
 const typed = mutation({
   description: "output schema",
-  inputSchema: z.object({ n: z.number() }),
-  outputSchema: z.object({ doubled: z.number().max(10) }),
-  execute: async ({ n }) => ({ doubled: n * 2 }),
+  input: z.object({ n: z.number() }),
+  output: z.object({ doubled: z.number().max(10) }),
+  handler: async (_, { n }) => ({ doubled: n * 2 }),
 });
-const locale = query({ description: "locale", inputSchema: z.undefined(), execute: async (_, { scope }) => scope.locale });
+const locale = query({ description: "locale", handler: async ({ scope }) => scope.locale });
 const whoami = query({
   description: "scope echo",
-  inputSchema: z.undefined(),
-  execute: async (_, { scope, run }) => ({
+  handler: async ({ scope, run }) => ({
     outer: scope.locale,
     inner: await run(locale, undefined, { scope: { locale: "en" } }),
-    nested: await run(locale, undefined),
+    nested: await run(locale),
   }),
 });
 const greet = action({
   description: "action with services",
-  inputSchema: z.object({ name: z.string() }),
-  async execute({ name }, { run, services }) {
+  input: z.object({ name: z.string() }),
+  async handler({ run, services }, { name }) {
     services.log.push(`greet ${name}`);
     return run(add, { name });
   },
 });
 const items = { added, list, add, addTwo, typed, locale, whoami, greet };
 
-const onAdded = on(() => added, async ({ name }, { services, event, scope }) => {
+const onAdded = on(() => added, async ({ services, event, scope }, { name }) => {
   if (name === "listener-fails") throw new Error("listener exploded");
   services.log.push(`added ${name} (${event.name}, ${scope.locale})`);
 });
@@ -117,6 +116,12 @@ test("a nested failure dooms the transaction even when caught", async () => {
   expect(services.log).toEqual([]);
 });
 
+test("no input: run(fn), and whatever an adapter sends is ignored", async () => {
+  const { app } = setup();
+  expect(await app.run(items.locale)).toBe("es");
+  expect(await app.run(items.locale, {} as never)).toBe("es"); // an AI tool sends {}
+});
+
 test("invalid input → DomainError kind invalid, with issues", async () => {
   const { app } = setup();
   // @ts-expect-error wrong input type
@@ -135,37 +140,37 @@ test("an exposed function's check runs on every call, nested ones too", async ()
 test("run options: { scope } changes who is calling for that call, and checks see it", async () => {
   const asAdmin = action({
     description: "runs add as someone else",
-    inputSchema: z.object({ name: z.string() }),
-    execute: async ({ name }, { run }) => run(add, { name }, { scope: { actor: "system" } }),
+    input: z.object({ name: z.string() }),
+    handler: async ({ run }, { name }) => run(add, { name }, { scope: { actor: "system" } }),
   });
   const r = createRegistry<Scope>({ modules: { items, log, x: { asAdmin } }, database: memoryDatabase(), services: { log: [] } });
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
 });
 
-test("expose: true without authorize or outputSchema fails when the function is defined", () => {
+test("expose: true without authorize or output fails when the function is defined", () => {
   const msg = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
   // @ts-expect-error expose without authorize
-  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), outputSchema: z.number(), expose: true, execute: async () => 1 }))).toMatch(/no authorize/);
-  // @ts-expect-error expose without outputSchema
-  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), authorize: anyone, expose: true, execute: async () => 1 }))).toMatch(/no outputSchema/);
+  expect(msg(() => query({ description: "x", output: z.number(), expose: true, handler: async () => 1 }))).toMatch(/no authorize/);
+  // @ts-expect-error expose without output
+  expect(msg(() => query({ description: "x", authorize: anyone, expose: true, handler: async () => 1 }))).toMatch(/no output/);
   // @ts-expect-error a policy name is not a policy
-  expect(msg(() => query({ description: "x", inputSchema: z.undefined(), authorize: "staff", execute: async () => 1 }))).toMatch(/must be a policy function/);
+  expect(msg(() => query({ description: "x", authorize: "staff", handler: async () => 1 }))).toMatch(/must be a policy function/);
 });
 
 test("a policy must return exactly true, and must be sync", async () => {
-  const truthy = query({ description: "truthy policy", inputSchema: z.undefined(), authorize: (() => "yes") as any, execute: async () => 1 });
-  const asyncy = query({ description: "async policy", inputSchema: z.undefined(), authorize: (async () => true) as any, execute: async () => 1 });
+  const truthy = query({ description: "truthy policy", authorize: (() => "yes") as any, handler: async () => 1 });
+  const asyncy = query({ description: "async policy", authorize: (async () => true) as any, handler: async () => 1 });
   const r = createRegistry<Scope>({ modules: { p: { truthy, asyncy } }, database: memoryDatabase() });
   const app = r.as({ actor: "a", locale: "es" });
-  await expect(app.run(truthy, undefined)).rejects.toMatchObject({ kind: "forbidden", code: "p.truthy.forbidden" });
-  const err = await app.run(asyncy, undefined).catch((e: unknown) => e);
+  await expect(app.run(truthy)).rejects.toMatchObject({ kind: "forbidden", code: "p.truthy.forbidden" });
+  const err = await app.run(asyncy).catch((e: unknown) => e);
   expect(isDomainError(err)).toBe(false);
   expect(err).toHaveProperty("message", expect.stringMatching(/returned a Promise/));
 });
 
 test("an internal function with authorize is checked too, even when your own code runs it", async () => {
-  const purge = mutation({ description: "admin only", inputSchema: z.object({}), authorize: signedIn, execute: async () => "purged" });
-  const job = action({ description: "a job", inputSchema: z.object({}), execute: async (_, { run }) => run(purge, {}) });
+  const purge = mutation({ description: "admin only", input: z.object({}), authorize: signedIn, handler: async () => "purged" });
+  const job = action({ description: "a job", input: z.object({}), handler: async ({ run }) => run(purge, {}) });
   const r = createRegistry<Scope>({ modules: { j: { purge, job } }, database: memoryDatabase(), services: { log: [] } });
   expect(r.functions.find((f) => f.id === "j.purge")!.exposed).toBe(false);
   await expect(r.as({ actor: null, locale: "es" }).run(job, {})).rejects.toMatchObject({ kind: "forbidden", code: "j.purge.forbidden" });
@@ -173,7 +178,7 @@ test("an internal function with authorize is checked too, even when your own cod
 });
 
 test("bad input on a nested run is a bug in your code (plain Error), not the caller's 400", async () => {
-  const outer = mutation({ description: "passes bad input on", inputSchema: z.object({}), execute: async (_, { run }) => run(add, { name: "" }) });
+  const outer = mutation({ description: "passes bad input on", input: z.object({}), handler: async ({ run }) => run(add, { name: "" }) });
   const r = createRegistry<Scope>({ modules: { items, log, o: { outer } }, database: memoryDatabase(), services: { log: [] } });
   const err = await r.as({ actor: "a", locale: "es" }).run(outer, {}).catch((e: unknown) => e);
   expect(isDomainError(err)).toBe(false);
@@ -191,21 +196,20 @@ test("output schema is enforced", async () => {
 
 test("scope: nested calls inherit it, a run's { scope } overrides it for that call only", async () => {
   const { app } = setup();
-  expect(await app.run(items.whoami, undefined)).toEqual({ outer: "es", inner: "en", nested: "es" });
+  expect(await app.run(items.whoami)).toEqual({ outer: "es", inner: "en", nested: "es" });
   expect(await app.run(items.locale, undefined, { scope: { locale: "fr" } })).toEqual("fr");
-  expect(await app.run(items.locale, undefined)).toEqual("es");
+  expect(await app.run(items.locale)).toEqual("es");
 });
 
 test("kinds: a query can't run a mutation (runtime guard behind the type)", async () => {
   const { app } = setup();
   const bad = query({
     description: "bad",
-    inputSchema: z.undefined(),
     // @ts-expect-error queries can only run queries
-    execute: async (_, { run }) => run(items.add, { name: "x" }),
+    handler: async ({ run }) => run(items.add, { name: "x" }),
   });
   const d = createRegistry<Scope>({ modules: { items, bad: { bad } }, database: memoryDatabase() });
-  await expect(d.as({ actor: "a", locale: "es" }).run(bad, undefined)).rejects.toThrow(/is a mutation/);
+  await expect(d.as({ actor: "a", locale: "es" }).run(bad)).rejects.toThrow(/is a mutation/);
   void app;
 });
 
@@ -270,8 +274,7 @@ test("abort signal: checked before the call starts, never between its steps", as
   const seen: (AbortSignal | undefined)[] = [];
   const twoSteps = action({
     description: "two steps; the caller gives up after the first",
-    inputSchema: z.undefined(),
-    async execute(_, { run, signal }) {
+    async handler({ run, signal }) {
       seen.push(signal);
       await run(add, { name: "first" });
       ctrl.abort(); // the caller disconnects mid-workflow
@@ -288,8 +291,8 @@ test("abort signal: checked before the call starts, never between its steps", as
 test("run options: events emitted by the callee carry its scope; the caller's own events don't", async () => {
   const emits = mutation({
     description: "add as the system",
-    inputSchema: z.object({ name: z.string() }),
-    async execute({ name }, { run }) {
+    input: z.object({ name: z.string() }),
+    async handler({ run }, { name }) {
       return run(add, { name }, { scope: { actor: "system" } });
     },
   });
@@ -305,9 +308,9 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
 });
 
 test("guards: unregistered functions and missing database", async () => {
-  const stray = query({ description: "x", inputSchema: z.undefined(), execute: async () => 1 });
+  const stray = query({ description: "x", handler: async () => 1 });
   const { app } = setup();
-  await expect(app.run(stray, undefined)).rejects.toThrow(/isn't registered/);
+  await expect(app.run(stray)).rejects.toThrow(/isn't registered/);
   let threw = false;
   try { createRegistry({ modules: { items } }); } catch (e) { threw = /database adapter/.test((e as Error).message); }
   expect(threw).toBe(true);
@@ -316,8 +319,8 @@ test("guards: unregistered functions and missing database", async () => {
 test("ctx errors are namespaced to the module they're thrown from", async () => {
   const fails = query({
     description: "throws the kind it's asked for",
-    inputSchema: z.object({ kind: z.enum(["reject", "conflict", "notFound", "deny"]) }),
-    async execute({ kind }, ctx) {
+    input: z.object({ kind: z.enum(["reject", "conflict", "notFound", "deny"]) }),
+    async handler(ctx, { kind }) {
       if (kind === "reject") throw ctx.errors.reject("not_pending", { status: "done" });
       if (kind === "conflict") throw ctx.errors.conflict("slug_taken");
       if (kind === "notFound") throw ctx.errors.notFound();
@@ -334,11 +337,11 @@ test("ctx errors are namespaced to the module they're thrown from", async () => 
 });
 
 test("another module's error passes through run unchanged, and an action can catch it", async () => {
-  const take = mutation({ description: "always taken", inputSchema: z.object({}), execute: async (_, { errors }) => { throw errors.conflict("taken"); } });
+  const take = mutation({ description: "always taken", input: z.object({}), handler: async ({ errors }) => { throw errors.conflict("taken"); } });
   const tryTake = action({
     description: "falls back when taken",
-    inputSchema: z.object({}),
-    async execute(_, { run }) {
+    input: z.object({}),
+    async handler({ run }) {
       try { return await run(take, {}); } catch (e) { if (isDomainError(e, "slots.taken")) return "fallback"; throw e; }
     },
   });
@@ -384,10 +387,10 @@ test("long-lived process: concurrent requests never see each other's scope", asy
   const { registry } = setup();
   const slow = query({
     description: "slow echo",
-    inputSchema: z.object({ ms: z.number() }),
-    execute: async ({ ms }, { scope, run }) => {
+    input: z.object({ ms: z.number() }),
+    handler: async ({ scope, run }, { ms }) => {
       await new Promise((r) => setTimeout(r, ms));
-      return [scope.actor, await run(locale, undefined)];
+      return [scope.actor, await run(locale)];
     },
   });
   const d = createRegistry<Scope>({ modules: { items, log, slow: { slow } }, database: memoryDatabase() });
@@ -408,31 +411,31 @@ if (g.process?.on) g.process.on("unhandledRejection", (e: unknown) => unhandled.
 else g.addEventListener?.("unhandledrejection", (ev: any) => { ev.preventDefault?.(); unhandled.push(ev.reason); });
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-const stamped = event({ schema: z.object({ at: z.string().transform((s) => new Date(s)) }) });
+const stamped = event({ payload: z.object({ at: z.string().transform((s) => new Date(s)) }) });
 const reg = {
   stamped,
   badEmitThenThrow: mutation({
     description: "emit an invalid payload, then throw",
-    inputSchema: z.object({}),
-    async execute(_, { emit, errors }) {
+    input: z.object({}),
+    async handler({ emit, errors }) {
       emit(stamped, { at: 42 as unknown as string });
       throw errors.reject("boom");
     },
   }),
   stamp: mutation({
     description: "emit with a transforming schema",
-    inputSchema: z.object({ at: z.string() }),
-    async execute({ at }, { emit }) { emit(stamped, { at }); },
+    input: z.object({ at: z.string() }),
+    async handler({ emit }, { at }) { emit(stamped, { at }); },
   }),
   throwsUndefined: mutation({
     description: "throws undefined",
-    inputSchema: z.object({}),
-    async execute(_, { db }) { (db.rows.t ??= []).push("inner"); throw undefined; },
+    input: z.object({}),
+    async handler({ db }) { (db.rows.t ??= []).push("inner"); throw undefined; },
   }),
   swallowsUndefined: mutation({
     description: "catches a nested undefined throw",
-    inputSchema: z.object({}),
-    async execute(_, { db, run }) {
+    input: z.object({}),
+    async handler({ db, run }) {
       (db.rows.t ??= []).push("outer");
       try { await run(reg.throwsUndefined, {}); } catch {}
       return "ok";
@@ -440,8 +443,8 @@ const reg = {
   }),
   swallowsBadInput: mutation({
     description: "catches a nested invalid-input failure",
-    inputSchema: z.object({}),
-    async execute(_, { db, run }) {
+    input: z.object({}),
+    async handler({ db, run }) {
       (db.rows.t ??= []).push("outer");
       // @ts-expect-error deliberately invalid
       try { await run(add, { name: 1 }); } catch {}
@@ -450,7 +453,7 @@ const reg = {
   }),
 } as const;
 const seen: { at: unknown }[] = [];
-const regListeners = { onStamped: on(() => stamped, async (payload) => { seen.push(payload); }) };
+const regListeners = { onStamped: on(() => stamped, async (_, payload) => { seen.push(payload); }) };
 
 function regSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
   const db = memoryDatabase();
@@ -503,9 +506,9 @@ test("review #7: registry.dispatch throws when a listener fails (durable consume
 });
 
 test("listener loops stop at maxEventDepth and are reported, not thrown", async () => {
-  const ping = event({ schema: z.object({ n: z.number() }) });
-  const bump = mutation({ description: "re-emit", inputSchema: z.object({ n: z.number() }), execute: async ({ n }, { emit }) => emit(ping, { n }) });
-  const loop = on(() => ping, async ({ n }, { run }) => { await run(bump, { n: n + 1 }); });
+  const ping = event({ payload: z.object({ n: z.number() }) });
+  const bump = mutation({ description: "re-emit", input: z.object({ n: z.number() }), handler: async ({ emit }, { n }) => emit(ping, { n }) });
+  const loop = on(() => ping, async ({ run }, { n }) => { await run(bump, { n: n + 1 }); });
   const errors: string[] = [];
   const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth: 5, onError: (e) => errors.push((e as Error).message) });
   await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
@@ -595,10 +598,10 @@ test("retries stop after `attempts`, and errors that aren't retryable are never 
 });
 
 test("the default listener-loop limit is 8 hops", async () => {
-  const ping = event({ schema: z.object({ n: z.number() }) });
-  const bump = mutation({ description: "re-emit", inputSchema: z.object({ n: z.number() }), execute: async ({ n }, { emit }) => emit(ping, { n }) });
+  const ping = event({ payload: z.object({ n: z.number() }) });
+  const bump = mutation({ description: "re-emit", input: z.object({ n: z.number() }), handler: async ({ emit }, { n }) => emit(ping, { n }) });
   const hops: number[] = [];
-  const loop = on(() => ping, async ({ n }, { run }) => { hops.push(n); await run(bump, { n: n + 1 }); });
+  const loop = on(() => ping, async ({ run }, { n }) => { hops.push(n); await run(bump, { n: n + 1 }); });
   const errors: string[] = [];
   const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
   await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
@@ -608,23 +611,23 @@ test("the default listener-loop limit is 8 hops", async () => {
 
 test("meta is set per function and visible in wrap and the registry", async () => {
   const m = init<{ scope: Scope; meta: { tags: string[] } }>();
-  const tagged = m.query({ description: "tagged", inputSchema: z.undefined(), meta: { tags: ["billing"] }, execute: async () => 1 });
+  const tagged = m.query({ description: "tagged", meta: { tags: ["billing"] }, handler: async () => 1 });
   const seen: unknown[] = [];
   const r = m.createRegistry({ modules: { billing: { tagged } }, wrap: async (call, next) => { seen.push(call.meta?.tags); return next(); } });
-  await r.as({ actor: "a", locale: "es" }).run(tagged, undefined);
+  await r.as({ actor: "a", locale: "es" }).run(tagged);
   expect(seen).toEqual([["billing"]]);
   expect(r.functions.find((f) => f.id === "billing.tagged")?.fn.meta).toEqual({ tags: ["billing"] });
 });
 
 test("emit snapshots the payload: mutating it afterwards changes nothing", async () => {
   const got: string[] = [];
-  const happened = event({ schema: z.object({ name: z.string() }) });
-  const doIt = mutation({ description: "emit then mutate", inputSchema: z.object({}), async execute(_, { emit }) {
+  const happened = event({ payload: z.object({ name: z.string() }) });
+  const doIt = mutation({ description: "emit then mutate", input: z.object({}), async handler({ emit }) {
     const payload = { name: "before" };
     emit(happened, payload);
     payload.name = "after";
   } });
-  const listen = on(() => happened, async ({ name }) => { got.push(name); });
+  const listen = on(() => happened, async (_, { name }) => { got.push(name); });
   await createRegistry<Scope>({ modules: { x: { happened, doIt, listen } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" }).run(doIt, {});
   expect(got).toEqual(["before"]);
 });

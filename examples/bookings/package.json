@@ -1,0 +1,39 @@
+{
+  "name": "example-bookings",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./registry": "./src/registry.ts",
+    "./db": "./src/db/client.ts",
+    "./scope": "./src/scope.ts",
+    "./services": "./src/services.ts",
+    "./bookings": "./src/bookings/index.ts",
+    "./properties": "./src/properties/index.ts"
+  },
+  "scripts": {
+    "db": "docker compose up -d",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "dev": "tsx watch src/server.ts",
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "test:pg": "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5440/postgres vitest run",
+    "check": "logic-sdk check",
+    "logic-sdk": "logic-sdk"
+  },
+  "dependencies": {
+    "logic-sdk": "workspace:*",
+    "@hono/node-server": "^2.1.9",
+    "@orpc/server": "2.0.0-beta.51",
+    "drizzle-orm": "1.0.0-rc.5",
+    "hono": "^4.13.19",
+    "postgres": "^4.1.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@logic-sdk/cli": "workspace:*",
+    "@electric-sql/pglite": "^0.5.16",
+    "@orpc/client": "2.0.0-beta.51",
+    "tsx": "^4.23.15",
+    "vitest": "^5.1.1"
+  }
+}

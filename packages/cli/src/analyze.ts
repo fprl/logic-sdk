@@ -461,9 +461,9 @@ export function analyze(root: string, registryFile: string): Source {
           if (n.callee.type === "MemberExpression" && n.callee.object?.name === "Date" && callee === "now") fn.dates.push(loc(n.start));
           if (n.callee.type === "Identifier" && callee === "fetch") fn.fetches.push(loc(n.start));
         });
-        // ctx is the second parameter: `execute(input, ctx)` in a definition, `on(() => event, (payload, ctx) => …)` in a listener
-        const handlers = [...props.filter((p) => p.key?.name === "execute").map((p) => p.value), ...call.arguments.slice(1)].filter(isFunction);
-        follow(call.arguments, file, ctxIn(handlers, 1), fn, new Set());
+        // ctx is the first parameter: `handler(ctx, input)` in a definition, `on(() => event, (ctx, payload) => …)` in a listener
+        const handlers = [...props.filter((p) => p.key?.name === "handler").map((p) => p.value), ...call.arguments.slice(1)].filter(isFunction);
+        follow(call.arguments, file, ctxIn(handlers, 0), fn, new Set());
         // keep the most specific keys: `orders.maxItems`, not also `orders`
         fn.config = fn.config.includes("*") ? ["*"] : fn.config.filter((k) => !fn.config.some((o) => o.startsWith(k + "."))).sort();
         fns.set(fn.id, fn);

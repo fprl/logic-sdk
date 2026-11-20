@@ -8,7 +8,7 @@ type Order = typeof orders.$inferSelect;
 const visibleTo = (user: User) => (user.role === "staff" ? undefined : eq(orders.customerId, user.id));
 
 /** Someone else's order is "not found", never "forbidden": it doesn't exist for you. */
-export async function findOrder(ctx: QueryCtx<SignedIn>, id: string) {
+export async function findOrder(ctx: QueryCtx & { scope: SignedIn }, id: string) {
   const [order] = await ctx.db
     .select()
     .from(orders)
@@ -18,7 +18,7 @@ export async function findOrder(ctx: QueryCtx<SignedIn>, id: string) {
 }
 
 /** Moves an order on, only if nobody changed it since it was read: of two cancels at once, one wins. */
-export async function setStatus(ctx: MutationCtx<SignedIn>, order: Order, status: Order["status"]) {
+export async function setStatus(ctx: MutationCtx & { scope: SignedIn }, order: Order, status: Order["status"]) {
   const [updated] = await ctx.db
     .update(orders)
     .set({ status })

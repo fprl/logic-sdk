@@ -28,13 +28,8 @@ type Config = {
   config: Settings;
 };
 
-// For helpers that take ctx: `findOrder(ctx, id)`.
-export type QueryCtx<S = Scope> = Query<Config, S>;
-export type MutationCtx<S = Scope> = Mutation<Config, S>;
-
 export const { query, mutation, event, on, createRegistry } = init<Config>();
 
-// Policies: who may call a function at all. Plain sync functions over the scope, used as `authorize: signedIn`.
-export const anyone = () => true;
-export const signedIn = (scope: Scope): scope is SignedIn => scope.user !== null;
-export const staff = (scope: Scope): scope is SignedIn => scope.user?.role === "staff";
+// What helpers take: `findOrder(ctx, id)`
+export type QueryCtx = Query<Config>;
+export type MutationCtx = Mutation<Config>;

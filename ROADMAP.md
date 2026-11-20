@@ -20,23 +20,29 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 ## Done
 
-- **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call) plus `expose: true`; record rules as sync `can*` checks in `execute`; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
+- **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call) plus `expose: true`; record rules as sync `can*` checks in the handler; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
 - **Transactions:** the policy check and validation before the transaction opens (policy first); transaction state per attempt; lost races retried (40001/40P01, 3 attempts with jitter).
 - **Errors:** `ctx.errors.reject`/`conflict`/`notFound`/`deny`, namespaced per module; `unauthenticated()` in `logic-sdk/fetch`; six kinds, no HTTP in core; bad input on a nested call is a bug (500).
-- **Contracts:** `outputSchema` required on exposed functions; typed `meta` per function, visible in `wrap`.
+- **Contracts:** `output` required on exposed functions; typed `meta` per function, visible in `wrap`.
 - **Events:** loop limit 8; `emit` snapshots its payload.
-- **Agents:** `toAITool` and `toAITools` with a required `filter` (`logic-sdk/ai`), and `examples/nextjs`, where a Server Action and an agent call the same `bookings.confirm`.
+- **Agents:** `toAITool` and `toAITools` with a required `filter` (`logic-sdk/ai`) The shop's Next.js host gives an assistant two functions as tools.
 - **CLI v0.1** (`@logic-sdk/cli`): `list`, `show`, `graph`, `check`, `--json`, read-only. Stricli for commands, jiti to load the app, oxc to read the source, zero-dependency rendering.
 - **Node 24 and 26** supported by the packages (CI runs both); the repo develops on 26.
 - **Config and run options (0.3.0):** `ctx.config` (declared in `init`, filled at the entry, frozen, overridable per test) and `run(fn, input, { scope, signal })`; the CLI's `env-in-module` rule.
+- **`input`/`output`/`handler(ctx, input)` (0.4.0):** names from app-logic libraries, ctx first everywhere, optional `input` and `run(fn)`, events declare `payload`.
 - **Published:** `logic-sdk` and `@logic-sdk/cli` on npm through trusted publishing from github.com/fprl/logic-sdk.
-- **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js), `examples/node` (Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test) and `examples/workers` (Vitest in workerd, Hyperdrive); docs site on Blume; oxlint repo-wide.
+- **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js; its Worker tested in workerd) and `examples/bookings` (six modules; Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test); docs site on Blume; oxlint repo-wide.
 
 ## Next
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
-2. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
-3. **Plugins:** first the contract (`plugins: [...]`, composing in order, `call.parent` for nesting, what runs inside vs after the transaction, typed `meta` per plugin, behavior in `createTestRegistry`). Then, as subpath exports, only once a real app asks for them:
+2. **Durable events, starting with pg-boss.** `Dispatcher.enqueue` sends the envelope with pg-boss inside the mutation's transaction (`send(..., { db })`), and a pg-boss worker calls `registry.dispatch`. Then a plain Postgres outbox, Workflow DevKit and queues. Fix two known gaps first:
+   - the loop limit is lost on the durable path: `dispatch` starts at depth 1 and `Envelope` has no depth field
+   - `dispatch` is all-or-nothing: one failing listener makes the healthy ones re-run on retry (dispatch per listener instead)
+
+   Durable delivery brings per-listener options (concurrency, retries). That's when one listener for several events is worth revisiting: Inngest groups triggers so they share a concurrency key and retries. Until then, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
+3. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
+4. **Plugins:** first the contract (`plugins: [...]`, composing in order, `call.parent` for nesting, what runs inside vs after the transaction, typed `meta` per plugin, behavior in `createTestRegistry`). Then, as subpath exports, only once a real app asks for them:
    - `tracing()`: an OpenTelemetry span per function, nested like the calls
    - `audit()`: who ran which mutation, as whom, with what outcome, denied attempts included
    - `errors()`: unexpected errors to Sentry or similar, with the call chain; domain errors skipped
@@ -44,13 +50,10 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - `usage()`: calls per account per function, for billing or plan limits
    - `idempotency()`: a replayed webhook or double click returns the first result
    - `inspect()`: dev only, a live tree of calls, opened by the CLI
-4. **CLI later:** `init` (logic.ts, registry.ts, lint config, AGENTS.md), `add module`.
+5. **CLI later:** `init` (logic.ts, registry.ts, lint config, AGENTS.md), `add module`.
 
 ## Later
 
-- **Durable events.** A Postgres outbox dispatcher (~60 lines) with a crash test, then adapters for Workflow DevKit and queues. It must fix two known gaps first:
-  - the loop limit is lost on the durable path: `dispatch` starts at depth 1 and `Envelope` has no depth field
-  - `dispatch` is all-or-nothing: one failing listener makes the healthy ones re-run on retry (dispatch per listener instead)
 - **Listener timeout.** Delivery is serial with no timeout.
 - **Jobs and a scheduler** (ActiveJob, Laravel queues): `schedule(fn, input, { at })` from mutations, and a cron list. Through the dispatcher contract below.
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.

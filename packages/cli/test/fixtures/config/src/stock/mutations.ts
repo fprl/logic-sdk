@@ -4,8 +4,8 @@ import type { Reservation } from "../lib/reservation"; // type-only: never flagg
 
 export const reserve = mutation({
   description: "Reserve stock",
-  inputSchema: z.object({ qty: z.number() }),
-  async execute({ qty }): Promise<{ ok: boolean; debug: unknown; reservation?: Reservation }> {
+  input: z.object({ qty: z.number() }),
+  async handler(_, { qty }): Promise<{ ok: boolean; debug: unknown; reservation?: Reservation }> {
     const max = Number(process.env.MAX_RESERVE ?? 10); // flagged
     const debug = import.meta.env?.DEBUG; // flagged
     return { ok: qty <= max, debug };

@@ -6,8 +6,8 @@ Why each decision was made, what it was checked against, and what's still open.
 
 | Source | What we took | What we didn't |
 |---|---|---|
-| **Convex** | `query` / `mutation` / `action`; `ctx.run…` composition inside one transaction; "modules" as the unit; helpers that take `ctx` | Its database, reactivity and codegen. Savepoint sub-transactions (see below) |
-| **AI SDK** (`tool()`) | `description`, `inputSchema`, `outputSchema`, `execute(input, ctx)`; plain-object registry; Standard Schema | Per-call context schema. Our scope is app-wide, typed once in `init` |
+| **Convex** | `query` / `mutation` / `action`; `ctx.run…` composition inside one transaction; "modules" as the unit; helpers that take `ctx`; `handler(ctx, args)` with ctx first | Its database, reactivity and codegen. Savepoint sub-transactions (see below) |
+| **AI SDK** (`tool()`) | `description`; plain-object registry; Standard Schema. Until 0.4.0 also `inputSchema`/`outputSchema`/`execute(input, ctx)` (see 0.4.0) | Per-call context schema. Our scope is app-wide, typed once in `init` |
 | **Chat SDK** | Swappable pieces as adapters (`database: drizzleAdapter(db)`) | A required state adapter. The database is optional unless you have mutations |
 | **oRPC v2** | The edge: typed client, OpenAPI, MCP. `toORPCRouter(registry)` | oRPC as the core. Tested: it works, but the transport ends up owning your modules |
 | **Phoenix 1.8 scopes** | Explicit scope, secure by default | Passing it by hand to every function. Here it's bound once |
@@ -26,7 +26,7 @@ A Fable agent reviewed the first draft. Adopted from that review:
 - the envelope and dispatcher seam
 - `authorize` as both permission check and visibility (later replaced by `expose`)
 - `reject`/`deny`/`notFound` instead of error maps
-- `inputSchema`/`execute` naming, the `init` factory, scope changes per call (was `ctx.with` until 0.3.0), and a single `wrap` hook
+- `inputSchema`/`execute` naming (replaced in 0.4.0), the `init` factory, scope changes per call (was `ctx.with` until 0.3.0), and a single `wrap` hook
 
 Not adopted: `await using` in tests. It isn't safely portable across runtimes yet, so tests use a callback instead.
 
@@ -69,11 +69,11 @@ A second Fable pass reviewed the built code and found real bugs. All are fixed, 
 ## Verified
 
 - 41 core tests on Bun (`bun test`), plus compile-only type tests where every `@ts-expect-error` must fire.
-- `examples/node`: 15 tests with Vitest on Node 26, run both on PGlite and on Postgres 17 in Docker (`test:pg`; CI uses a Postgres service). Running on real Postgres caught tests that assumed an empty table. The Hono server was run against Postgres 17 in Docker.
+- `examples/bookings` (was `examples/node`): 15 tests with Vitest on Node 26, run both on PGlite and on Postgres 17 in Docker (`test:pg`; CI uses a Postgres service). Running on real Postgres caught tests that assumed an empty table. The Hono server was run against Postgres 17 in Docker.
 - `publint --strict` and `attw --profile esm-only` pass on the packed tarball.
-- `toAITools`: 6 tests through the real AI SDK (`generateText` with `MockLanguageModelV4`), checking what the model actually receives. `examples/nextjs` built with `next build`; its Server Action path was run in the browser against Postgres. The agent path wasn't run against a real model (no API key available).
+- `toAITools`: 6 tests through the real AI SDK (`generateText` with `MockLanguageModelV4`), checking what the model actually receives. The former `examples/nextjs` built with `next build`; its Server Action path was run in the browser against Postgres. The shop's Next.js host was run the same way. The agent path wasn't run against a real model (no API key available).
 - **The double-booking race, on real Postgres** (`bun run test:pg`, 10 rounds of 3 concurrent confirms, run 10 times: 100/100 rounds clean). An earlier version of this file claimed the race was verified on PGlite. It wasn't: PGlite runs one transaction at a time, so nothing raced. On real Postgres the losers got raw `23P01` and `40P01` errors (500s). Retries alone didn't fix it: overlapping inserts deadlock inside the exclusion constraint, Postgres only detects that after `deadlock_timeout` (1s), and retries collide again meanwhile. The fix is the standard one for bookings: `availability.hold` takes a per-property advisory lock before checking, so confirms queue up and losers get a clean `conflict`.
-- `examples/workers`: tests inside workerd with `@cloudflare/vitest-plugin` (the replacement for the deprecated `vitest-pool-workers`), Hyperdrive pointed at an in-process PGlite socket server, listeners finishing in `ctx.waitUntil`. `wrangler dev` was run against Postgres 17 in Docker.
+- The former `examples/workers`, now the shop's Worker tests: tests inside workerd with `@cloudflare/vitest-plugin` (the replacement for the deprecated `vitest-pool-workers`), Hyperdrive pointed at an in-process PGlite socket server, listeners finishing in `ctx.waitUntil`. `wrangler dev` was run against Postgres 17 in Docker.
 - Drizzle 1.0 RC: casing moved from `drizzle({ casing })` to the tables (`snakeCase.table`), and `PgDatabase` became `PgAsyncDatabase`. The adapter needed no change.
 - Cloudflare D1 rejects `BEGIN`/`SAVEPOINT`, hence "no D1 for mutations".
 - The oxlint boundary rule catches cross-module imports. typescript-eslint doesn't support TypeScript 7 yet.
@@ -105,3 +105,15 @@ Reviewed against Laravel's current docs, 37signals' Fizzy source, Next.js, Conve
 - **Per-call options: `run(fn, input, { scope, signal })`.** `registry.as(scope)` only says who; `with` is gone. Why: one place for "this call is different", and the adapters can pass on the signal their handler gets (oRPC's `signal`, the AI SDK's `abortSignal`), which they couldn't with a caller already bound. Acting as someone else is visible to the CLI on every call (`runs tasks.assign (scope: actor)`), which a stored `ctx.with(...)` wasn't.
 - **A signal is checked only before the call it's passed to starts**, never between your steps, so a caller who disconnects can't leave a workflow half done. Actions get it as `ctx.signal` to pass on to `fetch` or an AI call. Rails, Laravel and Convex don't cancel on disconnect either.
 
+
+## 0.4.0: input, output, handler(ctx, input)
+
+- **Names from app-logic libraries, not AI tools.** Counted in each library's current docs (2026-11-20). AI-tool definers say `inputSchema`/`execute`: the AI SDK, Mastra and MCP use `inputSchema`; the AI SDK, Mastra and the OpenAI Agents SDK use `execute`. App-logic definers say `handler`: Convex, oRPC, TanStack Start and Inngest do, and none of the seven says `execute`. For the schemas, tRPC and oRPC say `input`/`output`. We took `inputSchema`/`execute` from the AI SDK in 0.1, when agents were the headline; they're one adapter, and `toAITool` maps the fields either way.
+- **`ctx` first, like Convex.** There's no consensus on order: five libraries pass one object, five put the input first (mostly AI and task tools), and Convex puts ctx first. `ctx` is the argument every handler uses, so it goes first. A function without input is `handler(ctx)`, not `execute(_, ctx)`, and handlers, listeners and helpers (`findOrder(ctx, id)`) follow one rule. A third argument is never needed, because per-call data lives on ctx (`ctx.signal`, `ctx.event`). We passed on a single object (`handler({ ctx, input })`) because it would add a destructure to every body and break the helpers-take-ctx idiom.
+- **`input` instead of Convex's `args`.** "Input" is already the word in `run(fn, input)`, the docs and `invalid_input`. Convex's `args` is a record of validators, so agents would write `args: { … }` and get it wrong with Zod.
+- **No input: leave it out.** The handler gets only `ctx`, and callers write `run(fn)`, which replaced `run(fn, undefined)`. Whatever an adapter sends is ignored: AI tools always send `{}`, so `toAITool` publishes an empty object schema for these. Exposed functions with input still validate it. For an internal function you trust, a pass-through schema skips the checks.
+- **`init` stays.** It only binds types: modules import the definers and the registry imports the modules, so runtime pieces (database, services, config) can't move into it without an import cycle and env reads inside modules. That rules out a betterAuth-style `logic({...})`, which takes runtime config. `createLogic` would read as "create the logic", but the logic is your modules. `init` is honest set-up, as in tRPC's `initTRPC`.
+- **Ctx types come from `Config`.** `type QueryCtx = QueryCtx<Config>` in your logic file, like Convex's generated `QueryCtx`. The scope defaults to `Config`'s. A helper that needs the narrowed scope says so where it's used: `QueryCtx & { scope: SignedIn }`. Rejected: deriving it from the definer (`CtxOf<typeof query>`), the right move when a value is the source of truth (`z.infer`, Drizzle's `$inferSelect`), but here `Config` already is. Rejected: TanStack-style `declare module` registration, a global for two saved lines.
+- **Events declare `payload`**, the one shape they have, so they name the thing like functions do.
+- **One event per listener.** Typed precedents either group per-event handlers in one class (Laravel and Symfony subscribers, Commanded) or take an array of events with a union payload you narrow on the event name (Inngest). Two `on`s calling one helper keep exact payload types and show both edges in `graph`. Listening to everything is `wrap`'s job, or a plugin's later.
+- **No `emits: [...]` declaration.** The CLI already reads `emit(...)` calls (`show` prints them, `event-never-emitted` checks the other side). A declared list would only earn its keep as a contract across a boundary, such as a durable queue shared with another service.

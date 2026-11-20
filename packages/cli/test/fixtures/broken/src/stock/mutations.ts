@@ -4,8 +4,8 @@ import * as orders from "../orders";
 
 export const reserve = mutation({
   description: "Reserve stock",
-  inputSchema: z.object({ sku: z.string(), at: z.string() }),
-  async execute({ sku }, { run }) {
+  input: z.object({ sku: z.string(), at: z.string() }),
+  async handler({ run }, { sku }) {
     await run(orders.refund, { id: sku }); // ✗ stock → orders, while orders → stock: a cycle
     return { sku };
   },

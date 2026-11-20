@@ -76,21 +76,21 @@ src/bookings/
 // src/bookings/mutations.ts
 export const cancel = mutation({
   description: "Cancel a booking and free its dates",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   // Who may call it, on every call
   authorize: staff,
   // Adapters (HTTP, oRPC, AI) may publish it
   expose: true,
 
-  async execute({ bookingId }, ctx) {
-    const booking = await findBooking(ctx, bookingId);
+  async handler(ctx, input) {
+    const booking = await findBooking(ctx, input.bookingId);
     if (booking.status === "cancelled") {
       throw ctx.errors.reject("already_cancelled");
     }
 
     await ctx.run(availability.release, { sourceId: booking.id });
-    ctx.emit(cancelled, { bookingId });
+    ctx.emit(cancelled, { bookingId: input.bookingId });
 
     return setStatus(ctx, booking.id, "cancelled");
   },

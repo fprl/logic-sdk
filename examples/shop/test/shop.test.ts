@@ -85,7 +85,7 @@ test("mine says what you may do with each order, by the same rule cancel checks"
     await tx.as(sam).run(orders.ship, { orderId: shipped.id });
     await tx.as(ana).run(orders.place, mug());
 
-    const mine = await tx.as(ana).run(orders.mine, undefined);
+    const mine = await tx.as(ana).run(orders.mine);
     expect(mine.map((o) => [o.status, o.can.cancel]).sort()).toEqual([
       ["placed", true],
       ["shipped", false],
@@ -108,6 +108,6 @@ test("over HTTP: guests browse, but sign in to order", () =>
   }));
 
 const stock = async (tx: { as: typeof shop.as }, sku: string) => {
-  const products = await tx.as(guest).run(catalog.list, undefined);
+  const products = await tx.as(guest).run(catalog.list);
   return products.find((p) => p.sku === sku)!.stock;
 };

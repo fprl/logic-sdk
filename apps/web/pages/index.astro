@@ -6,15 +6,15 @@ const { config } = data;
 
 const example = `export const confirm = mutation({
   description: "Confirm a pending booking",
-  inputSchema: z.object({ bookingId: z.uuid() }),
-  outputSchema: Booking,
+  input: z.object({ bookingId: z.uuid() }),
+  output: Booking,
   authorize: staff,                                  // on every call, nested ones too
   expose: true,                                      // HTTP, oRPC and AI tools may publish it
-  async execute({ bookingId }, ctx) {
-    const b = await findBooking(ctx, bookingId);     // other accounts' bookings: 404
+  async handler(ctx, input) {
+    const b = await findBooking(ctx, input.bookingId); // other accounts' bookings: 404
     if (b.status !== "pending") throw ctx.errors.reject("not_pending");
-    await ctx.run(availability.hold, { bookingId }); // same transaction
-    ctx.emit(confirmed, { bookingId });              // delivered after commit
+    await ctx.run(availability.hold, rangeOf(b));      // same transaction
+    ctx.emit(confirmed, { bookingId: b.id });          // delivered after commit
     return setStatus(ctx, b.id, "confirmed");
   },
 });

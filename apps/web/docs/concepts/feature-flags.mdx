@@ -46,7 +46,7 @@ When the flag comes from a provider over the network, it's a service. Services r
 export const checkout = action({
   description: "Charge the guest and confirm the booking",
   ...
-  async execute(input, ctx) {
+  async handler(ctx, input) {
     const useNewPricing = await ctx.services.flags.enabled("new-pricing", ctx.scope.accountId);
     const quote = await ctx.run(pricing.quote, { ...input, useNewPricing });
     ...
@@ -64,12 +64,12 @@ The Convex way: a flag is a row, and a query reads it.
 // src/flags/queries.ts
 export const enabled = query({
   description: "Is this flag on for the current account?",
-  inputSchema: z.object({ name: z.string() }),
-  async execute({ name }, ctx) {
+  input: z.object({ name: z.string() }),
+  async handler(ctx, input) {
     const [row] = await ctx.db
       .select()
       .from(flags)
-      .where(and(eq(flags.accountId, ctx.scope.accountId), eq(flags.name, name)));
+      .where(and(eq(flags.accountId, ctx.scope.accountId), eq(flags.name, input.name)));
     return row?.enabled ?? false;
   },
 });
