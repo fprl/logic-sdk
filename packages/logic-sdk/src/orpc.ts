@@ -1,12 +1,12 @@
 import { ORPCError, os, type Procedure } from "@orpc/server";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { isDomainError, type Caller, type ErrorKind, type ExposedOf, type Fn, type Registry } from "./index.ts";
+import { isDomainError, type Caller, type ErrorKind, type ExposedOf, type Fn, type Kind, type Registry } from "./index.ts";
 
 /** oRPC context the router expects: bind who is calling per request, in your handler or middleware. */
 export type ORPCContext<S extends object> = { caller: Caller<S> };
 
 type ProcedureOf<S extends object, F> =
-  F extends Fn<any, infer I, infer O, true>
+  F extends Fn<Kind, infer I, infer O, true>
     ? Procedure<ORPCContext<S>, ORPCContext<S>, StandardSchemaV1<I, I>, StandardSchemaV1<O, O>, {}>
     : never;
 

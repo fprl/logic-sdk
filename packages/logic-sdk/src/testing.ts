@@ -15,7 +15,7 @@ export interface TestTransaction<S extends object, Mods extends Record<string, o
   /** Bind who is calling, exactly like `registry.as(...)`. */
   as(scope: S): Caller<S>;
   /** Replace a function's implementation for this test. Matched by identity, so `run(availability.hold, …)` hits the stub. */
-  stub<F extends Fn>(fn: F, impl: (ctx: any, input: FnIn<F>) => Promise<FnOut<F>>): void;
+  stub<F extends Fn>(fn: F, impl: (ctx: unknown, input: FnIn<F>) => Promise<FnOut<F>>): void;
   /** Every event emitted (and committed) so far, in order. */
   readonly events: Envelope[];
   /** The test transaction itself: read rows to assert on them. */
@@ -52,7 +52,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       let result!: T;
 
       const body = async (outer: unknown) => {
-        const stubs = new Map<Fn, (ctx: any, input: any) => Promise<any>>();
+        const stubs = new Map<Fn, (ctx: never, input: never) => Promise<unknown>>();
         const events: Envelope[] = [];
         const derived = internal(registry).derive({
           database: outer !== undefined && database?.nest ? database.nest(outer) : database,

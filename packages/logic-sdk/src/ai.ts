@@ -1,5 +1,5 @@
 import { jsonSchema, tool, type Tool } from "ai";
-import { isDomainError, type Caller, type ExposedOf, type Fn, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
+import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
 type UnionToIntersection<U> = (U extends unknown ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
 
 /** `{ bookings_confirm, pricing_priceStay, … }`: one AI SDK tool per exposed function, typed. */
@@ -41,8 +41,8 @@ const noInput = jsonSchema({ type: "object", properties: {}, additionalPropertie
  * Domain errors reach the model (it sees the code and can react). Anything unexpected is reported
  * to `onError` and the model gets "internal_error", so internals never land in its context.
  */
-export function toAITool<F extends Fn<any, any, any, true>>(
-  caller: Caller<any>,
+export function toAITool<F extends ExposedFn>(
+  caller: Caller<object>,
   fn: F,
   options: AIToolOptions = {},
 ): Tool<FnIn<F>, FnOut<F>> {
@@ -80,6 +80,6 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
     throw new Error("[logic-sdk] toAITools needs a filter: the agent door is opt-in. E.g. { filter: (f) => f.fn.meta?.agent === true }");
   const tools: Record<string, Tool> = {};
   for (const f of registry.functions)
-    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as Fn<any, any, any, true>, options);
+    if (f.exposed && options.filter(f)) tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, options);
   return tools as Partial<AIToolsOf<Mods>>;
 }

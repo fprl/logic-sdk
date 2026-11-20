@@ -130,7 +130,7 @@ mutation({ description: "e", input: z.object({}), handler: async ({ emit }) => {
 on(() => transforming, async (_, { at }) => { const d: Date = at; void d; });
 import { createTestRegistry } from "../src/testing.ts";
 void createTestRegistry(registry).transaction(async (tx) => {
-  tx.stub(getOne, async ({ id }) => ({ id, n: 2 }));
+  tx.stub(getOne, async (_, input) => ({ id: input.id, n: 2 }));
   // @ts-expect-error stub must return the function's output type
   tx.stub(getOne, async () => ({ nope: true }));
 });

@@ -5,8 +5,8 @@ import type { StandardSchemaV1 } from "@standard-schema/spec";
  * ──────────────────────────────────────────────────────────────────────────── */
 
 type Schema<I = any, O = any> = StandardSchemaV1<I, O>;
-type In<S> = S extends Schema<infer I, any> ? I : never;
-type Out<S> = S extends Schema<any, infer O> ? O : never;
+type In<S> = S extends StandardSchemaV1<infer I, unknown> ? I : never;
+type Out<S> = S extends StandardSchemaV1<unknown, infer O> ? O : never;
 
 /** What you declare once in `init<...>()`. */
 export interface Config {
@@ -50,7 +50,7 @@ declare const types: unique symbol;
 const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 
 /** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
-export interface Fn<K extends Kind = Kind, I = any, O = any, E extends boolean = boolean> {
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean> {
   readonly [BRAND]: K;
   readonly kind: K;
   readonly description: string;
@@ -59,26 +59,26 @@ export interface Fn<K extends Kind = Kind, I = any, O = any, E extends boolean =
   /** What callers get back, checked before it leaves. */
   readonly output?: Schema;
   /** Your own data about the function. Checked against `meta` in `init` where you set it, typed in `wrap`; loose here, for adapters. */
-  readonly meta?: any;
+  readonly meta?: Readonly<Record<string, unknown>>;
   /** Who may call it (from `authorize`). Runs on every call, before validation. */
-  readonly authorize?: Policy<any>;
+  readonly authorize?: Policy<never>;
   /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Requires `authorize` and `output`. */
   readonly expose?: true;
-  readonly handler: (ctx: any, input: any) => Promise<any>;
+  readonly handler: (ctx: never, input: never) => Promise<unknown>;
   /** Phantom types, never set at runtime. */
   readonly [types]?: { input: I; output: O; exposed: E };
 }
 /** The exposed functions of one module: what adapters publish. */
-export type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<any, any, any, true> ? N : never]: T[N] };
+export type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<Kind, unknown, unknown, true> ? N : never]: T[N] };
 /** A function with `expose: true`: adapters may publish it. */
-export type ExposedFn<K extends Kind = Kind, I = any, O = any> = Fn<K, I, O, true>;
+export type ExposedFn<K extends Kind = Kind, I = unknown, O = unknown> = Fn<K, I, O, true>;
 /** What callers pass to a function. */
-export type FnIn<F> = F extends Fn<any, infer I, any> ? I : never;
+export type FnIn<F> = F extends Fn<Kind, infer I, unknown> ? I : never;
 /** What a function returns. */
-export type FnOut<F> = F extends Fn<any, any, infer O> ? O : never;
+export type FnOut<F> = F extends Fn<Kind, unknown, infer O> ? O : never;
 
 /** `I`: what `emit` takes. `O`: what listeners receive (after the payload schema's transforms and defaults). */
-export interface EventDef<I = any, O = I> {
+export interface EventDef<I = unknown, O = I> {
   readonly [BRAND]: "event";
   readonly kind: "event";
   /** The payload's schema, checked when emitted and again at delivery. */
@@ -99,13 +99,13 @@ export interface Envelope<P = unknown, S = object> {
   occurredAt: string;
 }
 
-export interface Listener<O = any> {
+export interface Listener<O = unknown> {
   readonly [BRAND]: "listener";
   readonly kind: "listener";
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
-  readonly event: () => EventDef<any, O>;
+  readonly event: () => EventDef<unknown, O>;
   readonly description?: string;
-  readonly handler: (ctx: any, payload: O) => Promise<unknown>;
+  readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }
 
 /** What a single call may change: who it runs as (part of the scope) and when to give up. Nothing else. */
@@ -164,7 +164,7 @@ export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C
    */
   run: Run<"query" | "mutation", ScopeOf<C>>;
   /** Queue an event. Delivered to listeners only after the transaction commits. */
-  emit<I>(event: EventDef<I, any>, payload: I): void;
+  emit<I>(event: EventDef<I, unknown>, payload: I): void;
 }
 export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
@@ -308,7 +308,7 @@ export interface Call<M = unknown> {
 export interface RegistryOptions<Mods extends Record<string, object>> {
   /** One entry per module: `{ bookings, availability }` with `import * as bookings from "./bookings"`. */
   modules: Mods;
-  database?: DatabaseAdapter<any, any>;
+  database?: DatabaseAdapter<unknown, unknown>;
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
@@ -363,7 +363,7 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>> = Omit<
 } &
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
   ({} extends ConfigOf<C> ? { config?: ConfigOf<C> } : { config: ConfigOf<C> }) &
-  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<any, DbOf<C>> });
+  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<unknown, DbOf<C>> });
 
 /** Keys `Config` doesn't know are errors, so a typo like `servises` can't be silently ignored. */
 type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
@@ -408,7 +408,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
     /** React to an event after commit, like an action. Must be idempotent. `on(() => bookings.confirmed, async (ctx, payload) => …)` */
     on: <O>(
-      event: () => EventDef<any, O>,
+      event: () => EventDef<unknown, O>,
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>,
       opts: { description?: string } = {},
     ): Listener<O> =>
@@ -447,19 +447,45 @@ interface Frame {
 }
 
 export interface Overrides {
-  database?: DatabaseAdapter<any, any>;
+  database?: DatabaseAdapter<unknown, unknown>;
   services?: object;
   /** Merged over the registry's config, section by section. */
   config?: object;
   events?: Dispatcher;
   now?: () => Date;
-  stubs?: Map<Fn, (ctx: any, input: any) => Promise<any>>;
+  stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   record?: (envelope: Envelope) => void;
 }
 
-export type Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> = ReturnType<
-  typeof build<S, Mods, Cf>
->;
+export interface RegisteredEvent extends Registered {
+  event: EventDef;
+}
+export interface RegisteredListener extends Registered {
+  listener: Listener;
+  event: EventDef;
+}
+
+/** What `createRegistry` returns. `Cf` is your config's type, so tests can override parts of it. */
+export interface Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> {
+  /** The modules you registered (typed), for adapters that build typed routers. */
+  readonly modules: Mods;
+  /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
+  as(scope: S): Caller<S>;
+  /** Everything the registry can do. Adapters read this. */
+  readonly functions: readonly RegisteredFn[];
+  readonly events: readonly RegisteredEvent[];
+  readonly listeners: readonly RegisteredListener[];
+  /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
+  idOf(fnOrEvent: object): string;
+  /** Deliver one stored envelope to its listeners (durable dispatchers). Throws if any listener failed, so you can retry. */
+  dispatch(envelope: Envelope): Promise<void>;
+  /** @internal used by `logic-sdk/testing` */
+  readonly [INTERNAL]: {
+    options: RegistryOptions<Mods>;
+    config: Frozen<Cf>;
+    derive(more: Overrides): Registry<S, Mods, Cf>;
+  };
+}
 
 /** Create the registry once at startup. Prefer the `createRegistry` returned by `init()`: it's typed with your config. */
 export function createRegistry<S extends object = object, const Mods extends Record<string, object> = Record<string, object>>(
@@ -507,8 +533,8 @@ const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
   const functions: RegisteredFn[] = [];
-  const events: (Registered & { event: EventDef })[] = [];
-  const listeners: (Registered & { listener: Listener; event: EventDef })[] = [];
+  const events: RegisteredEvent[] = [];
+  const listeners: RegisteredListener[] = [];
 
   for (const [module, ns] of Object.entries(modules)) {
     for (const [name, value] of Object.entries(ns)) {
@@ -523,7 +549,10 @@ export function describeModules(modules: Record<string, object>) {
   return { ids, functions, events, listeners };
 }
 
-function build<S extends object, Mods extends Record<string, object>, Cf = unknown>(options: RegistryOptions<Mods>, o: Overrides) {
+function build<S extends object, Mods extends Record<string, object>, Cf = unknown>(
+  options: RegistryOptions<Mods>,
+  o: Overrides,
+): Registry<S, Mods, Cf> {
   const { ids, functions, events, listeners } = describeModules(options.modules);
 
   const database = o.database ?? options.database;
@@ -578,7 +607,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   // ── listeners ────────────────────────────────────────────────────────────
-  const byEvent = new Map<string, (Registered & { listener: Listener })[]>();
+  const byEvent = new Map<string, RegisteredListener[]>();
   for (const l of listeners) {
     const name = idOf(l.event);
     byEvent.set(name, [...(byEvent.get(name) ?? []), l]);
@@ -594,7 +623,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       try {
         await wrap({ id: l.id, kind: "listener", meta: undefined, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
           const payload = event ? await parseOwn(event.payload, envelope.payload, `${envelope.name} payload`) : envelope.payload;
-          return l.listener.handler({ ...actionCtx(frame, l.id), event: { ...envelope, payload } }, payload);
+          return l.listener.handler({ ...actionCtx(frame, l.id), event: { ...envelope, payload } } as never, payload); // SAFETY: as in invoke
         });
       } catch (error) {
         failures.push({ listener: l.id, error });
@@ -634,7 +663,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     scope: frame.scope,
     config: config as any, // Frozen<Cf> here; each app's ctx types it from its own Config
     now,
-    run: (fn: Fn, input?: unknown, options?: RunOptions<any>) => invoke(fn, input, enter(frame, options), allowed),
+    run: (fn: Fn, input?: unknown, options?: RunOptions) => invoke(fn, input, enter(frame, options), allowed),
   });
   const queryCtx = (frame: Frame, id: string): QueryCtx<any> => ({
     ...baseCtx(frame, id, ["query"]),
@@ -681,7 +710,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const prepare = async () => {
       frame.abortOn?.throwIfAborted();
       if (fn.authorize) {
-        const verdict: unknown = fn.authorize(frame.scope);
+        // SAFETY: the registry erases each policy's scope type; the caller's scope is the app's Scope by construction
+        const verdict: unknown = fn.authorize(frame.scope as never);
         if (verdict instanceof Promise)
           throw new Error(`[logic-sdk] The policy on ${id} returned a Promise. Policies are sync and read only the scope.`);
         if (verdict !== true) throw new DomainError("forbidden", `${id}.forbidden`);
@@ -690,8 +720,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       return fn.input ? parseInput(fn.input, rawInput, id, frame.depth > 0) : undefined;
     };
     const execute = async (input: unknown, ctx: unknown) => {
-      const stub = o.stubs?.get(fn);
-      const out = await (stub ? stub(ctx, input) : fn.handler(ctx, input));
+      // SAFETY: the handler's types were erased when it was registered. `ctx` was built for its kind,
+      // and `input` just passed its own schema (or it takes none).
+      const handler = o.stubs?.get(fn) ?? fn.handler;
+      const out = await handler(ctx as never, input as never);
       return fn.output ? parseOwn(fn.output, out, `${id} output`) : out;
     };
 
@@ -777,22 +809,17 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   return {
-    /** The modules you registered (typed), for adapters that build typed routers. */
     modules: options.modules,
-    /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
-    as: (scope: S): Caller<S> => ({
+    as: (scope) => ({
       scope,
-      run: (fn: Fn, input?: unknown, options?: RunOptions<any>) =>
+      run: (fn: Fn, input?: unknown, options?: RunOptions) =>
         invoke(fn, input, enter({ scope, depth: -1 }, options), ["query", "mutation", "action"]), // depth 0
     }),
-    /** Everything the registry can do. Adapters read this. */
-    functions: functions as readonly RegisteredFn[],
-    events: events as readonly (Registered & { event: EventDef })[],
-    listeners: listeners as readonly (Registered & { listener: Listener; event: EventDef })[],
+    functions,
+    events,
+    listeners,
     idOf,
-    /** Deliver one stored envelope to its listeners (durable dispatchers). Throws if any listener failed, so you can retry. */
     dispatch,
-    /** @internal used by `logic-sdk/testing` */
     [INTERNAL]: {
       options,
       config,
@@ -802,4 +829,4 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 }
 
 /** @internal */
-export const internal = (registry: Registry<any, any, any>) => registry[INTERNAL];
+export const internal = <S extends object, Mods extends Record<string, object>, Cf>(registry: Registry<S, Mods, Cf>) => registry[INTERNAL];
