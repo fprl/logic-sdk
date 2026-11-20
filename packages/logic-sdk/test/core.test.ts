@@ -140,14 +140,18 @@ test("run options: { scope } changes who is calling for that call, and checks se
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
 });
 
-test("expose: true without authorize or output fails when the function is defined", () => {
-  const msg = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
+test("definitions the types reject also fail at runtime, naming the function", () => {
+  const msg = (fn: object) => { try { createRegistry<Scope>({ modules: { orders: { fn } }, database: memoryDatabase() }); return ""; } catch (e) { return (e as Error).message; } };
   // @ts-expect-error expose without authorize
-  expect(msg(() => query({ output: z.number(), expose: true, handler: async () => 1 }))).toMatch(/no authorize/);
+  expect(msg(query({ output: z.number(), expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no authorize/);
   // @ts-expect-error expose without output
-  expect(msg(() => query({ authorize: anyone, expose: true, handler: async () => 1 }))).toMatch(/no output/);
+  expect(msg(query({ authorize: anyone, expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no output/);
   // @ts-expect-error a policy name is not a policy
-  expect(msg(() => query({ authorize: "staff", handler: async () => 1 }))).toMatch(/must be a policy function/);
+  expect(msg(query({ authorize: "staff", handler: async () => 1 }))).toMatch(/orders\.fn has an authorize that isn't a policy function/);
+  // @ts-expect-error the event must be a thunk
+  expect(msg(listener({ event: added, async handler() {} }))).toMatch(/orders\.fn needs `event` as a thunk/);
+  // @ts-expect-error handler is required
+  expect(msg(listener({ event: () => added }))).toMatch(/orders\.fn needs a handler/);
 });
 
 test("a policy must return exactly true, and must be sync", async () => {
@@ -614,13 +618,6 @@ test("listeners carry meta into wrap, like functions", async () => {
   });
   await r.as({ actor: "a", locale: "es" }).run(doIt);
   expect(seen).toEqual(["mutation:-", "listener:audit"]);
-});
-
-test("listener needs an event thunk and a handler", () => {
-  // @ts-expect-error the event must be a thunk
-  expect(() => listener({ event: added, async handler() {} })).toThrow(/thunk/);
-  // @ts-expect-error handler is required
-  expect(() => listener({ event: () => added })).toThrow(/handler/);
 });
 
 test("emit snapshots the payload: mutating it afterwards changes nothing", async () => {

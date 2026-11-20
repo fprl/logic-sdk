@@ -383,22 +383,12 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed signature of `Constructor`: the checks here are the runtime half of those types.
+  // One implementation behind the typed signature of `Constructor`. Its runtime half, for JS callers and casts,
+  // is `checkDefinition`, run when the registry names the function, so the errors can say which one.
   const make =
     <K extends Kind>(kind: K) =>
-    (def: any): any => {
-      const where = `a ${kind}`; // no id yet at definition time: the stack trace points at it
-      if (def.authorize !== undefined && typeof def.authorize !== "function")
-        throw new Error(`[logic-sdk] authorize on ${where} must be a policy function, like \`authorize: member\`.`);
-      if (def.expose !== undefined && def.expose !== true)
-        throw new Error(`[logic-sdk] expose on ${where} must be \`true\` or left out.`);
-      if (def.expose && !def.authorize)
-        throw new Error(`[logic-sdk] ${where} has expose: true but no authorize. Say who may call it.`);
-      if (def.expose && !def.output)
-        throw new Error(`[logic-sdk] ${where} has expose: true but no output. Say what callers may see.`);
-      if (typeof def.handler !== "function") throw new Error(`[logic-sdk] ${where} needs a handler(ctx, input).`);
-      return Object.freeze({ [BRAND]: kind, kind, ...def });
-    };
+    (def: any): any =>
+      Object.freeze({ [BRAND]: kind, kind, ...def });
 
   return {
     /** Create the registry once at startup: `createRegistry({ modules, database, services })`. */
@@ -423,8 +413,6 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
-      if (typeof def.event !== "function") throw new Error("[logic-sdk] listener: `event` must be a thunk: `event: () => orders.placed`.");
-      if (typeof def.handler !== "function") throw new Error("[logic-sdk] listener: `handler` must be a function.");
       const { event, meta, handler } = def;
       // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
       return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, meta: meta as Listener["meta"], handler });
@@ -540,6 +528,23 @@ const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v
  * What `createRegistry` finds in your modules, without a database or services: every function, event and
  * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
+/** What the types already say, checked at runtime too (JS callers, casts), naming the function: `orders.cancel`. */
+function checkDefinition(id: string, value: Fn | Listener) {
+  const fail = (why: string) => {
+    throw new Error(`[logic-sdk] ${id} ${why}`);
+  };
+  if (value.kind === "listener") {
+    if (typeof value.event !== "function") fail("needs `event` as a thunk: `event: () => orders.placed`.");
+    if (typeof value.handler !== "function") fail("needs a handler(ctx, payload).");
+    return;
+  }
+  if (value.authorize !== undefined && typeof value.authorize !== "function") fail("has an authorize that isn't a policy function. Use one, like `authorize: member`.");
+  if (value.expose !== undefined && value.expose !== true) fail("has expose set to something other than `true`. Set it to `true` or leave it out.");
+  if (value.expose && !value.authorize) fail("has expose: true but no authorize. Say who may call it.");
+  if (value.expose && !value.output) fail("has expose: true but no output. Say what callers may see.");
+  if (typeof value.handler !== "function") fail("needs a handler(ctx, input).");
+}
+
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
   const functions: RegisteredFn[] = [];
@@ -550,6 +555,7 @@ export function describeModules(modules: Record<string, object>) {
     for (const [name, value] of Object.entries(ns)) {
       if (!isBranded(value) || ids.has(value)) continue;
       const id = `${module}.${name}`;
+      if (value.kind !== "event") checkDefinition(id, value);
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });

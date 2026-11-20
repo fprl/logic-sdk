@@ -43,10 +43,10 @@ export interface AIToolsOptions extends ErrorOption {
 }
 
 /** `meta.ai`, read defensively: meta is stored loose, `AIMeta` only types where you write it. */
-const ai = (fn: { meta?: Readonly<Record<string, unknown>> }): { tool?: unknown; description?: unknown } =>
+const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }): { tool?: unknown; description?: unknown } =>
   typeof fn.meta?.ai === "object" && fn.meta.ai !== null ? fn.meta.ai : {};
 const metaDescription = (fn: ExposedFn) => {
-  const d = ai(fn).description;
+  const d = aiMeta(fn).description;
   return typeof d === "string" ? d : undefined;
 };
 
@@ -100,7 +100,7 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
   caller: Caller<S>,
   options: AIToolsOptions = {},
 ): Partial<AIToolsOf<Mods>> {
-  const filter = options.filter ?? ((f: RegisteredFn) => ai(f.fn).tool === true);
+  const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn).tool === true);
   const tools: Record<string, Tool> = {};
   for (const f of registry.functions)
     if (f.exposed && filter(f))

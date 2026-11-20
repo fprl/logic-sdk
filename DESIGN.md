@@ -145,7 +145,8 @@ export const sendReceipt = listener({
 - **People get JSDoc.** One sentence above each export shows on hover wherever the function is used, which a field never did, and the CLI reads it statically (oxc returns comments with positions; about 10 lines), first paragraph only.
 - **Adapters own a namespace in your meta and export its type.** `logic-sdk/ai` exports `AIMeta = { ai?: { tool?, description? } }`; you add it to your shape (`meta: AIMeta & AppMeta`). Meta stays yours: the library reserves no key, so nothing collides with your own `description`.
 - **Options last override meta,** for every adapter: `toAITool(caller, fn, { description })`, or `describe: (f) => …` on `toAITools` (the bulk form), then `meta.ai.description`, else none. `toAITools` defaults `filter` to `meta.ai.tool === true`, so the agent door stays opt-in without a key of your own.
-- **Costs, accepted:** nothing flags a tool without a description (models pick worse; a `check` rule could warn later), and definition-time errors name "a mutation", not its sentence (the stack trace locates it).
+- **Cost, accepted:** nothing flags a tool without a description (models pick worse; a `check` rule could warn later).
+- **Definition errors name the function.** The runtime half of the type rules (expose needs authorize and output, a real policy, a handler, a listener's event thunk) runs in `createRegistry`, which knows ids: "orders.cancel has expose: true but no authorize". The definers only build frozen objects.
 - **What would change it:** several library-owned descriptive keys arriving (`title`, `tags`, `deprecated`), where a typed base would scale better than namespaces.
 
 ### No per-function middleware

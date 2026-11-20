@@ -141,13 +141,14 @@ export function analyze(root: string, registryFile: string): Source {
       if (line === -1) line = lineStarts.length;
       return { file: relative(root, file), line, column: offset - lineStarts[line - 1]! + 1 };
     };
-    /** The `/** … *\/` block right above `start` (only whitespace between), first paragraph, on one line. */
+    /** The `/** … *\/` block right above `start` (only whitespace between): its first paragraph, on one line. */
     const docAt = (start: number) => {
       const c = result.comments.findLast((c) => c.end <= start);
       if (!c || c.type !== "Block" || !c.value.startsWith("*") || text.slice(c.end, start).trim()) return undefined;
       const lines = c.value.slice(1).split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trim());
-      const end = lines.findIndex((l, i) => i > 0 && l === "" && lines.slice(0, i).some(Boolean));
-      return lines.slice(0, end === -1 ? undefined : end).filter(Boolean).join(" ") || undefined;
+      const body = lines.slice(lines.findIndex(Boolean)); // drop leading blank lines
+      const end = body.findIndex((l) => l === "" || l.startsWith("@")); // a blank line or a tag ends the paragraph
+      return body.slice(0, end === -1 ? undefined : end).join(" ") || undefined;
     };
     return { file, program: result.program as unknown as Node, loc, docAt };
   };
