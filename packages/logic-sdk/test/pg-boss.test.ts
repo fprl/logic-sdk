@@ -269,11 +269,12 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
 
   test.skipIf(_name === "PGlite")("a process that enqueues before any work() creates the queue it needs", async () => {
     // PGlite has one connection, so pg-boss's own lookup would wait for the open transaction: run work() first there
-    const fresh = listener({ event: () => added, async handler() {} });
+    const fresh = listener({ event: () => added, meta: { pgBoss: { queue: { expireInSeconds: 77 } } }, async handler() {} });
     const enqueuer = await start(); // a web process: started, never called work()
     const web = createRegistry({ modules: { x: modules.x, y: { fresh } }, database: backend.database, jobs: { adapter: pgBoss(enqueuer), scope: { load: (saved) => saved } } });
     await web.as({ actor: "ana" }).run(add, { name: "first" });
     expect(await enqueuer.findJobs<Job>(queueName("y.fresh"), { data: { envelope: { payload: { name: "first" } } } })).toHaveLength(1);
+    expect(await enqueuer.getQueue(queueName("y.fresh"))).toMatchObject({ expireInSeconds: 77 }); // created with its meta
   });
 
   test("meta.pgBoss tunes the listener's queue and its workers", async () => {

@@ -26,7 +26,7 @@ const PREFIX = "logic-sdk.";
 /** A listener's or cron's queue: `logic-sdk.notifications.send`. */
 export const queueName = (id: string) => `${PREFIX}${id}`;
 /** Where scheduled calls (`ctx.schedule`) wait: one queue for all of them, so no function needs a worker of its own. */
-export const CALLS_QUEUE = "logic-sdk.calls"; // ids always have a dot, so no listener's queue is this one
+export const CALLS_QUEUE = `${PREFIX}calls`; // ids always have a dot, so no listener's queue is this one
 
 /** A job's queue: its listener's or its cron's, or the shared one for scheduled calls. */
 const queueOf = (job: Job) => (job.kind === "delivery" ? queueName(job.listener) : job.kind === "cron" ? queueName(job.cron) : CALLS_QUEUE);
@@ -116,11 +116,11 @@ export function pgBoss(boss: PgBoss): Dispatcher {
   return {
     holds: true, // `startAfter`, however far ahead
     replaces: true,
-    /** pg-boss inserts in the mutation's transaction, through it. */
+    /** Needs `database`: jobs are inserted in the mutation's transaction, and `retry` opens its own through it. */
     check({ listeners, database: given }) {
       if (!given) throw new Error("[logic-sdk] pgBoss(boss) needs `database`: jobs are inserted in your mutation's transaction.");
       database = given;
-      for (const l of listeners) queueOptions.set(l.id, tuningOf(l.listener.meta)?.queue);
+      for (const l of listeners) queueOptions.set(queueName(l.id), tuningOf(l.listener.meta)?.queue);
     },
     /** Inside the mutation's transaction: one insert per queue. pg-boss skips a row whose id it already has. */
     async enqueue(tx, jobs) {
@@ -214,9 +214,10 @@ export async function work(
   };
 
   for (const { name, tuning } of queues) {
-    const { partition, ...queue } = queueConfig(tuning?.queue);
-    await boss.createQueue(name, { ...queue, partition }); // a no-op when it exists, so its options are updated below
-    await boss.updateQueue(name, queue);
+    const config = queueConfig(tuning?.queue);
+    const { partition: _createOnly, ...updatable } = config;
+    await boss.createQueue(name, config); // a no-op when it exists, so its options are updated below
+    await boss.updateQueue(name, updatable);
     await boss.work<Job>(name, { ...tuning?.worker, perJobResults: true }, (jobs) => Promise.all(jobs.map(settle)));
   }
 
