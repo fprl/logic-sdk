@@ -344,13 +344,20 @@ export interface SweepResult {
   retrying: number;
 }
 
+/** What the registry hands an adapter: run a job here, or report a failure of the adapter's own (a send that failed). */
+export interface Runner {
+  /** Every failure it meets is already reported to `onError`; a throw means "retry it". */
+  run: RunDelivery;
+  report(error: unknown, job: Job, attempt?: number): void;
+}
+
 export interface Dispatcher {
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
   enqueue?(tx: unknown, deliveries: Delivery[]): Promise<void>;
-  /** After commit. Every failure `run` meets is already reported to `onError`; a throw means "retry it". */
-  deliver(deliveries: Delivery[], run: RunDelivery): Promise<void>;
+  /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
+  deliver(deliveries: Delivery[], runner: Runner): Promise<void>;
   /** Run what's due (retries, deliveries whose runner crashed). Only dispatchers that store deliveries have it. */
-  sweep?(run: RunDelivery, options?: { limit?: number }): Promise<SweepResult>;
+  sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed job back in line. `false` when there's no failed job with that id. Only dispatchers that store them. */
   retry?(id: string): Promise<boolean>;
 }
@@ -365,7 +372,7 @@ export interface FailureInfo {
 
 /** Default dispatcher: delivers right after commit, in this process, once. Lost on crash: use an outbox when that matters. */
 export const inProcess = (): Dispatcher => ({
-  async deliver(deliveries, run) {
+  async deliver(deliveries, { run }) {
     for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
   },
 });
@@ -847,6 +854,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     }
   }
 
+  const runner: Runner = {
+    run: deliver,
+    report: (e, job, attempt) => report(e, { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt }),
+  };
+
   // ── ctx ──────────────────────────────────────────────────────────────────
   /** The frame a call runs in: one level deeper, with this call's scope patch and signal. */
   const enter = (frame: Frame, options: RunOptions | undefined): Frame => ({
@@ -987,7 +999,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     try {
       for (const e of outbox) o.record?.(e);
       if (!deliveries.length) return;
-      const delivery = (async () => dispatcher.deliver(deliveries, deliver))().catch((e) =>
+      const delivery = (async () => dispatcher.deliver(deliveries, runner))().catch((e) =>
         report(e, { listener: "(dispatcher)", envelope: outbox[0] }),
       );
       if (options.waitUntil) {
@@ -1015,7 +1027,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     idOf,
     jobs: {
       run: deliver,
-      sweep: async (options) => (await dispatcher.sweep?.(deliver, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
+      sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
       async retry(id) {
         if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
         return dispatcher.retry(id);

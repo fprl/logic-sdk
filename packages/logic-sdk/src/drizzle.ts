@@ -1,6 +1,6 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, RunDelivery, SweepResult } from "./index.ts";
+import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, Runner, SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -68,8 +68,17 @@ export const outboxTable = pgTable(
 );
 
 export interface OutboxOptions {
-  /** Seconds a runner owns a delivery before a sweep may take it over. Longer than your slowest listener. Default 300. */
+  /**
+   * Seconds a runner owns a delivery before a sweep may take it over. Default 300. Longer than your slowest listener;
+   * with `via`, it only covers the handoff, so it's how soon a handoff that crashed is tried again.
+   */
   lease?: number;
+  /**
+   * Hand jobs to a queue instead of running them here: `outbox(db, { via: cloudflareQueue(env.JOBS) })`. The row makes the
+   * handoff durable; after it, the queue owns retries and its dead-letter queue. `maxAttempts` and `backoff` then count
+   * failed handoffs. A send that lands but whose row isn't deleted is sent again, so a job can run twice, even at once.
+   */
+  via?: Dispatcher;
   /** Tries before a delivery is marked failed. Default 10: about 3.5 hours of backoff in all. */
   maxAttempts?: number;
   /** Seconds to wait after a failed try. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
@@ -79,7 +88,7 @@ export interface OutboxOptions {
 /** The outbox transport. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
 export interface Outbox extends Dispatcher {
   /** Retries whose backoff is over and deliveries whose runner crashed (lease expired), claimed one at a time. */
-  sweep(run: RunDelivery, options?: { limit?: number }): Promise<SweepResult>;
+  sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed row back in line, with a fresh set of attempts. `false` when no failed row has that id. */
   retry(id: string): Promise<boolean>;
 }
@@ -105,12 +114,25 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   const inSeconds = (seconds: number) => sql`now() + make_interval(secs => ${seconds})`;
   /** Writes only land if no one has claimed the row since: a slow listener can't undo a newer runner's work. */
   const mine = (id: string, attempt: number) => and(eq(t.id, id), eq(t.attempts, attempt));
+  const via = options.via;
 
-  /** Run one claimed delivery and record how it went. */
-  async function settle(delivery: Delivery, attempt: number, run: RunDelivery): Promise<keyof SweepResult> {
+  /** Run it here, or hand it to `via`: then it's done once the queue has it. */
+  async function attemptOnce(delivery: Delivery, attempt: number, runner: Runner): Promise<DeliveryOutcome> {
+    if (!via) return runner.run(delivery, { attempt });
+    try {
+      await via.deliver([delivery], runner);
+      return "done";
+    } catch (e) {
+      runner.report(e, delivery, attempt); // the queue's failure, not the listener's: run never saw it
+      throw e;
+    }
+  }
+
+  /** Try one claimed delivery and record how it went. */
+  async function settle(delivery: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
-      outcome = await run(delivery, { attempt });
+      outcome = await attemptOnce(delivery, attempt, runner);
     } catch (e) {
       const lastError = e instanceof Error ? e.message : String(e);
       if (attempt >= maxAttempts) {
@@ -133,11 +155,11 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async enqueue(tx: unknown, deliveries: Delivery[]) {
       await (tx as PgClient).insert(t).values(deliveries.map((d) => ({ id: d.id, delivery: d, attempts: 1, availableAt: inSeconds(lease) })));
     },
-    /** After commit, in this request: the first try of each. */
-    async deliver(deliveries: Delivery[], run: RunDelivery) {
-      for (const d of deliveries) await settle(d, 1, run);
+    /** After commit, in this request: the first try (or handoff) of each. */
+    async deliver(deliveries, runner) {
+      for (const d of deliveries) await settle(d, 1, runner);
     },
-    async sweep(run, { limit = 100 } = {}) {
+    async sweep(runner, { limit = 100 } = {}) {
       const result: SweepResult = { done: 0, failed: 0, discarded: 0, retrying: 0 };
       for (let i = 0; i < limit; i++) {
         const due = db
@@ -153,7 +175,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .where(inArray(t.id, due))
           .returning({ delivery: t.delivery, attempts: t.attempts });
         if (!row) break;
-        result[await settle(row.delivery, row.attempts, run)]++;
+        result[await settle(row.delivery, row.attempts, runner)]++;
       }
       return result;
     },

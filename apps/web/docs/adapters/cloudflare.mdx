@@ -1,0 +1,69 @@
+---
+title: Cloudflare
+description: Jobs through Cloudflare Queues, durable through the outbox.
+---
+
+```ts
+// worker.ts
+import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
+import { cloudflareQueue, toQueueHandler } from "logic-sdk/cloudflare";
+import type { Job } from "logic-sdk";
+
+const makeRegistry = (env: Env, ctx: ExecutionContext) => {
+  const db = drizzle({ client: postgres(env.HYPERDRIVE.connectionString, { max: 5 }) });
+  return createRegistry({
+    modules,
+    database: drizzleAdapter(db),
+    waitUntil: (p) => ctx.waitUntil(p),
+    jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }) },
+  });
+};
+
+export default {
+  fetch: app.fetch,
+  queue: (batch, env, ctx) => toQueueHandler(makeRegistry(env, ctx))(batch),   // runs each job
+  scheduled: (_controller, env, ctx) => makeRegistry(env, ctx).jobs.sweep(),  // re-sends what never reached the queue
+} satisfies ExportedHandler<Env, Job>;
+```
+
+```jsonc
+// wrangler.jsonc
+{
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "jobs" }],
+    "consumers": [{ "queue": "jobs", "max_retries": 10, "retry_delay": 60, "dead_letter_queue": "jobs-failed" }]
+  },
+  "triggers": { "crons": ["* * * * *"] }
+}
+```
+
+## Two ways to send
+
+| | Durable | When the job leaves |
+|---|---|---|
+| `outbox(db, { via: cloudflareQueue(env.JOBS) })` | yes | a row is written in your transaction; after commit it's sent and the row deleted |
+| `cloudflareQueue(env.JOBS)` | no | sent after commit; a Worker that dies in between loses it |
+
+- **Through the outbox,** a send that fails keeps the row, is reported to `onError`, and the sweep sends it again with backoff. After `maxAttempts` failed sends the row is `failed`, and `registry.jobs.retry(id)` puts it back. `lease` is now how soon a send that crashed is tried again.
+- **Alone,** it's the Rails and Laravel `after_commit` model: fine for jobs you can lose, like a cache warm-up. Sends are split under Cloudflare's limits (100 messages or 256 KB per send).
+- **Pick the outbox for anything that matters.** It needs Postgres (through Hyperdrive on Workers), which you already have for mutations.
+
+## The consumer
+
+`toQueueHandler(registry)` runs each message's job with `registry.jobs.run(body, { attempt: message.attempts })`:
+
+- **`done`, `failed` and `discarded` are acknowledged.** `failed` means a rule said no, so retrying can't help.
+- **A throw is retried** with `message.retry()`, after the consumer's `retry_delay`.
+- **One message at a time, each acknowledged on its own,** so one failure doesn't redeliver the whole batch.
+- **Type the Worker with `ExportedHandler<Env, Job>`,** so `batch` carries jobs. A producer and a consumer can be the same Worker, as above, or two.
+
+## Set up the dead-letter queue
+
+After the handoff, retries belong to Cloudflare. **Without a `dead_letter_queue`, a message out of retries is deleted for good,** and only `onError` saw it fail. Messages in a dead-letter queue without a consumer are kept for four days, so give it one, or redrive from the dashboard.
+
+Things to know:
+
+- **A `failed` job is acknowledged and reported to `onError`, not kept.** With the outbox alone, failed rows stay in Postgres where you can query them; past the handoff, Cloudflare has nowhere to keep them.
+- **`registry.jobs.retry(id)` can't reach Cloudflare.** It returns `false` for a job already handed off.
+- **A job can run twice, even at once.** A send that lands but whose row isn't deleted is sent again. Listeners must be idempotent: dedupe on `ctx.event.id`.
+- **Set `retry_delay`.** We didn't find its default in Cloudflare's docs, and retries without a delay fire back to back.
