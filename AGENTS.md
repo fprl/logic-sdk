@@ -12,7 +12,7 @@ bun run --filter web dev   # docs site
 
 ## Layout
 
-- `packages/logic-sdk`: the core (`src/index.ts`) and subpath adapters (`ai`, `orpc`, `fetch`, `drizzle`, `testing`). `skills/logic-sdk/SKILL.md` ships in the tarball.
+- `packages/logic-sdk`: the core and subpath adapters (`ai`, `orpc`, `fetch`, `drizzle`, `cloudflare`, `node`, `testing`). Core: `index.ts` (`init`, `createRegistry`: calls, transactions, ctx), `types.ts` (the public types, plus the brand and internal symbols), `jobs.ts` (running jobs, crons, `registry.jobs`), `errors.ts`, `schedule.ts` (cron matching). `skills/logic-sdk/SKILL.md` ships in the tarball.
 - `packages/cli`: `logic-sdk list | show | graph | check`. Static analysis with oxc (`src/analyze.ts`), runtime facts from loading the registry (`src/project.ts`).
 - `examples/shop` (one app on Node, Workers and Next.js) and `examples/bookings` (six modules): both tested against real Postgres (PGlite in tests).
 - `apps/web`: the docs site.
