@@ -48,13 +48,14 @@ outbox(db, { via: cloudflareQueue(env.JOBS) })  durable, any queue
 
 cloudflareQueue(env.JOBS)  alone: sent after commit, lost if the Worker dies in between
 
-pgBoss(boss)  planned: durable, pg-boss enqueues inside your transaction
-  mutation ─ pg-boss insert ─ commit ─► pg-boss worker ─► registry.jobs.run(job)
+pgBoss(boss)  durable, Postgres: pg-boss inserts inside your transaction
+  mutation ─ pg-boss insert ─ commit ─► work(registry, boss) ─► registry.jobs.run(job)
+                                     └► a throw: pg-boss retries it with backoff; failed for good: kept as failed
 ```
 
 - **Why the outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between, which is the Rails and Laravel `after_commit` default. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
 - **pg-boss needs no outbox:** it lives in your database, so its insert commits or rolls back with your writes, like Oban.
-- **One page per adapter:** [outbox](/docs/adapters/drizzle#outbox), [Cloudflare](/docs/adapters/cloudflare).
+- **One page per adapter:** [outbox](/docs/adapters/drizzle#outbox), [pg-boss](/docs/adapters/pg-boss), [Cloudflare](/docs/adapters/cloudflare).
 - **The adapter's own options go in its factory:** `outbox(db, { lease, maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
 
 ## Running, sweeping, retrying
@@ -66,7 +67,7 @@ await registry.jobs.retry(id);                                        // put a f
 ```
 
 - **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means it's over: the listener is out of `attempts`, or retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when the listener has tries left and a retry might help. Every failure goes to `onError` with the job id, the attempt, and `outcome`: `"retry"`, `"failed"` or `"discarded"`, so you can alert on the last one only.
-- **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, so one cron handler works with any of them.
+- **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, and so does pg-boss, which maintains itself, so one cron handler works with any of them.
 - **`retry` only revives failed jobs** and returns whether it did. A pending one belongs to its runner, and resetting it could run it twice at once. It throws on `inProcess()`, which stores none.
 
 ## Attempts and delay
@@ -81,10 +82,10 @@ export const sendReceipt = listener({
 ```
 
 - **`attempts` defaults to 1,** like Rails (no `retry_on`), Laravel (`--tries=1`) and Solid Queue. A retry repeats side effects, so you opt in per listener, like Laravel's `$tries`. Oban defaults to 20 and pg-boss to 3.
-- **Out of attempts, the job is `failed`:** kept by the outbox, retried with `registry.jobs.retry(id)`.
+- **Out of attempts, the job is `failed`:** kept by the outbox and pg-boss, retried with `registry.jobs.retry(id)`.
 - **A last try that never finished** (the process crashed, or the listener outlived the outbox's lease) is `failed` without running again, as Laravel's worker does.
 - **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
-- **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then; Cloudflare gets it as `delaySeconds`.
+- **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
 - **`inProcess()` tries once and can't hold a job:** `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `outbox(db)`. Cloudflare alone holds up to 24 hours.
 
 ## Scheduled calls
@@ -109,12 +110,12 @@ export const confirm = mutation({
   ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: bookingId });
   ```
 
-  A call that already started isn't touched; the new one runs on its own. With `via`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`outbox(db)`, also with `via`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
+  A call that already started isn't touched; the new one runs on its own. With `via`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`outbox(db)`, also with `via`, or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
 - **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
-- **It needs an adapter that holds jobs:** `outbox(db)`. `ctx.schedule` throws on `inProcess()`.
+- **It needs an adapter that holds jobs:** `outbox(db)` or `pgBoss(boss)`. `ctx.schedule` throws on `inProcess()`.
 - **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 
 ## Ids
@@ -158,7 +159,7 @@ The registry applies `scope` in every adapter, `inProcess()` and tests included,
 For writing an adapter:
 
 - **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
-- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
+- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit (a no-op for a queue whose own workers pick jobs up, like pg-boss). Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
 - **Three job kinds:** a delivery `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, a cron run `{ kind: "cron", id, cron, scheduledAt, attempts }` and a scheduled call `{ kind: "call", id, fn, input, scope, attempts, depth, runAt? }`. All are JSON; an adapter stores and sends them without looking inside, except `attempts` and `runAt` if its backend needs them at send time.
 - **Every adapter but `inProcess()` needs `jobs.scope.load`:** the registry assumes yours keeps jobs, so `createRegistry` asks the app to rebuild the scope they run as.
 - **`replaces: true`** says `enqueue` replaces a waiting call with the same `fn` and `replace` key (one not started yet). Without it, `ctx.schedule` with `replace` is refused.
