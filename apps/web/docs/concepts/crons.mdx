@@ -17,6 +17,7 @@ export const morningDigest = cron({
 - **`run` is a normal function:** it keeps its `authorize`, validation and tracing, and you call it from anywhere else too. `input` is what it gets, typed by it and required when it needs one: `input: { kind: "weekly" }`.
 - **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from. Use a [system scope](/docs/concepts/scope#the-system), `asSystem("orders.morningDigest")`, not a fake user, and grant it in policies (`staffOrSystem`).
 - **`attempts`** works like a listener's: default 1.
+- **Its `scope` and `input` come from your code each time it runs,** never stored, so `jobs.scope.store` and `load` don't apply to the cron itself, and a deploy that changes them applies to runs already queued. What its function emits or schedules is stored as usual, so a [system scope](/docs/concepts/scope#the-system) must survive your `store` and `load`.
 
 ## Ticking
 
