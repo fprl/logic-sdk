@@ -98,10 +98,9 @@ export function makeJobs(deps: JobsDeps) {
     const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
-    if (deepEvent || deepCall) {
-      const error = new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
-      report(error, deepEvent ? { listener: "(dispatcher)", envelope: deepEvent } : infoOf(deepCall!));
-    }
+    const loop = () => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
+    if (deepEvent) report(loop(), { listener: "(dispatcher)", envelope: deepEvent });
+    else if (deepCall) report(loop(), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
         const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e, attempts: l.listener.attempts ?? 1 };
