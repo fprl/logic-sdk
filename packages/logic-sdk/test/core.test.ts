@@ -270,7 +270,7 @@ test("deliveries are JSON: what a queue carries comes back and runs", async () =
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
-  expect(d).toMatchObject({ kind: "delivery", id: `log.onAdded@${d.envelope.id}` });
+  expect(d).toMatchObject({ kind: "delivery", attempts: 1, id: `log.onAdded@${d.envelope.id}` });
   expect(await registry.jobs.run(d)).toEqual("done");
 });
 
@@ -549,7 +549,7 @@ test("in-process stores nothing: sweep resolves zeros (one cron works with any a
   await expect(registry.jobs.retry("log.onAdded@e1")).rejects.toThrow(/stores no jobs, so there's nothing to retry \(log\.onAdded@e1\)/);
 });
 
-test("registry.jobs.run: a throw retries while the listener has tries left; rules and stale payloads fail at once", async () => {
+test("registry.jobs.run: a throw retries while the job has tries left; rules and stale payloads fail at once", async () => {
   const happened = event({ payload: z.object({ kind: z.string() }) });
   let runs = 0;
   const react = listener({
@@ -565,7 +565,7 @@ test("registry.jobs.run: a throw retries while the listener has tries left; rule
   const once = listener({ event: () => happened, async handler() { throw new Error("once"); } });
   const reported: FailureInfo[] = [];
   const r = createRegistry<Scope>({ modules: { x: { happened, react, once } }, database: memoryDatabase(), onError: (_e, info) => reported.push(info) });
-  const job = (payload: object, listener = "x.react") => ({ kind: "delivery" as const, id: `${listener}@e`, listener, envelope: { id: "e", name: "x.happened", payload, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
+  const job = (payload: object, listener = "x.react", attempts = 3) => ({ kind: "delivery" as const, id: `${listener}@e`, listener, envelope: { id: "e", name: "x.happened", payload, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 }, attempts });
 
   expect(await r.jobs.run(job({ kind: "fine" }))).toEqual("done");
   await expect(r.jobs.run(job({ kind: "boom" }), { attempt: 2 })).rejects.toThrow("exploded"); // tries left: the queue redelivers
@@ -576,7 +576,8 @@ test("registry.jobs.run: a throw retries while the listener has tries left; rule
   runs = 0;
   expect(await r.jobs.run(job({ kind: "fine" }), { attempt: 4 })).toEqual("failed"); // its last try crashed: not run again
   expect(runs).toBe(0);
-  expect(await r.jobs.run(job({ kind: "x" }, "x.once"))).toEqual("failed"); // default: one try
+  expect(await r.jobs.run(job({ kind: "x" }, "x.once", 1))).toEqual("failed"); // one try
+  expect(await r.jobs.run(job({ kind: "boom" }, "x.react", 1))).toEqual("failed"); // the tries it was queued with, not today's code
 
   expect(await r.jobs.run(job({ kind: "gone" }))).toEqual("failed"); // a rule said no
   await expect(r.jobs.run(job({ kind: "taken" }))).rejects.toMatchObject({ kind: "conflict" }); // a lost race retries
@@ -619,7 +620,7 @@ test("adapter hooks: check sees the listeners and database at createRegistry; fa
   };
   const { registry } = setup({ jobs: { adapter }, onError: () => {} });
   expect(seen).toEqual(["log.onAdded", "db"]);
-  const job = { kind: "delivery" as const, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
+  const job = { kind: "delivery" as const, attempts: 1, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job)).toEqual("failed");
   expect(failed).toEqual(["log.onAdded@e: listener exploded"]);
 });
@@ -848,7 +849,7 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
   const make = (scope: object) => createRegistry<Scope>({ modules: { x: { happened, doIt, react } }, database: memoryDatabase(), onError: () => {}, jobs: { scope } });
   await expect(make({ store: () => ({ at: new Date() }), load: () => null }).as({ actor: "a", locale: "es" }).run(doIt)).rejects.toThrow(/scope emitting x\.happened isn't plain data at at: a Date/);
   const flaky = make({ load: async () => { throw new Error("db down"); } });
-  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  const job = { kind: "delivery" as const, attempts: 2, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   await expect(flaky.jobs.run(job)).rejects.toThrow("db down");
 });
 
@@ -864,7 +865,7 @@ test("jobs.scope.load failing counts as a try: at the default of one, the job fa
   const happened = event({ payload: z.object({}) });
   const react = listener({ event: () => happened, async handler() {} });
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: async () => { throw new Error("db down"); } } } });
-  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  const job = { kind: "delivery" as const, attempts: 1, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   expect(await r.jobs.run(job)).toEqual("failed");
 });
 
@@ -873,7 +874,7 @@ test("jobs.scope: store without load throws; load returning undefined retries in
   const happened = event({ payload: z.object({}) });
   const react = listener({ event: () => happened, attempts: 2, async handler() {} });
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: (() => undefined) as never } } });
-  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  const job = { kind: "delivery" as const, attempts: 2, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   await expect(r.jobs.run(job)).rejects.toThrow(/load returned undefined for x\.react@e\. Return the scope, or null to discard/);
 });
 
@@ -914,15 +915,15 @@ test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, wit
   const { registry, ran } = cronSetup({ jobs: { adapter: { async deliver(jobs) { sent.push(...jobs); } } }, onError: (_e, info) => reported.push(info) });
   await registry.jobs.tick(new Date("2026-11-23T09:00:00Z"));
   expect(sent).toEqual([
-    { kind: "cron", id: "reports.weekly@20261123T0900Z", cron: "reports.weekly", scheduledAt: "2026-11-23T09:00:00.000Z" },
-    { kind: "cron", id: "reports.broken@20261123T0900Z", cron: "reports.broken", scheduledAt: "2026-11-23T09:00:00.000Z" },
+    { kind: "cron", id: "reports.weekly@20261123T0900Z", cron: "reports.weekly", scheduledAt: "2026-11-23T09:00:00.000Z", attempts: 1 },
+    { kind: "cron", id: "reports.broken@20261123T0900Z", cron: "reports.broken", scheduledAt: "2026-11-23T09:00:00.000Z", attempts: 2 },
   ]);
   expect(ran).toEqual([]); // the adapter runs them, not tick
   const [, broken] = sent;
   await expect(registry.jobs.run(broken!, { attempt: 1 })).rejects.toThrow("smtp down"); // a try left
   expect(await registry.jobs.run(broken!, { attempt: 2 })).toBe("failed");
   expect(reported.at(-1)).toMatchObject({ listener: "reports.broken", delivery: "reports.broken@20261123T0900Z", outcome: "failed" });
-  expect(await registry.jobs.run({ kind: "cron", id: "reports.gone@x", cron: "reports.gone", scheduledAt: "" })).toBe("failed"); // renamed or removed
+  expect(await registry.jobs.run({ kind: "cron", id: "reports.gone@x", cron: "reports.gone", scheduledAt: "", attempts: 1 })).toBe("failed"); // renamed or removed
 });
 
 test("crons: a schedule, time zone, function or input it can't use fails at startup", () => {
@@ -980,7 +981,7 @@ test("ctx.schedule: a job committed with the mutation, as the caller's scope, fo
   const { app, book, sent } = scheduleSetup();
   const id = await app.run(book, { who: "guest" });
   expect(sent).toEqual([
-    { kind: "call", id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana", locale: "es" }, runAt: "2026-07-01T11:00:00.000Z" },
+    { kind: "call", attempts: 1, depth: 0, id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana", locale: "es" }, runAt: "2026-07-01T11:00:00.000Z" },
   ]);
   await expect(app.run(book, { who: "x", fail: true })).rejects.toMatchObject({ kind: "rejected" });
   expect(sent).toHaveLength(1); // rolled back: nothing scheduled
@@ -1006,7 +1007,7 @@ test("ctx.schedule: the job runs its function as the stored scope, loaded fresh;
   });
   const run = (job: Job) => registry.jobs.run(job);
   const id = await app.run(book, { who: "guest" });
-  const job = { kind: "call" as const, id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana" } };
+  const job = { kind: "call" as const, attempts: 1, depth: 0, id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana" } };
   expect(await run(job)).toBe("done");
   expect(reminded).toEqual(["guest as ana in en"]); // load rebuilt the locale
   expect(await run({ ...job, input: { who: "nobody" } })).toBe("failed"); // not_found: no retry
@@ -1039,6 +1040,102 @@ test("ctx.schedule: due now runs after commit like a listener; a negative delay 
   expect(ran).toEqual(["ping 1"]);
   await expect(app.run(go, { delay: -5, n: 1 })).rejects.toThrow(/needs an `at` date or a `delay` in seconds, 0 or more/);
   await expect(app.run(go, { delay: 0, n: "one" })).rejects.toThrow(/x\.ping input is invalid/);
+});
+
+test("ctx.schedule: attempts are stamped on the job; an action that fails retries while it has tries left", async () => {
+  let calls = 0;
+  const charge = action({ async handler() { calls++; throw new Error("timeout"); } });
+  const go = mutation({
+    input: z.object({ attempts: z.number().optional() }),
+    async handler(ctx, { attempts }) { ctx.schedule(charge, undefined, { delay: 60, attempts }); },
+  });
+  const sent: Job[] = [];
+  const registry = createRegistry<Scope>({
+    modules: { x: { charge, go } },
+    database: memoryDatabase(),
+    onError: () => {},
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+  });
+  const app = registry.as({ actor: "a", locale: "es" });
+  await app.run(go, { attempts: 3 });
+  await app.run(go, {});
+  const [three, one] = sent;
+  expect([three!.attempts, one!.attempts]).toEqual([3, 1]);
+  await expect(registry.jobs.run(three!, { attempt: 2 })).rejects.toThrow("timeout"); // a try left: the queue redelivers
+  expect(await registry.jobs.run(three!, { attempt: 3 })).toBe("failed");
+  expect(await registry.jobs.run(one!)).toBe("failed"); // the default: one try
+  expect(calls).toBe(3);
+  await expect(app.run(go, { attempts: 0 })).rejects.toThrow(/ctx\.schedule\(x\.charge\) attempts must be a whole number of tries, 1 or more \(got 0\)/);
+});
+
+test("ctx.schedule: a function that schedules itself with no delay stops at maxEventDepth, like a listener loop", async () => {
+  const errors: string[] = [];
+  let runs = 0;
+  const again: ReturnType<typeof mutation> = mutation({ async handler(ctx) { runs++; ctx.schedule(again, undefined, { delay: 0 }); } });
+  const r = createRegistry<Scope>({ modules: { x: { again } }, database: memoryDatabase(), maxEventDepth: 4, onError: (e) => errors.push((e as Error).message) });
+  await r.as({ actor: "a", locale: "es" }).run(again);
+  expect(runs).toBe(5); // the caller's run, then 4 hops
+  expect(errors).toEqual([expect.stringMatching(/chain of events and calls deeper than 4/)]);
+});
+
+test("ctx.schedule: events and calls share one chain, and a real delay starts a new one", async () => {
+  const pinged = event({ payload: z.object({}) });
+  const ping = mutation({ async handler(ctx) { ctx.emit(pinged, {}); } });
+  const errors: string[] = [];
+  let runs = 0;
+  const pong = listener({ event: () => pinged, async handler(ctx) { runs++; await ctx.run(serve); } });
+  const serve = mutation({ async handler(ctx) { ctx.schedule(ping, undefined, { delay: 0 }); } });
+  const r = createRegistry<Scope>({ modules: { x: { pinged, ping, pong, serve } }, database: memoryDatabase(), maxEventDepth: 6, onError: (e) => errors.push((e as Error).message) });
+  await r.as({ actor: "a", locale: "es" }).run(ping);
+  expect(runs).toBe(3); // event (1), call (2), event (3), call (4), event (5), call (6), event (7): stopped
+  expect(errors).toEqual([expect.stringMatching(/deeper than 6/)]);
+
+  // a commit past the limit drops what's too deep, not a call that waits: that one starts a new chain
+  const held: Job[] = [];
+  const deep = mutation({ async handler(ctx) { ctx.emit(pinged, {}); ctx.schedule(ping, undefined, { delay: 60 }); } });
+  const r2 = createRegistry<Scope>({
+    modules: { x: { pinged, ping, deep } },
+    database: memoryDatabase(),
+    maxEventDepth: 0,
+    onError: () => {},
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } } },
+  });
+  await r2.as({ actor: "a", locale: "es" }).run(deep);
+  expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
+
+  const sent: Job[] = [];
+  const later = mutation({ async handler(ctx) { ctx.schedule(ping, undefined, { delay: 60 }); } });
+  const waits = createRegistry<Scope>({
+    modules: { x: { pinged, ping, later } },
+    database: memoryDatabase(),
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+  });
+  await waits.as({ actor: "a", locale: "es" }).run(later);
+  expect(sent).toMatchObject([{ kind: "call", depth: 0 }]); // waiting a minute is a new chain, not a loop
+});
+
+test("a cron starts a chain: what its function emits is the first hop", async () => {
+  const pinged = event({ payload: z.object({}) });
+  const ping = mutation({ async handler(ctx) { ctx.emit(pinged, {}); } });
+  const pong = listener({ event: () => pinged, async handler() {} });
+  const nightly = cron({ schedule: "0 3 * * *", run: ping, scope: { actor: null, locale: "en" } });
+  const depths: number[] = [];
+  const r = createRegistry<Scope>({
+    modules: { x: { pinged, ping, pong, nightly } },
+    database: memoryDatabase(),
+    jobs: {
+      adapter: {
+        async deliver(jobs, runner) {
+          for (const job of jobs) {
+            if (job.kind === "delivery") depths.push(job.envelope.depth);
+            else await runner.run(job);
+          }
+        },
+      },
+    },
+  });
+  await r.jobs.tick(new Date("2026-11-23T03:00:00Z"));
+  expect(depths).toEqual([1]);
 });
 
 test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {

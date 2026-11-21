@@ -38,7 +38,7 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
 
     const jobs = Array.from({ length: 60 }, (_, n) => {
       const envelope = { id: `e${n}`, name: "x.happened", payload: { n }, scope: {}, occurredAt: new Date().toISOString(), depth: 1 };
-      return { id: `x.count@e${n}`, delivery: { kind: "delivery" as const, id: `x.count@e${n}`, listener: "x.count", envelope } };
+      return { id: `x.count@e${n}`, delivery: { kind: "delivery" as const, id: `x.count@e${n}`, listener: "x.count", envelope, attempts: 1 } };
     });
     await db.insert(outboxTable).values(jobs); // due now, unclaimed
 

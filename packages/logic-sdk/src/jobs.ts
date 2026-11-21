@@ -3,6 +3,7 @@ import { isDue, parseSchedule } from "./schedule.ts";
 import type {
   ActionCtx,
   Call,
+  CallJob,
   CronJob,
   DatabaseAdapter,
   Delivery,
@@ -47,8 +48,8 @@ export interface JobsDeps {
   now(): Date;
   wrap(call: Call, next: () => Promise<unknown>): Promise<unknown>;
   report(error: unknown, info: FailureInfo): void;
-  /** Run a function as `scope`, like `registry.as(scope).run`. */
-  runAs(fn: Fn, input: unknown, scope: object): Promise<unknown>;
+  /** Run a function as `scope`, like `registry.as(scope).run`, `eventDepth` hops into a chain (a scheduled call's). */
+  runAs(fn: Fn, input: unknown, scope: object, eventDepth?: number): Promise<unknown>;
   /** The ctx a listener's handler gets, as `scope`, in an event chain `eventDepth` deep. */
   listenerCtx(scope: object, eventDepth: number, id: string): ActionCtx<any>;
 }
@@ -89,21 +90,26 @@ export function makeJobs(deps: JobsDeps) {
   }
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
-  /** One delivery per listener of each event, unless the chain is too deep (a listener loop). */
-  function toDeliveries(envelopes: Envelope[]): Delivery[] {
-    const tooDeep = envelopes.find((e) => e.depth > maxEventDepth);
-    if (tooDeep) {
-      report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), { listener: "(dispatcher)", envelope: tooDeep });
-      return [];
-    }
-    return envelopes.flatMap((e) =>
+  /**
+   * What a commit queues: one delivery per listener of each event, and the calls it scheduled. Events and calls due now
+   * past `maxEventDepth` (a listener loop, a function scheduling itself with no delay) are dropped, reported once.
+   */
+  function toJobs(envelopes: Envelope[], calls: CallJob[]): Job[] {
+    const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
+    const deepEvent = envelopes.find((e) => !fits(e));
+    const deepCall = calls.find((c) => !fits(c));
+    const loop = () => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
+    if (deepEvent) report(loop(), { listener: "(dispatcher)", envelope: deepEvent });
+    else if (deepCall) report(loop(), infoOf(deepCall));
+    const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
-        const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e };
+        const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e, attempts: l.listener.attempts ?? 1 };
         const delay = l.listener.delay;
         if (delay) job.runAt = new Date(Date.parse(e.occurredAt) + delay * 1000).toISOString();
         return job;
       }),
     );
+    return [...deliveries, ...calls.filter(fits)];
   }
 
   /** What `onError` hears about a job. */
@@ -133,8 +139,9 @@ export function makeJobs(deps: JobsDeps) {
       await fail?.(error);
       return "failed" as const;
     };
-    /** One try, with the tries read from the code (like Rails' retry_on: a deploy that changes them applies to queued jobs). */
-    const attemptOnce = async (attempts: number, work: () => Promise<DeliveryOutcome>): Promise<DeliveryOutcome> => {
+    /** One try of the job's `attempts`. */
+    const attemptOnce = async (work: () => Promise<DeliveryOutcome>): Promise<DeliveryOutcome> => {
+      const { attempts } = job;
       // its last try was claimed but never finished: a crash, or slower than the lease (Laravel checks this too)
       if (attempt > attempts)
         return failed(
@@ -155,7 +162,7 @@ export function makeJobs(deps: JobsDeps) {
     if (job.kind === "cron") {
       const c = cronById.get(job.cron);
       if (!c) return failed(new Error(`[logic-sdk] ${job.cron} isn't a registered cron (renamed or removed?), so job ${job.id} can't run.`));
-      return attemptOnce(c.cron.attempts ?? 1, async () => {
+      return attemptOnce(async () => {
         await runAs(c.cron.run, c.cron.input, c.cron.scope);
         return "done";
       });
@@ -163,10 +170,10 @@ export function makeJobs(deps: JobsDeps) {
     if (job.kind === "call") {
       const f = fnById.get(job.fn);
       if (!f) return failed(new Error(`[logic-sdk] ${job.fn} isn't a registered function (renamed or removed?), so job ${job.id} can't run.`));
-      return attemptOnce(1, async () => {
+      return attemptOnce(async () => {
         const scope = await scopeOf(job, job.scope, attempt);
         if (!scope) return "discarded";
-        await runAs(f.fn, job.input, scope);
+        await runAs(f.fn, job.input, scope, job.depth);
         return "done";
       });
     }
@@ -175,7 +182,7 @@ export function makeJobs(deps: JobsDeps) {
     if (!l) return failed(new Error(`[logic-sdk] ${job.listener} isn't a registered listener (renamed or removed?), so job ${job.id} can't run.`));
     const { envelope } = job;
     const event = eventByName.get(envelope.name);
-    return attemptOnce(l.listener.attempts ?? 1, async () => {
+    return attemptOnce(async () => {
       const scope = await scopeOf(job, envelope.scope, attempt);
       if (!scope) return "discarded";
       await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
@@ -204,7 +211,7 @@ export function makeJobs(deps: JobsDeps) {
     const stamp = minute.toISOString().slice(0, 16).replaceAll(/[-:]/g, "") + "Z"; // 20261123T0900Z: no `:`, which BullMQ rejects
     return scheduled
       .filter((c) => isDue(c.schedule, minute, c.cron.timezone))
-      .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString() }));
+      .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1 }));
   }
 
   const jobs: Jobs = {
@@ -226,5 +233,5 @@ export function makeJobs(deps: JobsDeps) {
     },
   };
 
-  return { toDeliveries, runner, jobs, due, checkHold };
+  return { toJobs, runner, jobs, due, checkHold };
 }

@@ -245,11 +245,11 @@ test("outbox(db) must share the registry's database: it writes in the mutation's
 test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
   const { registry } = setup();
   const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
-  await db.insert(outboxTable).values({ id: "x.react@e", delivery: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope } });
+  await db.insert(outboxTable).values({ id: "x.react@e", delivery: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
   expect(await rows()).toMatchObject([{ status: "failed", lastError: expect.stringMatching(/x\.removed isn't a registered listener/) }]);
   // the code is back (here: the row points at a listener that exists)
-  await db.update(outboxTable).set({ delivery: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope } });
+  await db.update(outboxTable).set({ delivery: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 1 } });
   expect(await registry.jobs.retry("x.react@e")).toBe(true);
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["gone#1"]);
@@ -307,7 +307,7 @@ test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs 
   const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(book);
   const [row] = await rows();
-  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind" } });
+  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
   expect(row!.availableAt.getTime() - Date.now()).toBeGreaterThan(3500_000);
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   await makeDue();

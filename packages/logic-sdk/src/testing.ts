@@ -248,7 +248,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           for (let round = 1; ; round++) {
             const ready = [...takeDue(state.queued, end.getTime()), ...takeDue(state.scheduled, end.getTime())];
             if (!ready.length) return;
-            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one schedule itself with no delay?");
+            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one reschedule itself, inside `until`, more often than you meant?");
             ready.sort((a, b) => (a.runAt ?? "").localeCompare(b.runAt ?? ""));
             for (const job of ready) {
               // the job runs at the time it was due, so a self-rescheduling one moves forward and its checks see that time
@@ -265,7 +265,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const registered = state.registry.definitions.listeners.find((l) => l.listener === listener);
         if (!registered) throw new Error("[logic-sdk] t.jobs.perform got a listener that isn't registered: export it from its module.");
         const envelope = internal(state.registry).envelope(registered.event, payload, scope);
-        const job: Job = { kind: "delivery", id: `${registered.id}@${envelope.id}`, listener: registered.id, envelope };
+        const job: Job = { kind: "delivery", id: `${registered.id}@${envelope.id}`, listener: registered.id, envelope, attempts: registered.listener.attempts ?? 1 };
         return settle(state, () => state.registry.jobs.run(job, { attempt }));
       },
       async tick(at) {
