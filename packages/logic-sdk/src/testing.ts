@@ -248,7 +248,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           for (let round = 1; ; round++) {
             const ready = [...takeDue(state.queued, end.getTime()), ...takeDue(state.scheduled, end.getTime())];
             if (!ready.length) return;
-            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one schedule itself with no delay?");
+            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one reschedule itself, inside `until`, more often than you meant?");
             ready.sort((a, b) => (a.runAt ?? "").localeCompare(b.runAt ?? ""));
             for (const job of ready) {
               // the job runs at the time it was due, so a self-rescheduling one moves forward and its checks see that time

@@ -1090,15 +1090,43 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   expect(runs).toBe(3); // event (1), call (2), event (3), call (4), event (5), call (6), event (7): stopped
   expect(errors).toEqual([expect.stringMatching(/deeper than 6/)]);
 
+  // a commit past the limit drops what's too deep, not a call that waits: that one starts a new chain
+  const held: Job[] = [];
+  const deep = mutation({ async handler(ctx) { ctx.emit(pinged, {}); ctx.schedule(ping, undefined, { delay: 60 }); } });
+  const r2 = createRegistry<Scope>({
+    modules: { x: { pinged, ping, deep } },
+    database: memoryDatabase(),
+    maxEventDepth: 0,
+    onError: () => {},
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } } },
+  });
+  await r2.as({ actor: "a", locale: "es" }).run(deep);
+  expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
+
   const sent: Job[] = [];
   const later = mutation({ async handler(ctx) { ctx.schedule(ping, undefined, { delay: 60 }); } });
-  const held = createRegistry<Scope>({
+  const waits = createRegistry<Scope>({
     modules: { x: { pinged, ping, later } },
     database: memoryDatabase(),
     jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
   });
-  await held.as({ actor: "a", locale: "es" }).run(later);
+  await waits.as({ actor: "a", locale: "es" }).run(later);
   expect(sent).toMatchObject([{ kind: "call", depth: 0 }]); // waiting a minute is a new chain, not a loop
+});
+
+test("a cron starts a chain: what its function emits is the first hop", async () => {
+  const pinged = event({ payload: z.object({}) });
+  const ping = mutation({ async handler(ctx) { ctx.emit(pinged, {}); } });
+  const pong = listener({ event: () => pinged, async handler() {} });
+  const nightly = cron({ schedule: "0 3 * * *", run: ping, scope: { actor: null, locale: "en" } });
+  const depths: number[] = [];
+  const r = createRegistry<Scope>({
+    modules: { x: { pinged, ping, pong, nightly } },
+    database: memoryDatabase(),
+    jobs: { adapter: { async deliver(jobs, runner) { for (const job of jobs) job.kind === "delivery" ? depths.push(job.envelope.depth) : await runner.run(job); } } },
+  });
+  await r.jobs.tick(new Date("2026-11-23T03:00:00Z"));
+  expect(depths).toEqual([1]);
 });
 
 test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {

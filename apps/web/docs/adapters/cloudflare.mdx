@@ -70,7 +70,7 @@ export default {
 
 ## Set `max_retries` to at least your largest `attempts`
 
-The listener's `attempts` decide when a job has failed, and Cloudflare's `max_retries` (default 3, so 4 deliveries) caps how often it redelivers. Set `max_retries` at least as high as your largest `attempts`, so Cloudflare never gives up first. The extra delivery is also what lets a last try that crashed be recorded as `failed`.
+A job's `attempts` (a listener's, a cron's, or a `ctx.schedule` call's) decide when it has failed, and Cloudflare's `max_retries` (default 3, so 4 deliveries) caps how often it redelivers. Set `max_retries` at least as high as your largest `attempts`, so Cloudflare never gives up first. The extra delivery is also what lets a last try that crashed be recorded as `failed`.
 
 Things to know:
 

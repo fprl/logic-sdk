@@ -307,7 +307,7 @@ test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs 
   const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(book);
   const [row] = await rows();
-  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind" } });
+  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
   expect(row!.availableAt.getTime() - Date.now()).toBeGreaterThan(3500_000);
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   await makeDue();

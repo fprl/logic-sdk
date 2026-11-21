@@ -91,18 +91,18 @@ export function makeJobs(deps: JobsDeps) {
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
   /**
-   * What a commit queues: one delivery per listener of each event, and the calls it scheduled. Unless the chain is too
-   * deep (a listener loop, or a function scheduling itself with no delay): then nothing, reported.
+   * What a commit queues: one delivery per listener of each event, and the calls it scheduled. Events and calls due now
+   * past `maxEventDepth` (a listener loop, a function scheduling itself with no delay) are dropped, reported once.
    */
   function toJobs(envelopes: Envelope[], calls: CallJob[]): Job[] {
-    const tooDeep = envelopes.find((e) => e.depth > maxEventDepth);
-    const callTooDeep = calls.find((c) => c.depth > maxEventDepth);
-    if (tooDeep || callTooDeep) {
+    const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
+    const deepEvent = envelopes.find((e) => !fits(e));
+    const deepCall = calls.find((c) => !fits(c));
+    if (deepEvent || deepCall) {
       const error = new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
-      report(error, callTooDeep ? infoOf(callTooDeep) : { listener: "(dispatcher)", envelope: tooDeep });
-      return [];
+      report(error, deepEvent ? { listener: "(dispatcher)", envelope: deepEvent } : infoOf(deepCall!));
     }
-    const deliveries = envelopes.flatMap((e) =>
+    const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
         const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e, attempts: l.listener.attempts ?? 1 };
         const delay = l.listener.delay;
@@ -110,7 +110,7 @@ export function makeJobs(deps: JobsDeps) {
         return job;
       }),
     );
-    return [...deliveries, ...calls];
+    return [...deliveries, ...calls.filter(fits)];
   }
 
   /** What `onError` hears about a job. */
