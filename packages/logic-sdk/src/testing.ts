@@ -198,21 +198,8 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const state = current();
         const registered = state.registry.definitions.listeners.find((l) => l.listener === listener);
         if (!registered) throw new Error("[logic-sdk] t.jobs.perform got a listener that isn't registered: export it from its module.");
-        const store = registryOptions.jobs?.scope?.store;
-        const eventId = crypto.randomUUID();
-        const job: Job = {
-          kind: "delivery",
-          id: `${registered.id}@${eventId}`,
-          listener: registered.id,
-          envelope: {
-            id: eventId,
-            name: state.registry.idOf(registered.event),
-            payload,
-            scope: store ? store(scope) : scope,
-            occurredAt: (now ?? registryOptions.now ?? (() => new Date()))().toISOString(),
-            depth: 1,
-          },
-        };
+        const envelope = internal(state.registry).envelope(registered.event, payload, scope);
+        const job: Job = { kind: "delivery", id: `${registered.id}@${envelope.id}`, listener: registered.id, envelope };
         return settle(state, () => state.registry.jobs.run(job, { attempt }));
       },
     },

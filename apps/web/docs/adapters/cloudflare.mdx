@@ -63,7 +63,7 @@ export default {
 
 - **`done`, `failed` and `discarded` are acknowledged.**
 - **A throw is retried** while the listener has [`attempts`](/docs/concepts/jobs#attempts-and-delay) left, after a backoff (`e^attempt` seconds, the outbox's curve). It overrides `retry_delay`.
-- **A job that fails for good is kept:** with the outbox, it's written back as a `failed` row, so you can query it and `registry.jobs.retry(id)` it like any other. The exception is a job this code can't run (its listener was renamed or removed): it's retried, and Cloudflare's dead-letter queue gets it in the end.
+- **A job that fails for good is kept:** with the outbox, it's written back as a `failed` row, so you can query it and `registry.jobs.retry(id)` it like any other. That includes a job whose listener was renamed or removed: it fails at once, and `retry(id)` runs it once the code is back.
 - **If the Worker dies mid-batch,** the messages it didn't acknowledge come back. If Cloudflare counts that as a delivery (we haven't verified it), a listener with `attempts: 1` would fail them without running. On Cloudflare, give listeners `attempts: 2` or more, or set `max_batch_size: 1`.
 - **One message at a time, each acknowledged on its own,** so one failure doesn't redeliver the whole batch.
 - **Type the Worker with `ExportedHandler<Env, Job>`,** so `batch` carries jobs. A producer and a consumer can be the same Worker, as above, or two.
@@ -74,7 +74,7 @@ The listener's `attempts` decide when a job has failed, and Cloudflare's `max_re
 
 Things to know:
 
-- **A dead-letter queue is optional.** With `max_retries` set right, it only catches what logic-sdk couldn't run, like a listener that was renamed while its jobs were queued. Without one, Cloudflare deletes those for good, and only `onError` saw them. Messages in a dead-letter queue without a consumer are kept for four days.
+- **A dead-letter queue is optional.** With `max_retries` set right, it only catches what couldn't be recorded (the outbox was unreachable when the job failed). Without one, Cloudflare deletes those for good, and only `onError` saw them. Messages in a dead-letter queue without a consumer are kept for four days.
 - **`delay` goes out as `delaySeconds`,** up to Cloudflare's 24 hours. Through the outbox, the row holds longer delays itself; alone, `createRegistry` refuses a listener with a longer one.
 - **Alone, there's nowhere to keep failures:** a job that fails for good is acknowledged and only reported to `onError`.
 - **A job can run twice, even at once.** A send that lands but whose row isn't deleted is sent again. A listener that charges or emails should record `ctx.event.id` and skip it if it has seen it.

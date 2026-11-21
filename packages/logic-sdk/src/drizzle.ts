@@ -1,6 +1,6 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { UnknownJob, type DatabaseAdapter, type Delivery, type DeliveryOutcome, type Dispatcher, type Runner, type SweepResult } from "./index.ts";
+import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, Runner, SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -82,8 +82,8 @@ export interface OutboxOptions {
    */
   via?: Dispatcher;
   /**
-   * Failed sends to `via`, and runs of jobs this code can't load (an unknown listener), before the row is marked failed.
-   * Default 10: about 3.5 hours of backoff in all. A listener's own tries are its `attempts`.
+   * Failed sends to `via` before the row is marked failed. Default 10: about 3.5 hours of backoff in all. A listener's
+   * own tries are its `attempts`.
    */
   maxAttempts?: number;
   /** Seconds to wait after a failed try. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
@@ -124,33 +124,24 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   const mine = (ids: string[], attempt: number) => and(inArray(t.id, ids), eq(t.attempts, attempt), eq(t.status, "pending"));
   const via = options.via;
 
-  /** A try that threw: back off, or mark failed once out of tries. */
-  async function retryLater(ids: string[], attempt: number, limit: number, error: unknown): Promise<"failed" | "retrying"> {
-    const lastError = messageOf(error);
-    if (attempt >= limit) {
-      await db.update(t).set({ status: "failed", lastError }).where(mine(ids, attempt));
-      return "failed";
-    }
-    await db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError }).where(mine(ids, attempt));
-    return "retrying";
-  }
+  const markFailed = (ids: string[], attempt: number, error: unknown) =>
+    db.update(t).set({ status: "failed", lastError: messageOf(error) }).where(mine(ids, attempt));
+  const backOff = (ids: string[], attempt: number, error: unknown) =>
+    db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError: messageOf(error) }).where(mine(ids, attempt));
 
   /**
-   * Run one claimed job here and record how it went. A listener's `attempts` decide when it's `failed` (the core resolves
-   * it); `maxAttempts` only stops jobs this code can't run.
+   * Run one claimed job here and record how it went. The core decides: `failed` (its `fail` wrote the row), a throw
+   * (tries left: back off), or done and discarded (delete the row).
    */
   async function run(job: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
-      outcome = await runner.run(job, { attempt });
+      outcome = await runner.run(job, { attempt, fail: async (error) => void (await markFailed([job.id], attempt, error)) });
     } catch (e) {
-      return retryLater([job.id], attempt, e instanceof UnknownJob ? maxAttempts : Infinity, e);
+      await backOff([job.id], attempt, e);
+      return "retrying";
     }
-    if (outcome === "failed") {
-      await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine([job.id], attempt));
-      return "failed";
-    }
-    await db.delete(t).where(mine([job.id], attempt));
+    if (outcome !== "failed") await db.delete(t).where(mine([job.id], attempt));
     return outcome;
   }
 
@@ -161,7 +152,12 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       await queue.deliver(jobs, runner);
     } catch (e) {
       for (const job of jobs) runner.report(e, job, attempt); // the queue's failure, not the listener's: run never saw it
-      return retryLater(ids, attempt, maxAttempts, e);
+      if (attempt >= maxAttempts) {
+        await markFailed(ids, attempt, e);
+        return "failed";
+      }
+      await backOff(ids, attempt, e);
+      return "retrying";
     }
     await db.delete(t).where(mine(ids, attempt));
     return "done";
@@ -178,19 +174,28 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
             "For a queue in another database, use it as `via`.",
         );
     },
-    /** Inside the mutation's transaction: one row per job. Due now: claimed by this request for its first try. Delayed: left for a sweep. */
+    /**
+     * Inside the mutation's transaction: one unclaimed row per job. Due now: leased, so a sweep leaves it to this request.
+     * Delayed: available from `runAt`, for a sweep.
+     */
     async enqueue(tx: unknown, deliveries: Delivery[]) {
-      await (tx as PgClient).insert(t).values(
-        deliveries.map((d) =>
-          d.runAt
-            ? { id: d.id, delivery: d, attempts: 0, availableAt: new Date(d.runAt) }
-            : { id: d.id, delivery: d, attempts: 1, availableAt: inSeconds(lease) },
-        ),
-      );
+      await (tx as PgClient)
+        .insert(t)
+        .values(deliveries.map((d) => ({ id: d.id, delivery: d, attempts: 0, availableAt: d.runAt ? new Date(d.runAt) : inSeconds(lease) })));
     },
-    /** After commit, in this request: the first try of each job that's due now, or one handoff for all of them. */
+    /**
+     * After commit, in this request: claim the jobs that are due (one update), then run them or hand them over. A crash
+     * before the claim leaves them unclaimed, so the sweep's claim is their first try.
+     */
     async deliver(deliveries, runner) {
-      const due = deliveries.filter((d) => !d.runAt);
+      const ids = deliveries.filter((d) => !d.runAt).map((d) => d.id);
+      if (!ids.length) return;
+      const claimed = await db
+        .update(t)
+        .set({ attempts: 1, availableAt: inSeconds(lease) }) // the lease starts now: enqueue's now() was the transaction's start
+        .where(and(inArray(t.id, ids), eq(t.attempts, 0), eq(t.status, "pending")))
+        .returning({ delivery: t.delivery });
+      const due = claimed.map((row) => row.delivery);
       if (!due.length) return;
       if (via) await handOff(via, due, 1, runner);
       // one job's bookkeeping error (a lost connection) mustn't stop the others: the sweep sorts it out
@@ -213,7 +218,11 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .where(inArray(t.id, due))
           .returning({ delivery: t.delivery, attempts: t.attempts });
         if (!row) break;
-        result[await settle(row.delivery, row.attempts, runner)]++;
+        try {
+          result[await settle(row.delivery, row.attempts, runner)]++;
+        } catch (e) {
+          runner.report(e, row.delivery, row.attempts); // its bookkeeping failed (a lost connection): its lease brings it back
+        }
       }
       return result;
     },
