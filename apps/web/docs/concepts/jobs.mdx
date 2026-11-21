@@ -40,10 +40,13 @@ outbox(db)  durable, Postgres
   mutation ─ insert a row ─ commit ─► run it, delete the row
                                    └► failed or crashed: registry.jobs.sweep() runs it again
 
-outbox(db, { via: queue })  planned: Cloudflare Queues, Vercel Queues, Redis (BullMQ), Inngest
-  mutation ─ insert a row ─ commit ─► hand it to the queue ─► your consumer ─► registry.jobs.run(job)
-                                   └► crashed before the handoff: registry.jobs.sweep() sends it again
+outbox(db, { via: cloudflareQueue(env.JOBS) })  durable, any queue
+  mutation ─ insert a row ─ commit ─► send it, delete the row ─► your consumer ─► registry.jobs.run(job)
+                                   └► the send failed or crashed: registry.jobs.sweep() sends it again
   after the handoff, the queue owns retries, concurrency and its dead-letter queue
+  planned for via: Vercel Queues, Redis (BullMQ), Inngest
+
+cloudflareQueue(env.JOBS)  alone: sent after commit, lost if the Worker dies in between
 
 pgBoss(boss)  planned: durable, pg-boss enqueues inside your transaction
   mutation ─ pg-boss insert ─ commit ─► pg-boss worker ─► registry.jobs.run(job)
@@ -51,6 +54,7 @@ pgBoss(boss)  planned: durable, pg-boss enqueues inside your transaction
 
 - **Why the outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between, which is the Rails and Laravel `after_commit` default. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
 - **pg-boss needs no outbox:** it lives in your database, so its insert commits or rolls back with your writes, like Oban.
+- **One page per adapter:** [outbox](/docs/adapters/drizzle#outbox), [Cloudflare](/docs/adapters/cloudflare).
 - **The adapter's own options go in its factory:** `outbox(db, { lease, maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
 
 ## Running, sweeping, retrying

@@ -5,7 +5,7 @@ import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, test } from "bun:test";
 import { z } from "zod";
 import { drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
-import { init, type Dispatcher } from "../src/index.ts";
+import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
 
 // The real Postgres engine, in process. The DDL is what drizzle-kit generates from outboxTable.
 const pg = new PGlite();
@@ -146,4 +146,46 @@ test("a job whose scope can't be loaded is discarded: its row is deleted and the
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 1, retrying: 0 });
   expect(await rows()).toEqual([]);
   expect(ran).toEqual(["lamp#1"]);
+});
+
+/** A queue that records what it got, or fails while `down`. */
+const fakeVia = () => {
+  const got: string[] = [];
+  const via = { down: false, got, async deliver(jobs: Delivery[]) {
+    if (via.down) throw new Error("queue unavailable");
+    got.push(...jobs.map((j) => j.id));
+  } };
+  return via;
+};
+
+test("via: the row makes the handoff durable; once the queue has it, the row is gone and nothing runs here", async () => {
+  const via = fakeVia();
+  const { app } = setup(outbox(db, { via }));
+  await app.run(add, { name: "desk" });
+  expect(via.got).toHaveLength(1);
+  expect(ran).toEqual([]); // the consumer runs it, not this request
+  expect(await rows()).toEqual([]);
+});
+
+test("via: a failed handoff keeps the row, reaches onError, and the sweep sends it again; out of attempts it's failed", async () => {
+  const via = fakeVia();
+  const reported: FailureInfo[] = [];
+  const registry = createRegistry({
+    modules: { x: { added, add, react } },
+    database: drizzleAdapter(db),
+    onError: (_e, info) => reported.push(info),
+    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }) },
+  });
+  via.down = true;
+  await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
+  const [row] = await rows();
+  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "queue unavailable" });
+  expect(reported).toEqual([expect.objectContaining({ listener: "x.react", delivery: row!.id, attempt: 1 })]);
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 }); // second handoff fails too
+  via.down = false;
+  expect(await registry.jobs.retry(row!.id)).toBe(true);
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 }); // done: handed off
+  expect(via.got).toEqual([row!.id]);
+  expect(await rows()).toEqual([]);
 });

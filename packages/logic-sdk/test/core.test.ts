@@ -237,7 +237,7 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
   const { app } = setup({
     jobs: { adapter: {
       async enqueue(tx, deliveries) { seen.push(`enqueue ${deliveries.map((d) => `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
-      async deliver(deliveries, run) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
+      async deliver(deliveries, { run }) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
     } },
   });
   await app.run(items.add, { name: "q" });
@@ -482,7 +482,7 @@ test("registry.jobs.sweep runs the transport's sweep with jobs.run; in-process h
   const { registry } = setup();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   let got: { limit?: number } | undefined;
-  const { registry: swept } = setup({ jobs: { adapter: { deliver: async () => {}, sweep: async (run, options) => { got = options; expect(run).toBe(swept.jobs.run); return { done: 2, failed: 0, discarded: 0, retrying: 1 }; } } } });
+  const { registry: swept } = setup({ jobs: { adapter: { deliver: async () => {}, sweep: async (runner, options) => { got = options; expect(runner.run).toBe(swept.jobs.run); return { done: 2, failed: 0, discarded: 0, retrying: 1 }; } } } });
   expect(await swept.jobs.sweep({ limit: 5 })).toEqual({ done: 2, failed: 0, discarded: 0, retrying: 1 });
   expect(got).toEqual({ limit: 5 });
 });
@@ -707,7 +707,7 @@ test("ids: an explicit id is local to its module, and jobs store it", async () =
   const r = createRegistry<Scope>({
     modules: { notifications: { renamedEvent: happened, renamedFn: doIt, renamedListener: send } },
     database: memoryDatabase(),
-    jobs: { adapter: { async deliver(d, run) { jobs.push(...d); for (const j of d) await run(j); } } },
+    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...d); for (const j of d) await run(j); } } },
   });
   expect(r.idOf(doIt)).toBe("notifications.do");
   expect(r.definitions.listeners.map((l) => [l.id, l.name])).toEqual([["notifications.send", "renamedListener"]]);
@@ -738,7 +738,7 @@ test("jobs.scope: store picks what's saved, load rebuilds it at run time, null d
     database: memoryDatabase(),
     onError: (e) => reported.push((e as Error).message),
     jobs: {
-      adapter: { async deliver(d, run) { for (const j of d) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
+      adapter: { async deliver(d, { run }) { for (const j of d) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
       scope: {
         store: (s) => ({ actor: s.actor }), // the locale isn't saved
         load: async (saved) => (saved.actor === "gone" ? null : { actor: saved.actor, locale: "fresh" }),

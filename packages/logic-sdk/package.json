@@ -50,6 +50,10 @@
       "types": "./dist/drizzle.d.ts",
       "default": "./dist/drizzle.js"
     },
+    "./cloudflare": {
+      "types": "./dist/cloudflare.d.ts",
+      "default": "./dist/cloudflare.js"
+    },
     "./testing": {
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"

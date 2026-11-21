@@ -65,6 +65,7 @@ export default {
 - **A rule saying no is `failed` at once:** a domain error other than `conflict`, or a payload that no longer matches its schema. Retrying can't help.
 - **A crash is a lease running out.** A runner owns a row for `lease` seconds (default 300, longer than your slowest listener); after that, `registry.jobs.sweep()` takes it over. Completion writes are fenced, so a slow runner can't undo a newer one.
 - **Failed rows are yours to query** with Drizzle (`status = 'failed'`, `last_error`), and `registry.jobs.retry(id)` puts one back in line. It only touches failed rows (a pending one belongs to its runner) and returns `false` when there's none with that id.
+- **`via` hands jobs to a queue** instead of running them in the request: `outbox(db, { via: cloudflareQueue(env.JOBS) })`. The row makes the handoff durable, and the queue owns retries after it. See [Cloudflare](/docs/adapters/cloudflare).
 - **A discarded job** (`jobs.scope.load` returned `null`) is deleted, and `sweep` counts it as `discarded`. See [Jobs](/docs/concepts/jobs#who-a-job-runs-as).
 - **At least once.** A crash between a listener finishing and its row being deleted runs it again, so listeners must be idempotent: dedupe on `ctx.event.id`.
 
