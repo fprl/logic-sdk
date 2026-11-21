@@ -902,6 +902,7 @@ test("crons: tick runs what's due that minute, as the cron's scope, with its inp
   expect(ran).toEqual(["weekly as system"]);
   expect(await registry.jobs.tick(new Date("2026-11-23T09:01:00Z"))).toEqual([]);
   expect(await registry.jobs.tick(new Date("2026-11-27T17:00:00Z"))).toEqual(["reports.friday"]); // 18:00 in Madrid
+  await expect(registry.jobs.tick(new Date("garbage"))).rejects.toThrow(/tick needs a valid date/);
   expect(ran).toEqual(["weekly as system", "friday as system"]);
 });
 

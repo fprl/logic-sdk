@@ -25,22 +25,28 @@ Your crons live in code. Something calls `registry.jobs.tick()`, which runs ever
 **Node:**
 
 ```ts
-// on the minute, so no minute is skipped or ticked twice
+// each minute, on the minute: no minute skipped or ticked twice, and a failed tick doesn't stop the next
 const tickEveryMinute = () => {
+  const minute = Math.ceil((Date.now() + 1) / 60_000) * 60_000;
   setTimeout(async () => {
-    await registry.jobs.tick();
-    await registry.jobs.sweep(); // with the outbox
-    tickEveryMinute();
-  }, 60_000 - (Date.now() % 60_000));
+    try {
+      await registry.jobs.tick(new Date(minute));
+      await registry.jobs.sweep(); // with the outbox
+    } catch (error) {
+      console.error(error);
+    } finally {
+      tickEveryMinute();
+    }
+  }, minute - Date.now());
 };
 tickEveryMinute();
 ```
 
-**Cloudflare:** one trigger per cron (the same strings), or `"* * * * *"` for all of them:
+**Cloudflare:** `"* * * * *"` for all of them, or one trigger per cron. Cloudflare numbers weekdays 1 = Sunday (we use classic cron's 1 = Monday), so write weekdays as names, in your code and in the trigger:
 
 ```jsonc
 // wrangler.jsonc
-{ "triggers": { "crons": ["0 9 * * 1", "0 18 * * 5"] } }
+{ "triggers": { "crons": ["0 9 * * MON", "0 18 * * FRI"] } }
 ```
 
 ```ts
@@ -76,7 +82,9 @@ export async function POST(request: Request) {
 - **A trigger only says when to tick;** `tick` matches the time, not which trigger fired. So one trigger per cron and one every minute both work.
 - **Every minute never needs touching,** and it's Laravel's setup: one system cron entry, `* * * * * php artisan schedule:run`. It costs about 43,000 calls a month: nothing on Cloudflare's paid plan, cents on Vercel Pro.
 - **One trigger per cron calls less,** but keep the lists in step: a cron with no trigger never runs, and nothing can tell you, since logic-sdk doesn't read `wrangler.jsonc` or `vercel.json`.
-- **The platform's own limits apply:** Cloudflare's crons are UTC, so a cron with a `timezone` needs a trigger that covers it (every minute, or every hour for one on the hour). Vercel Hobby fires at most every 15 minutes.
+- **The platform's own limits apply:**
+  - Cloudflare's triggers are UTC, so a cron with a `timezone` needs a trigger that covers it: every minute, or every hour when its time falls on the hour in UTC too (Madrid yes, India's half-hour offset no).
+  - Vercel refuses names in its schedules, and a day-of-month together with a day-of-week, so copy those crons as numbers or use one every-minute schedule. Vercel Hobby fires at most every 15 minutes.
 - **pg-boss** (planned) needs no triggers: the adapter schedules each cron in pg-boss from your code.
 
 ## Once, on several servers

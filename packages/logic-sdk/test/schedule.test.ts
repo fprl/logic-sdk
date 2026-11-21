@@ -71,6 +71,7 @@ test("a schedule it can't read fails at once, saying what's wrong", () => {
   expect(() => parseSchedule("0 9 * * 1L")).toThrow(/invalid day of week: "1L"/);
   expect(() => parseSchedule("0 9 32 * *")).toThrow(/invalid day of month: "32"/);
   expect(() => parseSchedule("*/0 * * * *")).toThrow(/invalid minute/);
+  expect(() => parseSchedule("*/1e1 * * * *")).toThrow(/invalid minute/);
   expect(() => parseSchedule("5/15 * * * *")).toThrow(/invalid minute: "5\/15"/); // ambiguous across crons: write */15 or 5-59/15
   expect(() => parseSchedule("0 17-9 * * *")).toThrow(/invalid hour: "17-9"/);
 });

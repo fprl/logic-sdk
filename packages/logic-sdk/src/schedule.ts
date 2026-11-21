@@ -63,8 +63,9 @@ function parseField(part: string, field: Field, expression: string): Set<number>
   for (const item of part.split(",")) {
     const [range = "", stepText, extra] = item.split("/");
     if (extra !== undefined || range === "") throw fail();
+    if (stepText !== undefined && !/^\d+$/.test(stepText)) throw fail();
     const step = stepText === undefined ? 1 : Number(stepText);
-    if (!Number.isInteger(step) || step < 1) throw fail();
+    if (step < 1) throw fail();
     let from: number;
     let to: number;
     if (range === "*") [from, to] = [field.min, field.max];

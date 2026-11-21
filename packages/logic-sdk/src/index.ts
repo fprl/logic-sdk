@@ -1028,6 +1028,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 
   /** The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once. */
   function due(at: Date): CronJob[] {
+    if (Number.isNaN(at.getTime())) throw new Error(`[logic-sdk] tick needs a valid date (got ${String(at)}).`);
     const minute = new Date(Math.floor(at.getTime() / 60_000) * 60_000);
     const stamp = minute.toISOString().slice(0, 16).replaceAll(/[-:]/g, "") + "Z"; // 20261123T0900Z: no `:`, which BullMQ rejects
     return scheduled

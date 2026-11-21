@@ -95,8 +95,8 @@ export async function handleQueue(registry: { jobs: Pick<Jobs, "run"> }, batch: 
 
 /**
  * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (the outbox's retries,
- * delayed jobs, and sends a crash left behind). Use one trigger per cron (the same strings as in your code), or one
- * `"* * * * *"` for all of them.
+ * delayed jobs, and sends a crash left behind). Use `"* * * * *"`, or one trigger per cron: Cloudflare numbers weekdays
+ * 1 = Sunday, so write them as names (`MON`) in both places.
  *
  * ```ts
  * async scheduled(controller, env, ctx) {
