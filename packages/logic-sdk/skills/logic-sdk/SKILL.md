@@ -70,32 +70,38 @@ export const cancel = mutation({
 7. **Record rules are `can*` predicates.** Load through a scoped helper, then `if (!canX(ctx.scope.actor, record)) throw ctx.errors.deny();`. `can*` is sync, its result is always used, and the same predicate feeds UI flags in list queries: `can: { cancel: canCancel(actor, b) }`. A rule that must hold at commit goes in the write's `WHERE` or a `FOR UPDATE` re-select.
 8. **Errors:** `throw ctx.errors.reject("snake_reason", details?)` when a rule says no, `ctx.errors.conflict(...)` when someone got there first, `ctx.errors.notFound()`, `ctx.errors.deny()`. Codes are namespaced to your module for you. Never return error objects; never throw plain `Error` for expected cases. Catch only in actions; in a mutation, catch only to rethrow your own error.
 9. **Need the result? `run` it. Just a consequence? `emit`** and let the owning module react in its `listeners.ts`.
-10. **Listeners must be idempotent** (use `event.id` to dedupe when it matters). They run with the emitter's scope (or the one `jobs.scope.load` rebuilds, when the app sets it), so they run internal functions. To act as someone else on purpose, change the scope for that call: `ctx.run(fn, input, { scope: { actor: system } })`.
+10. **Listeners must be idempotent** (record `ctx.event.id` and skip it if seen, when a repeat would charge or email twice). They run with the emitter's scope (or the one `jobs.scope.load` rebuilds, when the app sets it), so they run internal functions. To act as someone else on purpose, change the scope for that call: `ctx.run(fn, input, { scope: { actor: system } })`.
 11. **Time** comes from `ctx.now()`, never `new Date()`, so tests can freeze it.
 12. **Use separate `export const`s**, not functions nested in an object. Name them by verb within the module (`bookings.confirm`, not `bookings.confirmBooking`). Names are unique per module. Renaming a listener, event or function that queued jobs may still reference? Keep its id: `listener({ id: "oldName", ... })`. Put one sentence of JSDoc above each (`/** Cancel a booking and free its dates */`): editors show it on hover, and `logic-sdk list` prints it.
 13. **`ctx` comes first, everywhere:** `handler(ctx, input)` in functions, `handler(ctx, payload)` in listeners, helpers `findBooking(ctx, id)`. A function that takes nothing leaves out `input`: `handler(ctx)`, called as `run(fn)`.
 14. **Settings come from `ctx.config`**, never from env inside a module. Declare its shape in `init<Config>()` (`config: { orders: { maxItems: number } }`), fill it from your env at the entry (`createRegistry({ config })`), and read it in any function: `ctx.config.orders.maxItems`. Plain data only. Clients built from secrets go in `services`. Outside modules (the entry, routes, scripts), read env however you like; `logic-sdk check` fails on env reads inside modules, including through files they import.
-15. **Listeners that must not be lost run through a durable jobs adapter,** set once in `registry.ts`: `createRegistry({ jobs: { adapter: outbox(db), scope: { store, load } } })`. `store` saves ids, `load` rebuilds the scope when the job runs (`null` discards it). Never pass a jobs adapter per module, and never enqueue background work by hand from a mutation: `emit` an event.
+15. **Listeners that must not be lost run through a durable jobs adapter,** set once in `registry.ts`: `createRegistry({ jobs: { adapter: outbox(db), scope: { store, load } } })`. `store` saves ids, `load` rebuilds the scope when the job runs (`null` discards it). Never pass a jobs adapter per module, and never enqueue background work by hand from a mutation: `emit` an event. A listener tries once; give it `attempts: 5` when retrying is safe, and `delay: 60` (seconds) to run it later.
 
 ## Tests
 
 ```ts
+const mailer = memoryMailer();
 const t = createTestRegistry(registry, {
-  services: { mailer: memoryMailer() },
+  services: { mailer },
   now: "2026-07-01T10:00:00Z",
   config: { orders: { maxItems: 1 } },          // any part of config; merged over the registry's
 });
+beforeEach(async () => {
+  mailer.sent.length = 0;                       // fresh memory services per test
+  await t.begin();                              // each test in a transaction that's rolled back
+});
+afterEach(() => t.rollback());
 
-test("cancel frees the dates", () => t.transaction(async (tx) => {
-  const agent = tx.as(scopeAs("agent"));
+test("cancel frees the dates", async () => {
+  const agent = t.as(scopeAs("agent"));
   // arrange with real functions, not inserts
   // act: await agent.run(bookings.cancel, { bookingId })
-  // assert on rows (tx.db), tx.events, and memory services
-}));
+  // assert on rows (t.db), t.events, and memory services
+});
 ```
 
-- Use the real database. Don't mock modules. If you must simulate a failure elsewhere: `tx.stub(availability.hold, async () => { throw … })`.
-- `createTestRegistry(registry, { listeners: false })` tests one module without the others reacting.
+- Use the real database. Don't mock modules. If you must simulate a failure elsewhere: `t.stub(availability.hold, async () => { throw … })`.
+- A failing listener makes `run` throw in tests. `createTestRegistry(registry, { jobs: "manual" })` keeps jobs in `t.jobs.queued` to test one module alone; `t.jobs.drain()` runs them, `t.jobs.perform(listener, payload, { scope })` runs one.
 - Test the deny path: another account's id is `not_found`, a caller who fails `authorize` or `can*` is `forbidden`.
 
 ## Done means

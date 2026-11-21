@@ -5,6 +5,7 @@ import { drizzle as pglite } from "drizzle-orm/pglite";
 import { drizzle as postgresJs } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createTestRegistry } from "logic-sdk/testing";
+import { afterEach, beforeEach } from "vitest";
 import { makeRegistry } from "../src/registry";
 import type { Db } from "../src/logic";
 import type { Role, Scope } from "../src/scope";
@@ -37,8 +38,22 @@ export const scopeAs = (role: Role | null, accountId = "acc_1", locale = "es"): 
   requestId: "req_test",
 });
 
-export function withServices(registry: Awaited<ReturnType<typeof setup>>["registry"], opts: { listeners?: boolean } = {}) {
+/**
+ * The test registry for a file: in-memory services, frozen time, and each test in a transaction that's rolled back.
+ * Call it once at the top of a test file, like Phoenix's `use MyApp.DataCase`.
+ */
+export async function testRegistry(options: { jobs?: "inline" | "manual" } = {}) {
+  const { registry } = await setup();
   const mailer = memoryMailer();
   const payments = memoryPayments();
-  return { mailer, payments, t: createTestRegistry(registry, { services: { mailer, payments }, now: "2026-06-01T09:00:00Z", ...opts }) };
+  const t = createTestRegistry(registry, { services: { mailer, payments }, now: "2026-06-01T09:00:00Z", ...options });
+
+  beforeEach(async () => {
+    mailer.sent.length = 0;
+    payments.charges.clear();
+    await t.begin();
+  });
+  afterEach(() => t.rollback());
+
+  return { t, mailer, payments };
 }

@@ -4,40 +4,79 @@ description: A real database, a rolled-back transaction per test, and no mocks.
 ---
 
 ```ts
+// test/setup.ts, or the top of a test file
 import { createTestRegistry } from "logic-sdk/testing";
 
-const t = createTestRegistry(registry, {
-  services: { mailer: memoryMailer() },
+export const mailer = memoryMailer();
+export const t = createTestRegistry(registry, {
+  services: { mailer },
   now: "2026-07-01T10:00:00Z",
 });
 
-test("confirm holds the dates and emails the guest", () =>
-  t.transaction(async (tx) => {
-    const agent = tx.as(scopeAs("agent"));
-
-    await agent.run(bookings.confirm, { bookingId });
-
-    expect(tx.events.map((e) => e.name)).toEqual(["bookings.confirmed"]);
-    expect(await tx.db.select().from(holds)).toHaveLength(1);
-  }));
+beforeEach(async () => {
+  mailer.sent.length = 0;
+  await t.begin();
+});
+afterEach(() => t.rollback());
 ```
 
-- **Real database, no mocks.** Each test is a transaction that's always rolled back. Every top-level mutation inside it becomes a savepoint, so a failing mutation rolls back only its own writes, as in production.
+```ts
+test("confirm holds the dates and emails the guest", async () => {
+  const agent = t.as(scopeAs("agent"));
+
+  await agent.run(bookings.confirm, { bookingId });
+
+  expect(t.events.map((e) => e.name)).toEqual(["bookings.confirmed"]);
+  expect(await t.db.select().from(holds)).toHaveLength(1);
+  expect(mailer.sent).toHaveLength(1);
+});
+```
+
+- **Real database, no mocks.** Each test is a transaction that's rolled back. Every top-level mutation inside it becomes a savepoint, so a failing mutation rolls back only its own writes, as in production.
+- **Set up once, with hooks:** in a setup file for every test (like Rails, which wraps every test by default) or at the top of each file (like Phoenix's `use MyApp.DataCase`). Without `begin`, `t` throws and says so, instead of writing to your database.
 - **Arrange with real functions**, not inserts, so test data goes through the same rules.
-- **Swap services** for in-memory ones, and freeze time with `now`.
-- **Change settings** with `config: { orders: { maxItems: 1 } }`. It merges section by section over the registry's [config](/docs/concepts/config), for this test registry only.
-- **`tx.events`** records every event, delivered or not.
-- **`tx.stub(fn, impl)`** replaces one function, for example to simulate another module failing:
+- **Swap services** for in-memory ones, and reset them in `beforeEach`. Freeze time with `now`.
+- **Change settings** with `config: { orders: { maxItems: 1 } }`. It merges section by section over the registry's [config](/docs/concepts/config). A test registry with other settings gets its own file.
+- **`t.events`** records every event, delivered or not.
+- **`t.stub(fn, impl)`** replaces one function for the current test, for example to simulate another module failing:
 
 ```ts
-tx.stub(availability.hold, async () => {
+t.stub(availability.hold, async () => {
   throw new Error("calendar service down");
 });
 ```
 
-- **`{ listeners: false }`** tests one module without the others reacting.
-- **`tx.registry`** is bound to the test transaction, so adapters can be tested in the same rollback: `toFetchHandler(tx.registry, ...)`.
-- Run top-level mutations one at a time inside a test: they share one connection.
+- **`t.registry`** is bound to the test's transaction, so adapters run in the same rollback: `toFetchHandler(t.registry, ...)`.
+- **One test at a time per `t`:** they share one connection. `test.concurrent` makes `begin` throw.
+
+## Jobs in tests
+
+Your app's adapter (an outbox, a queue) is never used in tests. Like Oban's `testing: :inline | :manual`, you pick one of two modes:
+
+```ts
+const t = createTestRegistry(registry, { jobs: "manual" }); // default: "inline"
+
+test("confirming queues the receipt without sending it", async () => {
+  await t.as(agent).run(bookings.confirm, { bookingId });
+
+  expect(t.jobs.queued.map((j) => j.listener)).toEqual(["notifications.sendReceipt"]);
+  expect(mailer.sent).toEqual([]);
+
+  await t.jobs.drain(); // run what's queued, and what that queues
+  expect(mailer.sent).toHaveLength(1);
+});
+
+test("the receipt email", async () => {
+  await t.jobs.perform(notifications.sendReceipt, { bookingId }, { scope: agent });
+
+  expect(mailer.sent).toHaveLength(1);
+});
+```
+
+- **Inline** runs listeners right after each mutation, inside the test. `attempts` and `delay` don't apply: one try, right away, like Laravel's sync queue.
+- **Manual** keeps jobs in `t.jobs.queued` until `drain()`, to test one module without the others reacting.
+- **`perform`** runs one listener by hand, as if its event had been emitted as `scope`: Oban's `perform_job`, Rails' `perform_now`.
+- **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw.
 
 ## Which database
 

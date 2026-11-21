@@ -65,13 +65,31 @@ await registry.jobs.sweep();                                          // a cron 
 await registry.jobs.retry(id);                                        // put a failed job back in line
 ```
 
-- **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when a retry might help (`conflict`, anything unexpected). Every failure goes to `onError` with the job id and attempt.
+- **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means it's over: the listener is out of `attempts`, or retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when the listener has tries left and a retry might help. Every failure goes to `onError` with the job id, the attempt, and `outcome`: `"retry"`, `"failed"` or `"discarded"`, so you can alert on the last one only.
 - **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, so one cron handler works with any of them.
 - **`retry` only revives failed jobs** and returns whether it did. A pending one belongs to its runner, and resetting it could run it twice at once. It throws on `inProcess()`, which stores none.
 
+## Attempts and delay
+
+```ts
+export const sendReceipt = listener({
+  event: () => orders.placed,
+  attempts: 5, // tries in total, the first included
+  delay: 60,   // seconds after commit before the first try
+  async handler(ctx, { orderId }) { ... },
+});
+```
+
+- **`attempts` defaults to 1,** like Rails (no `retry_on`), Laravel (`--tries=1`) and Solid Queue. A retry repeats side effects, so you opt in per listener, like Laravel's `$tries`. Oban defaults to 20 and pg-boss to 3.
+- **Out of attempts, the job is `failed`:** kept by the outbox, retried with `registry.jobs.retry(id)`.
+- **A last try that never finished** (the process crashed, or the listener outlived the outbox's lease) is `failed` without running again, as Laravel's worker does.
+- **Read from your code when the job runs,** like Rails' `retry_on`: a deploy that changes `attempts` applies to jobs already queued.
+- **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then; Cloudflare gets it as `delaySeconds`.
+- **`inProcess()` and inline tests ignore both:** one try, right away, like Laravel's sync queue.
+
 ## Ids
 
-A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: Rails raises `UnknownJobClassError` in the same spot, Oban "unknown worker". Give it an `id` before you rename:
+A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: Rails raises `UnknownJobClassError` in the same spot, Oban "unknown worker". Give it an `id` before you rename, and queued jobs keep finding it:
 
 ```ts
 // notifications/listeners.ts
@@ -83,7 +101,7 @@ export const sendAll = listener({
 ```
 
 - **Optional.** The default is the export name, as before.
-- **Local to the module:** `"send"` in `notifications` is `notifications.send`, so the module key still comes first.
+- **Local to the module:** in a `notifications` module, `id: "send"` is `notifications.send`. Write `"send"`, not `"notifications.send"`: the module key is added for you.
 - **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls will store function ids.
 - **Unique:** a clash throws at `createRegistry`.
 - **Where else it shows:** the [fetch adapter](/docs/adapters/fetch)'s routes and error codes (`notifications.send.forbidden`) use the id. oRPC routers and AI tools keep the export name, because their types come from your modules' export names.
@@ -105,7 +123,9 @@ The registry applies `scope` in every adapter, `inProcess()` and tests included,
 
 For writing an adapter:
 
-- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope }`, where `id` is `<listener id>@<event id>`, the key to dedupe on. A failing listener retries alone.
-- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, run)`** after commit. Optional **`sweep(run)`** and **`retry(id)`** for adapters that store jobs.
+- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, runAt? }`, where `id` is `<listener id>@<event id>`, the key to dedupe on. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
+- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
+- **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour (Cloudflare refuses a delay over 24 hours). **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
+- **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the listener is out of tries. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.
 - **Listeners get `ctx.event`** (`id`, `name`, `payload`, `occurredAt`, `attempt`), without the stored scope: `ctx.scope` is the one they run as.

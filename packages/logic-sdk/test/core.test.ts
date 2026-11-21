@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  createRegistry, init, isDomainError, type Call, type Delivery, type DomainError, type Envelope, type FailureInfo,
+  createRegistry, init, isDomainError, type Call, type Delivery, type Dispatcher, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
@@ -251,7 +251,7 @@ test("deliveries are JSON: what a queue carries comes back and runs", async () =
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
   expect(d).toMatchObject({ kind: "delivery", id: `log.onAdded@${d.envelope.id}` });
-  expect(await registry.jobs.run(d, { attempt: 2 })).toEqual("done");
+  expect(await registry.jobs.run(d)).toEqual("done");
 });
 
 test("abort signal: checked before the call starts, never between its steps", async () => {
@@ -338,35 +338,77 @@ test("another module's error passes through run unchanged, and an action can cat
 test("testing: rollback per test, stubs, recorded events, frozen time", async () => {
   const { registry, db } = setup();
   const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z", services: { log: [] } });
-  await t.transaction(async (tx) => {
-    const app = tx.as({ actor: "ana", locale: "es" });
-    await app.run(items.add, { name: "inside" });
-    expect(tx.events.map((e) => [e.name, e.occurredAt])).toEqual([["items.added", "2026-07-01T10:00:00.000Z"]]);
-    expect((tx.db as Store).rows.items).toEqual([{ name: "inside" }]);
-    tx.stub(items.add, async () => ({ name: "stubbed" }));
-    expect(await app.run(items.greet, { name: "x" })).toEqual({ name: "stubbed" });
-  });
+  const app = t.as({ actor: "ana", locale: "es" }); // bound once, works in every test
+  await t.begin();
+  await app.run(items.add, { name: "inside" });
+  expect(t.events.map((e) => [e.name, e.occurredAt])).toEqual([["items.added", "2026-07-01T10:00:00.000Z"]]);
+  expect((t.db as Store).rows.items).toEqual([{ name: "inside" }]);
+  t.stub(items.add, async () => ({ name: "stubbed" }));
+  expect(await app.run(items.greet, { name: "x" })).toEqual({ name: "stubbed" });
+  await t.rollback();
   expect(db.store.rows.items).toEqual(undefined);
 });
 
 test("testing: a failing mutation inside a test rolls back only itself", async () => {
   const { registry } = setup();
-  await createTestRegistry(registry).transaction(async (tx) => {
-    const app = tx.as({ actor: "ana", locale: "es" });
-    await app.run(items.add, { name: "keep" });
-    await expect(app.run(items.add, { name: "boom" })).rejects.toThrow();
-    expect((tx.db as Store).rows.items).toEqual([{ name: "keep" }]);
-  });
+  const t = createTestRegistry(registry);
+  await t.begin();
+  const app = t.as({ actor: "ana", locale: "es" });
+  await app.run(items.add, { name: "keep" });
+  await expect(app.run(items.add, { name: "boom" })).rejects.toThrow();
+  expect((t.db as Store).rows.items).toEqual([{ name: "keep" }]);
+  await t.rollback();
 });
 
-test("testing: listeners: false isolates a module", async () => {
+test("testing: manual jobs wait in queued until drained", async () => {
   const { registry } = setup();
   const services = { log: [] as string[] };
-  await createTestRegistry(registry, { listeners: false, services }).transaction(async (tx) => {
-    await tx.as({ actor: "a", locale: "es" }).run(items.add, { name: "iso" });
-    expect(services.log).toEqual([]);
-    expect(tx.events.length).toEqual(1);
-  });
+  const t = createTestRegistry(registry, { jobs: "manual", services });
+  await t.begin();
+  await t.as({ actor: "a", locale: "es" }).run(items.add, { name: "iso" });
+  expect(services.log).toEqual([]);
+  expect(t.events.length).toEqual(1);
+  expect(t.jobs.queued.map((j) => j.listener)).toEqual(["log.onAdded"]);
+  await t.jobs.drain();
+  expect(services.log).toEqual(["added iso (items.added, es)"]);
+  expect(t.jobs.queued).toEqual([]);
+  await t.rollback();
+});
+
+test("testing: a failing listener makes run throw, so a test can't pass over it", async () => {
+  const { registry, services } = setup();
+  const t = createTestRegistry(registry);
+  await t.begin();
+  const app = t.as({ actor: "a", locale: "es" });
+  await expect(app.run(items.add, { name: "listener-fails" })).rejects.toThrow("listener exploded");
+  expect((t.db as Store).rows.items).toEqual([{ name: "listener-fails" }]); // the mutation committed, as in production
+  await app.run(items.add, { name: "fine" }); // the failure was surfaced once, not carried over
+  expect(services.log).toEqual(["added fine (items.added, es)"]);
+  await t.rollback();
+});
+
+test("testing: perform runs one listener by hand, as a scope; drain and perform throw its failure", async () => {
+  const { registry, services } = setup();
+  const t = createTestRegistry(registry, { jobs: "manual" });
+  await t.begin();
+  expect(await t.jobs.perform(log.onAdded, { name: "p" }, { scope: { actor: "a", locale: "en" } })).toEqual("done");
+  expect(services.log).toEqual(["added p (items.added, en)"]);
+  await expect(t.jobs.perform(log.onAdded, { name: "listener-fails" }, { scope: { actor: "a", locale: "en" } })).rejects.toThrow("listener exploded");
+  await t.as({ actor: "a", locale: "es" }).run(items.add, { name: "listener-fails" });
+  await expect(t.jobs.drain()).rejects.toThrow("listener exploded");
+  await t.rollback();
+});
+
+test("testing: without begin it says how to set up the hooks; begin twice names concurrency", async () => {
+  const { registry } = setup();
+  const t = createTestRegistry(registry);
+  const app = t.as({ actor: "a", locale: "es" });
+  expect(() => app.run(items.list)).toThrow(/No test transaction. Add beforeEach\(\(\) => t.begin\(\)\)/);
+  expect(() => t.events).toThrow(/No test transaction/);
+  await t.begin();
+  await expect(t.begin()).rejects.toThrow(/before t.rollback\(\).*test.concurrent/);
+  await t.rollback();
+  await t.rollback(); // nothing open: a no-op, so a failed begin doesn't add a second error
 });
 
 test("long-lived process: concurrent requests never see each other's scope", async () => {
@@ -478,11 +520,11 @@ test("review #6: a caught nested invalid-input failure dooms the transaction too
   expect(db.store.rows.t).toEqual(undefined);
 });
 
-test("registry.jobs.sweep runs the transport's sweep with jobs.run; in-process has nothing to sweep", async () => {
+test("registry.jobs.sweep runs the transport's sweep; in-process has nothing to sweep", async () => {
   const { registry } = setup();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   let got: { limit?: number } | undefined;
-  const { registry: swept } = setup({ jobs: { adapter: { deliver: async () => {}, sweep: async (runner, options) => { got = options; expect(runner.run).toBe(swept.jobs.run); return { done: 2, failed: 0, discarded: 0, retrying: 1 }; } } } });
+  const { registry: swept } = setup({ jobs: { adapter: { deliver: async () => {}, sweep: async (_runner, options) => { got = options; return { done: 2, failed: 0, discarded: 0, retrying: 1 }; } } } });
   expect(await swept.jobs.sweep({ limit: 5 })).toEqual({ done: 2, failed: 0, discarded: 0, retrying: 1 });
   expect(got).toEqual({ limit: 5 });
 });
@@ -497,36 +539,76 @@ test("registry.jobs.retry: the transport's answer, or a throw when it stores no 
   expect(asked).toEqual(["known", "other"]);
 });
 
-test("registry.jobs.run: done, failed for good, or throws to retry", async () => {
-  const reported: FailureInfo[] = [];
-  const { d } = regSetup({ onError: (_e, info) => reported.push(info) });
-  const envelope = { id: "e1", name: "items.added", payload: { name: "fine" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 };
-  const delivery = (payload: object, listener = "log.onAdded") => ({ kind: "delivery" as const, id: `${listener}@e1`, listener, envelope: { ...envelope, payload } });
-  expect(await d.jobs.run(delivery({ name: "fine" }))).toEqual("done");
-  // an unexpected error: a retry might help, so it throws (the queue redelivers)
-  await expect(d.jobs.run(delivery({ name: "listener-fails" }), { attempt: 3 })).rejects.toThrow(/listener exploded/);
-  expect(reported.at(-1)).toMatchObject({ listener: "log.onAdded", delivery: "log.onAdded@e1", attempt: 3 });
-  // a payload that no longer matches its schema: retrying can't help
-  expect(await d.jobs.run(delivery({ nope: 1 }))).toEqual("failed");
-  // a renamed or removed listener throws, so the message ends in the dead-letter queue
-  await expect(d.jobs.run(delivery({ name: "fine" }, "log.gone"))).rejects.toThrow(/log\.gone isn't a registered listener/);
-});
-
-test("a listener's domain error is final (failed, reported); a conflict throws to retry", async () => {
+test("registry.jobs.run: a throw retries while the listener has tries left; rules and stale payloads fail at once", async () => {
   const happened = event({ payload: z.object({ kind: z.string() }) });
+  let runs = 0;
   const react = listener({
     event: () => happened,
+    attempts: 3,
     async handler(ctx, { kind }) {
+      runs++;
+      if (kind === "boom") throw new Error("exploded");
       if (kind === "gone") throw ctx.errors.notFound();
       if (kind === "taken") throw ctx.errors.conflict("taken");
     },
   });
-  const errors: string[] = [];
-  const r = createRegistry<Scope>({ modules: { x: { happened, react } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
-  const delivery = (kind: string) => ({ kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: { kind }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
-  expect(await r.jobs.run(delivery("gone"))).toEqual("failed");
-  await expect(r.jobs.run(delivery("taken"))).rejects.toMatchObject({ kind: "conflict" });
-  expect(errors).toHaveLength(2);
+  const once = listener({ event: () => happened, async handler() { throw new Error("once"); } });
+  const reported: FailureInfo[] = [];
+  const r = createRegistry<Scope>({ modules: { x: { happened, react, once } }, database: memoryDatabase(), onError: (_e, info) => reported.push(info) });
+  const job = (payload: object, listener = "x.react") => ({ kind: "delivery" as const, id: `${listener}@e`, listener, envelope: { id: "e", name: "x.happened", payload, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
+
+  expect(await r.jobs.run(job({ kind: "fine" }))).toEqual("done");
+  await expect(r.jobs.run(job({ kind: "boom" }), { attempt: 2 })).rejects.toThrow("exploded"); // tries left: the queue redelivers
+  expect(reported.at(-1)).toMatchObject({ listener: "x.react", delivery: "x.react@e", attempt: 2, outcome: "retry" });
+  expect(await r.jobs.run(job({ kind: "boom" }), { attempt: 3 })).toEqual("failed"); // the last try
+  expect(reported.at(-1)).toMatchObject({ attempt: 3, outcome: "failed" });
+
+  runs = 0;
+  expect(await r.jobs.run(job({ kind: "fine" }), { attempt: 4 })).toEqual("failed"); // its last try crashed: not run again
+  expect(runs).toBe(0);
+  expect(await r.jobs.run(job({ kind: "x" }, "x.once"))).toEqual("failed"); // default: one try
+
+  expect(await r.jobs.run(job({ kind: "gone" }))).toEqual("failed"); // a rule said no
+  await expect(r.jobs.run(job({ kind: "taken" }))).rejects.toMatchObject({ kind: "conflict" }); // a lost race retries
+  expect(await r.jobs.run(job({ nope: 1 }))).toEqual("failed"); // the payload no longer matches its schema
+  await expect(r.jobs.run(job({ kind: "fine" }, "x.gone"))).rejects.toThrow(/x\.gone isn't a registered listener/);
+});
+
+test("listener: attempts is a whole number of tries, delay is seconds", () => {
+  const happened = event({ payload: z.object({}) });
+  expect(() => listener({ event: () => happened, attempts: 0, async handler() {} })).toThrow(/attempts must be a whole number of tries, 1 or more \(got 0\)/);
+  expect(() => listener({ event: () => happened, attempts: 2.5, async handler() {} })).toThrow(/attempts/);
+  expect(() => listener({ event: () => happened, delay: -1, async handler() {} })).toThrow(/delay must be seconds, 0 or more \(got -1\)/);
+});
+
+test("delay: the job says when it may run; in-process runs it right away, like Laravel's sync queue", async () => {
+  const happened = event({ payload: z.object({}) });
+  const doIt = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
+  const ran: string[] = [];
+  const later = listener({ event: () => happened, delay: 90, async handler() { ran.push("later"); } });
+  const now = listener({ event: () => happened, async handler() { ran.push("now"); } });
+  const jobs: Delivery[] = [];
+  const make = (adapter?: Dispatcher) =>
+    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
+  await make({ async deliver(d) { jobs.push(...d); } }).as({ actor: "a", locale: "es" }).run(doIt);
+  expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
+  await make().as({ actor: "a", locale: "es" }).run(doIt);
+  expect(ran).toEqual(["later", "now"]);
+});
+
+test("adapter hooks: check sees the listeners and database at createRegistry; fail keeps what a consumer failed", async () => {
+  const seen: string[] = [];
+  const failed: string[] = [];
+  const adapter: Dispatcher = {
+    check: ({ listeners, database }) => void seen.push(...listeners.map((l) => l.id), database ? "db" : "no db"),
+    deliver: async () => {},
+    fail: async (job, error) => void failed.push(`${job.id}: ${(error as Error).message}`),
+  };
+  const { registry } = setup({ jobs: { adapter }, onError: () => {} });
+  expect(seen).toEqual(["log.onAdded", "db"]);
+  const job = { kind: "delivery" as const, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
+  expect(await registry.jobs.run(job)).toEqual("failed");
+  expect(failed).toEqual(["log.onAdded@e: listener exploded"]);
 });
 
 test("emit takes plain JSON only, so what works in-process works through a queue", async () => {
@@ -756,7 +838,7 @@ test("jobs.scope: store picks what's saved, load rebuilds it at run time, null d
 test("jobs.scope: what store returns must be plain JSON; a load that throws is retried", async () => {
   const happened = event({ payload: z.object({}) });
   const doIt = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
-  const react = listener({ event: () => happened, async handler() {} });
+  const react = listener({ event: () => happened, attempts: 2, async handler() {} });
   const make = (scope: object) => createRegistry<Scope>({ modules: { x: { happened, doIt, react } }, database: memoryDatabase(), onError: () => {}, jobs: { scope } });
   await expect(make({ store: () => ({ at: new Date() }), load: () => null }).as({ actor: "a", locale: "es" }).run(doIt)).rejects.toThrow(/scope emitting x\.happened isn't plain data at at: a Date/);
   const flaky = make({ load: async () => { throw new Error("db down"); } });
@@ -805,7 +887,7 @@ test("jobs.scope types: load gets what store saved, and returns the app's scope"
 test("jobs.scope: store without load throws; load returning undefined retries instead of discarding", async () => {
   expect(() => createRegistry({ modules: {}, jobs: { scope: { store: (s: object) => s } as never } })).toThrow("jobs.scope has store but no load");
   const happened = event({ payload: z.object({}) });
-  const react = listener({ event: () => happened, async handler() {} });
+  const react = listener({ event: () => happened, attempts: 2, async handler() {} });
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: (() => undefined) as never } } });
   const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   await expect(r.jobs.run(job)).rejects.toThrow(/load returned undefined for x\.react@e\. Return the scope, or null to discard/);

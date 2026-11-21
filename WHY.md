@@ -41,10 +41,10 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 - ✅ **Real database, and each test is a transaction that's always rolled back.** Tests are fast, isolated and need no cleanup.
 - ✅ **Every top-level mutation inside a test is a savepoint**, so a failing mutation rolls back only its own writes, as in production.
-- ✅ **`tx.events`** records every committed event. Assert on what happened instead of querying a job table.
-- ✅ **`{ listeners: false }`** tests one module in isolation. By default listeners run inline.
+- ✅ **`t.events`** records every committed event. Assert on what happened instead of querying a job table.
+- ✅ **`{ jobs: "manual" }`** tests one module in isolation, like Oban's manual mode: jobs wait in `t.jobs.queued` until `drain()`. By default listeners run inline, and a failing one fails the test.
 - ✅ **Services are injected.** Pass `memoryMailer()` or a scripted LLM per test instead of spying on modules.
-- ✅ **`tx.stub(fn, impl)`** replaces one function by identity, for example to simulate another module failing.
+- ✅ **`t.stub(fn, impl)`** replaces one function by identity, for example to simulate another module failing.
 - ✅ **Time is frozen** via `ctx.now()`.
 
 *Instead you'd:* write per-job fixtures to find and perform queued work, spy on modules, and isolate tests with random ids.
@@ -83,5 +83,5 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 - **Drizzle is the only adapter shipped so far.** You write your queries in your ORM; the lib never generates SQL. It only needs to open a transaction and nest one (a savepoint), which is two methods. Kysely, and Prisma since 7.5 (nested savepoints), are short adapters. Drivers without interactive transactions (D1, HTTP drivers) can't work.
 - **`run(fn, input)` to cross modules.** This is the same as Convex's `ctx.runMutation(internal.x.y, args)`, and it follows Convex's own advice: plain helper functions that take `ctx` inside a module, `run` only across modules.
-- **Listeners run in-process today**, like Laravel's sync listeners or Rails `after_commit` callbacks. If the process dies during a listener (a deploy, OOM, a serverless timeout), that work is lost and nothing retries it. A durable dispatcher (pg-boss or an outbox) is planned and needs no changes to mutations or listeners.
+- **Listeners run in-process by default**, like Laravel's sync listeners or Rails `after_commit` callbacks. If the process dies during a listener (a deploy, OOM, a serverless timeout), that work is lost. For work that matters, `outbox(db)` writes each job in your transaction and retries it (`attempts` on the listener), with no changes to mutations or listeners. pg-boss is planned.
 - **It's the business-logic layer only.** It owns your business rules, transactions, events and jobs. It doesn't do HTTP routing, sessions and login, schema and migrations, or UI: you bring Hono or SvelteKit, Better Auth, Drizzle. Same idea as the AI SDK, which doesn't render your chat UI.

@@ -90,34 +90,34 @@ test("config: arrays are frozen too; merging keeps odd keys and lets null replac
     config: { ...base, tags: ["a"] } as AppConfig,
   });
   const t = createTestRegistry(registry, { config: JSON.parse('{"__proto__": {"x": 1}, "app": null}') });
-  await t.transaction(async (tx) => {
-    const c = await tx.as(anon).run(q);
-    expect(Object.isFrozen(c.tags)).toBe(true);
-    expect(Object.keys(c)).toContain("__proto__"); // an own key, not the prototype
-    expect(c.app).toBeNull();
-    expect(c.orders.maxItems).toBe(3);
-  });
+  await t.begin();
+  const c = await t.as(anon).run(q);
+  expect(Object.isFrozen(c.tags)).toBe(true);
+  expect(Object.keys(c)).toContain("__proto__"); // an own key, not the prototype
+  expect(c.app).toBeNull();
+  expect(c.orders.maxItems).toBe(3);
+  await t.rollback();
 });
 
 test("config: not in event envelopes; a listener reads its registry's config", async () => {
   const t = createTestRegistry(make(), { config: { orders: { maxItems: 5 } } });
-  await t.transaction(async (tx) => {
-    await tx.as(anon).run(place, { items: 5 });
-    const envelope: Envelope = tx.events[0]!;
-    expect(Object.keys(envelope).sort()).toEqual(["depth", "id", "name", "occurredAt", "payload", "scope"]);
-    expect(JSON.stringify(envelope)).not.toContain("shop.test");
-    expect((seen.listener as AppConfig).orders.maxItems).toBe(5);
-  });
+  await t.begin();
+  await t.as(anon).run(place, { items: 5 });
+  const envelope: Envelope = t.events[0]!;
+  expect(Object.keys(envelope).sort()).toEqual(["depth", "id", "name", "occurredAt", "payload", "scope"]);
+  expect(JSON.stringify(envelope)).not.toContain("shop.test");
+  expect((seen.listener as AppConfig).orders.maxItems).toBe(5);
+  await t.rollback();
 });
 
 test("testing: overrides merge section by section, and only for that test registry", async () => {
   const registry = make();
   const t = createTestRegistry(registry, { config: { orders: { maxItems: 1 } } });
-  await t.transaction(async (tx) => {
-    expect(await tx.as(anon).run(limits)).toEqual({ maxItems: 1, currency: "EUR" }); // currency kept
-    const error = await tx.as(anon).run(place, { items: 2 }).catch((e) => e);
-    expect(error.code).toBe("orders.too_many_items");
-  });
+  await t.begin();
+  expect(await t.as(anon).run(limits)).toEqual({ maxItems: 1, currency: "EUR" }); // currency kept
+  const error = await t.as(anon).run(place, { items: 2 }).catch((e) => e);
+  expect(error.code).toBe("orders.too_many_items");
+  await t.rollback();
   expect(await registry.as(anon).run(limits)).toEqual({ maxItems: 3, currency: "EUR" }); // untouched
 });
 

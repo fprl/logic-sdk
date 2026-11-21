@@ -240,7 +240,7 @@ export const expireCarts = cron({
 
 | On the listener | Meaning |
 |---|---|
-| `retries` | how many times to retry after a failure |
+| `attempts` | tries in total, the first included (default 1) |
 | `delay` | run it N seconds after the event |
 | `key` | same key runs one at a time, in order (per conversation, per account) |
 | `dedupe` | never run twice for the same event; defaults to event id plus listener id |
@@ -248,12 +248,12 @@ export const expireCarts = cron({
 
 Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retention.
 
-**Both live on the listener; the difference is fields vs `meta`.** Correctness options are portable fields (`key`, `retries`), honoured by every adapter or refused at startup. What only one adapter has and only tunes it goes in that adapter's meta namespace, typed by the adapter like `meta.ai`:
+**Both live on the listener; the difference is fields vs `meta`.** Correctness options are portable fields (`key`, `attempts`), honoured by every adapter or refused at startup. What only one adapter has and only tunes it goes in that adapter's meta namespace, typed by the adapter like `meta.ai`:
 
 ```ts
 export const report = listener({
   event: () => eventEmitted,
-  retries: 0,                                    // correctness: every adapter
+  attempts: 3,                                   // correctness: every adapter
   meta: { pgBoss: { deleteAfterSeconds: 60 } },  // tuning: ignored by the others, and the result is still correct
   handler: ...,
 });
@@ -263,10 +263,9 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 
 **Not every transport supports every option.** pg-boss covers all of them, going by its docs and a real app's use (retry options per job, `singletonKey`, the `key_strict_fifo` policy, `startAfter`). Cloudflare Queues takes delay per message but retries, concurrency and the DLQ per consumer; we found no per-key ordering guarantee (unverified either way; a real app's notes say per-key FIFO needs a Durable Object or ordering in Postgres). Vercel Queues has retry callbacks, delay and idempotency keys; per-key ordering is unknown. So:
 
-- each transport declares **capabilities**
-- a correctness option it can't honour (`key`, `dedupe`) **throws at `createRegistry`** and fails `check`
-- a tuning option it can't honour is emulated where the library can (retries via ack and retry), otherwise warned once
-- **never ignored silently.** `inProcess()` emulates everything naively, so tests behave the same whatever production uses.
+- **the core enforces what it can** (`attempts`, in `jobs.run`), so adapters only map outcomes
+- an adapter refuses what it can't honour in **`check({ listeners, database })`**, at `createRegistry` (Cloudflare alone refuses a `delay` over 24 hours; the outbox in front holds it instead)
+- **`inProcess()` and inline tests ignore `attempts` and `delay`:** one try, right away, like Laravel's sync queue (`SyncQueue::later` ignores the delay, and sync jobs aren't retried). Not "emulates everything": that was this file's earlier claim, and it wasn't true.
 
 ### The delivery contract (step 1 of durable events)
 
@@ -284,7 +283,7 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 - **Completion writes are fenced** on `attempts`, so a listener that outlives its lease can't delete or reschedule a row a newer runner claimed.
 - **The sweep claims one row at a time** (`FOR UPDATE SKIP LOCKED` in the claim's subquery), so every claim gets a full lease.
 - **Done rows are deleted;** it's a queue, not a log. pg-boss (7 days) and Solid Queue (1 day) keep finished jobs for dashboards, which then need a pruner. Failed rows stay: `failed` means "a human might retry this".
-- **Backoff and attempts:** Graphile Worker's curve, `exp(min(attempt, 10))` seconds, with 10 attempts (about 3.5 hours of backoff in all) by default. Oban defaults to 20 attempts, Graphile to 25, pg-boss to 2 with no backoff.
+- **Backoff:** Graphile Worker's curve, `exp(min(attempt, 10))` seconds. A listener's `attempts` decide its tries (see "Attempts and delay"); `maxAttempts` (default 10) only bounds what isn't a listener's try: failed sends under `via`, and jobs the code can't run (an unknown listener), which would otherwise retry forever.
 - **The database clock,** `now()`, for leases and backoff: one clock across instances, and `ctx.now()` is frozen in tests.
 - **No listing API.** The table is yours (you re-export it into your schema), so you query it with Drizzle.
 - **`registry.jobs.sweep()`, not `outbox.sweep(registry)`.** The transport contract has an optional `sweep(run, options)`; the registry passes its own `jobs.run` on each call, so nothing is bound or stored and a serverless factory returns one thing. Transports that store nothing (in-process, pg-boss) resolve zeros, so a cron handler doesn't care which one you use.
@@ -295,11 +294,33 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 
 - **Two modes, one factory.** `cloudflareQueue(env.JOBS)` alone sends after commit (lossy, the Rails/Laravel model); `outbox(db, { via })` makes the handoff durable. `via` reuses the outbox's claim, fence and backoff: the only new step is "send" in place of "run", and `done` then means handed off.
 - **Adapters get a `Runner` (`run`, `report`),** not a bare `run`. A failed handoff is the adapter's failure, not the listener's, so `run` never sees it; without `report` it would only land in `last_error`. Fable caught this in review.
-- **`toQueueHandler(registry)`, curried,** like `toFetchHandler(registry, options)` and `toORPCRouter(registry)`: registry first, a handler back. Per-request registries on Workers pay one extra pair of parens. Sequential, each message acknowledged on its own ([explicit acknowledgement](https://developers.cloudflare.com/queues/configuration/batching-retries/#explicit-acknowledgement-and-retries)), so one failure doesn't redeliver the batch.
+- **`handleQueue(registry, batch)`, not curried.** The first version was `toQueueHandler(registry)(batch)`, copied from `toFetchHandler`. That one returns a router you build once; a queue handler runs per batch with a per-request registry, so the curry only added parens. Sequential, each message acknowledged on its own ([explicit acknowledgement](https://developers.cloudflare.com/queues/configuration/batching-retries/#explicit-acknowledgement-and-retries)), so one failure doesn't redeliver the batch. A throw is retried with `delaySeconds` on the outbox's curve: Cloudflare's `retry_delay` default isn't documented, and back-to-back retries would spend `attempts: 3` in seconds.
 - **Structural types, no `@cloudflare/workers-types` dependency, no casts.** `body` is a `Job` because the Worker is typed `ExportedHandler<Env, Job>`; forgetting the generic is a type error, which is what we want.
-- **Sends split under the limits** (100 messages or 256 KB per `sendBatch`, measured in bytes, [limits](https://developers.cloudflare.com/queues/platform/limits/)). Only direct mode batches; `via` sends one row at a time so `settle` stays one path.
-- **What the docs warn about:** without a `dead_letter_queue`, exhausted messages are deleted for good ([DLQ](https://developers.cloudflare.com/queues/configuration/dead-letter-queues/)); `failed` jobs are acknowledged and only reported; `jobs.retry(id)` can't reach Cloudflare; a send that lands but whose row isn't deleted is sent again, so a job can run twice at once.
-- **Not now:** lanes (a record of bindings, non-breaking later), computed backoff (`retry_delay` covers it), per-message delay. **Portable options come next**, and here is what Cloudflare can do with them (Fable's table): `delay` honoured (`delaySeconds` up to 24 h; under `via`, hold the row with `available_at`), `retries` emulated (ack as failed past the listener's count, capped by `max_retries`, which the binding can't tell us), `timeout` emulated in core, `key` refused (ordering is best effort), `dedupe` refused or consumer-side.
+- **Sends split under the limits:** 100 messages and 256,000 bytes per `sendBatch`, 128,000 per message, with about 100 bytes of metadata per message counted ("1 KB is measured as 1000 bytes", [limits](https://developers.cloudflare.com/queues/platform/limits/)). The first version used 256 × 1024 and no per-message limit; a reviewer caught it. A job over the limit throws with its size, before anything is sent.
+- **Under `via`, one send per commit:** `deliver` hands all of a commit's jobs over in one call and deletes their rows in one statement. The sweep still hands off one row at a time, so one job Cloudflare rejects (too big) can't hold back the others (Fable's catch).
+- **Failures past the handoff come back.** `registry.jobs.run` in a consumer calls the adapter's `fail(job, error)` when a job fails for good, and the outbox upserts a `failed` row, so querying and `jobs.retry(id)` work on Cloudflare too. Completion writes only touch `pending` rows, so a handoff whose delete lands after the consumer failed the job can't erase it. That makes a dead-letter queue optional: with `max_retries` at least the largest `attempts`, Cloudflare never gives up first, and the extra delivery is what lets a crashed last try be recorded. Considered and dropped: `handleQueue(..., { deadLetterQueue })` reading the DLQ back into the outbox; with failures kept by the core, the DLQ only sees misconfiguration and unrunnable jobs.
+- **Still true:** alone (no outbox), a failed job is acknowledged and only reported; a send that lands but whose row isn't deleted is sent again, so a job can run twice at once.
+- **Not now:** lanes (a record of bindings, non-breaking later). `delay` is `delaySeconds` up to 24 hours (refused above that when alone; the outbox holds longer ones). `timeout` in core, `key` refused (ordering is best effort), `dedupe` consumer-side: when those options land.
+
+### Attempts and delay
+
+```ts
+listener({ event: () => orders.placed, attempts: 5, delay: 60, async handler(ctx, payload) { ... } });
+```
+
+- **Total tries, not retries,** like Laravel's `$tries` / `#[Tries]`, Oban's `max_attempts` and Rails' `retry_on attempts:` (which "includes the original job execution"). Sidekiq, pg-boss, Cloudflare and Inngest count retries; two conventions in one app is how off-by-ones happen.
+- **Default 1.** Checked on each project's default branch: Active Job doesn't retry without `retry_on` ("A failed job will not be retried, unless configured otherwise"), Solid Queue "doesn't include any automatic retry mechanism", Laravel's worker has `--tries=1`, BullMQ `attempts` defaults to 1. Oban defaults to 20, pg-boss to 3, Cloudflare to 4 deliveries, Inngest to 5. We follow Rails and Laravel: a retry repeats side effects, so it's opt-in per listener. What would change it: apps where most listeners are idempotent API calls that fail transiently.
+- **The core enforces it, in `jobs.run`:** a retryable failure on the last try resolves `failed`; a job claimed past its last try (`attempt > attempts`: it crashed, or outlived the lease) is `failed` without running. Laravel's worker does the second at pickup (`markJobAsFailedIfAlreadyExceedsMaxAttempts`), and Solid Queue fails a dead worker's jobs without retrying them. Living in the core, one rule covers the outbox (which counts a try when it claims) and Cloudflare (which counts deliveries). Lease expiry on a slow listener therefore fails a job that may still succeed: better than running it twice, and documented next to `lease`.
+- **Read from the code when the job runs, not stamped on it.** Rails' `retry_on` works this way; Laravel writes `maxTries` into the payload at dispatch, and Oban keeps `max_attempts` on the row. The handler is always looked up from current code, so stamping would split one definition across two deploys, and jobs queued before the stamp existed would need the lookup anyway (Fable). What would change it: an adapter whose backend needs the limit at send time (pg-boss `retryLimit`); it can read it from `registry.definitions` then.
+- **`delay` is stamped, as `runAt`** (`occurredAt + delay`, the registry's clock), because it's a fact about one job, not a rule about the code. The outbox writes delayed rows unclaimed (`attempts 0`, `available_at = runAt`) and a sweep runs them; Cloudflare gets `delaySeconds`.
+- **`onError` gets `outcome`** (`"retry"`, `"failed"`, `"discarded"`), so alerting can skip tries that will be retried.
+
+### Tests: hooks, and jobs inline or manual
+
+- **`beforeEach(() => t.begin())` and `afterEach(() => t.rollback())`, not a callback per test.** Checked: Rails wraps every test in a rolled-back transaction by default (`use_transactional_tests`, default true); Laravel opts in per test class with the `RefreshDatabase` trait; Phoenix generates a `DataCase` with the sandbox in `setup`, and each file `use`s it; convex-test starts a fresh backend per test. Hooks fit all of them. Drizzle transactions are callbacks, so `begin` parks one on a promise until `rollback`.
+- **No footguns:** without `begin`, `t` throws with the hooks to add, instead of writing to the real database; `begin` twice (concurrent tests sharing `t`) throws and names the cause.
+- **`jobs: "inline" | "manual"`,** Oban's `testing:` modes, replacing `listeners: boolean`. Manual keeps jobs in `t.jobs.queued`; `drain()` (Oban's `drain_queue`, Rails' `perform_enqueued_jobs`) and `perform(listener, payload, { scope })` (Oban's `perform_job`) run them. The app's adapter is never used in tests.
+- **A failing listener fails the test:** `t.as().run`, `drain` and `perform` throw its error, while production keeps "listeners never fail the caller". Fable's catch: swallowed failures let a broken listener pass. `waitUntil` is off in tests, so listeners finish inside the call.
 
 ### Naming the slot: `jobs`
 
