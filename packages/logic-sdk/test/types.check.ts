@@ -8,7 +8,7 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
 type Signed = Scope & { actor: string };
-const { query, mutation, action, event, listener, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
+const { query, mutation, action, event, listener, cron, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
 const anyone = () => true;
 const signed = (s: Scope): s is Signed => s.actor !== null;
 
@@ -247,3 +247,18 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
 // Drizzle's synchronous SQLite drivers commit before an async mutation finishes, and Drizzle's types reject them
 // @ts-expect-error "Sync drivers can't use async functions in transactions!"
 drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
+
+// cron: input is required exactly when the function needs one, typed by it; scope is the app's
+{
+  const system: Scope = { actor: "system", tenant: "all" };
+  const needs = mutation({ input: z.object({ n: z.number() }), handler: async () => 1 });
+  const none = query({ handler: async () => 1 });
+  cron({ schedule: "* * * * *", run: needs, input: { n: 1 }, scope: system });
+  cron({ schedule: "* * * * *", run: none, scope: system });
+  // @ts-expect-error the function needs input
+  cron({ schedule: "* * * * *", run: needs, scope: system });
+  // @ts-expect-error input typed by the function
+  cron({ schedule: "* * * * *", run: needs, input: { n: "1" }, scope: system });
+  // @ts-expect-error scope must be the app's
+  cron({ schedule: "* * * * *", run: none, scope: { nope: 1 } });
+}

@@ -112,6 +112,7 @@
     "@orpc/server": "2.0.0-beta.51",
     "@types/bun": "^1.4.4",
     "ai": "^7.0.177",
+    "croner": "11.0.1",
     "drizzle-orm": "1.0.0-rc.6",
     "postgres": "^4.1.1",
     "zod": "^4.6.7"

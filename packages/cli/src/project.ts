@@ -34,6 +34,17 @@ export interface ListenerInfo {
   at: Loc | null;
   runs: Edge[];
 }
+export interface CronInfo {
+  id: string;
+  module: string;
+  name: string;
+  schedule: string;
+  timezone: string;
+  /** The function it runs. */
+  runs: string;
+  description: string | null;
+  at: Loc | null;
+}
 export interface EventInfo {
   id: string;
   module: string;
@@ -49,6 +60,7 @@ export interface Project {
   modules: string[];
   functions: FnInfo[];
   listeners: ListenerInfo[];
+  crons: CronInfo[];
   events: EventInfo[];
   source: ReturnType<typeof analyze>;
 }
@@ -126,10 +138,11 @@ export async function loadProject(root: string): Promise<Project> {
   const modules: Record<string, object> = {};
   for (const [key, { index }] of Object.entries(source.modules)) modules[key] = await load(index);
   const described = core.describeModules(modules);
+  if (!Array.isArray(described.crons)) throw new CliError("core-too-old", "This app's logic-sdk doesn't know crons.", "Update logic-sdk.");
 
   // Source is keyed by `<module>.<export>`; ids can differ when a definition sets its own `id`.
   const idByExport = new Map<string, string>();
-  for (const d of [...described.functions, ...described.events, ...described.listeners]) idByExport.set(`${d.module}.${d.name}`, d.id);
+  for (const d of [...described.functions, ...described.events, ...described.listeners, ...described.crons]) idByExport.set(`${d.module}.${d.name}`, d.id);
   const real = <E extends { to: string }>(edges: E[]) => edges.map((e) => ({ ...e, to: idByExport.get(e.to) ?? e.to }));
   const src = (d: { module: string; name: string }) => source.fns.get(`${d.module}.${d.name}`);
   const functions: FnInfo[] = described.functions.map((f: any) => {
@@ -169,6 +182,18 @@ export async function loadProject(root: string): Promise<Project> {
   for (const caller of [...functions, ...listeners])
     for (const edge of caller.runs) byId.get(edge.to)?.calledBy.push(caller.id);
 
+  const crons: CronInfo[] = described.crons.map((c: any) => ({
+    id: c.id,
+    module: c.module,
+    name: c.name,
+    schedule: c.cron.schedule,
+    timezone: c.cron.timezone ?? "UTC",
+    runs: described.ids.get(c.cron.run) ?? "(unknown)",
+    description: src(c)?.doc ?? null,
+    at: src(c)?.at ?? null,
+  }));
+  for (const c of crons) byId.get(c.runs)?.calledBy.push(c.id);
+
   const events: EventInfo[] = described.events.map((e: any) => ({
     id: e.id,
     module: e.module,
@@ -183,6 +208,7 @@ export async function loadProject(root: string): Promise<Project> {
     modules: Object.keys(modules),
     functions,
     listeners,
+    crons,
     events,
     source,
   };

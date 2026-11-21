@@ -71,6 +71,7 @@ export default {
 - **`via` hands jobs to a queue** instead of running them in the request: `outbox(db, { via: cloudflareQueue(env.JOBS) })`. The row makes the handoff durable, and the jobs of one commit go in one send. A job that fails for good in the consumer comes back as a `failed` row. See [Cloudflare](/docs/adapters/cloudflare).
 - **Same database as `database`:** the outbox writes in your mutation's transaction, so `createRegistry` throws if it's given another one. A queue in another database (another Postgres, Redis) goes in `via`.
 - **A discarded job** (`jobs.scope.load` returned `null`) is deleted, and `sweep` counts it as `discarded`. See [Jobs](/docs/concepts/jobs#who-a-job-runs-as).
+- **[Crons](/docs/concepts/crons) run once per minute** across servers: re-export `cronRunsTable` next to `outboxTable` when you have crons.
 - **At least once.** A crash between a listener finishing and its row being deleted runs it again, so a listener that charges or emails should record `ctx.event.id` and skip it if it has seen it. That's yours, as in Rails, Laravel and Oban.
 
 ## Not D1, HTTP drivers, or synchronous SQLite

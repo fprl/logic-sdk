@@ -5,6 +5,8 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "vars": { "APP_URL": "http://localhost:8787", "MAX_ITEMS": "10" },
+  // Cloudflare's crons are UTC, and the digest is 8:00 Madrid time, so tick hourly and let the code decide
+  "triggers": { "crons": ["0 * * * *"] },
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",

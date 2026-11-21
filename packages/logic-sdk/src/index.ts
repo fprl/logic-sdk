@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { assertTimeZone, isDue, parseSchedule } from "./schedule.ts";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Types
@@ -118,8 +119,33 @@ export interface Delivery<P = unknown, S = object> {
   runAt?: string;
 }
 
-/** One unit of background work, what `registry.jobs` runs, sweeps and retries. Today every job is a delivery. */
-export type Job = Delivery;
+/** One run of a cron: `id` is `<cron id>@<minute>` (`reports.weekly@20261123T0900Z`), so a tick runs once. */
+export interface CronJob {
+  kind: "cron";
+  id: string;
+  /** The cron's id, `"<module>.<id or export>"`. */
+  cron: string;
+  /** The minute it was due (ISO). */
+  scheduledAt: string;
+  /** When it may run (ISO), like a delivery's. Absent for crons: they run when ticked. */
+  runAt?: string;
+}
+
+/** One unit of background work, what `registry.jobs` runs, sweeps and retries: a listener's share of an event, or a cron's run. */
+export type Job = Delivery | CronJob;
+
+/** A function to run on a schedule, as `scope`. Export it from a module, like listeners. */
+export interface Cron {
+  readonly [BRAND]: "cron";
+  readonly kind: "cron";
+  readonly id?: string;
+  readonly schedule: string;
+  readonly timezone?: string;
+  readonly run: Fn;
+  readonly input?: unknown;
+  readonly scope: object;
+  readonly attempts?: number;
+}
 
 /**
  * What delivering one resolved to. `failed`: a rule said no (`invalid`, `unauthenticated`, `forbidden`, `not_found`,
@@ -340,7 +366,7 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
 }
 
 /** Delivers one: resolves when the listener is done or failed for good (acknowledge it), throws when a retry might help. */
-export type RunDelivery = (delivery: Delivery, options?: RunJobOptions) => Promise<DeliveryOutcome>;
+export type RunJob = (job: Job, options?: RunJobOptions) => Promise<DeliveryOutcome>;
 
 export interface RunJobOptions {
   /** 1 on the first try; the transport counts. */
@@ -360,7 +386,7 @@ export interface SweepResult {
 /** What the registry hands an adapter: run a job here, or report a failure of the adapter's own (a send that failed). */
 export interface Runner {
   /** Every failure it meets is already reported to `onError`; a throw means "retry it". */
-  run: RunDelivery;
+  run: RunJob;
   report(error: unknown, job: Job, attempt?: number): void;
 }
 
@@ -368,9 +394,9 @@ export interface Dispatcher {
   /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
-  enqueue?(tx: unknown, deliveries: Delivery[]): Promise<void>;
+  enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
-  deliver(deliveries: Delivery[], runner: Runner): Promise<void>;
+  deliver(jobs: Job[], runner: Runner): Promise<void>;
   /** Run what's due (retries, deliveries whose runner crashed). Only dispatchers that store deliveries have it. */
   sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed job back in line. `false` when there's no failed job with that id. Only dispatchers that store them. */
@@ -384,8 +410,10 @@ export interface Dispatcher {
 
 /** What `onError` gets with a failure after commit. `delivery`, `attempt` and `outcome` are set when a listener's job failed. */
 export interface FailureInfo {
+  /** The listener or cron that failed (or the part of the registry, like `"(dispatcher)"`). */
   listener: string;
   envelope: Envelope | undefined;
+  /** The job's id. */
   delivery?: string;
   attempt?: number;
   /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
@@ -535,6 +563,19 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
     /**
+     * Run a function on a schedule, as `scope` (a cron has no caller). Export it from a module, like listeners, and call
+     * `registry.jobs.tick()` every minute (or from your platform's cron trigger):
+     * `cron({ schedule: "0 9 * * 1", run: reports.sendWeekly, scope: system })`.
+     */
+    cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron => {
+      const { id, schedule, timezone, run, scope, attempts } = def;
+      const input = "input" in def ? def.input : undefined;
+      parseSchedule(schedule);
+      if (timezone !== undefined) assertTimeZone(timezone);
+      checkAttempts("cron", attempts);
+      return Object.freeze({ [BRAND]: "cron" as const, kind: "cron" as const, id, schedule, timezone, run, input, scope, attempts });
+    },
+    /**
      * React to an event after commit, like an action. Must be idempotent.
      * `listener({ event: () => bookings.confirmed, async handler(ctx, payload) {…} })`
      */
@@ -557,14 +598,34 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
       const { id, event, attempts, delay, meta, handler } = def;
-      if (attempts !== undefined && !(Number.isInteger(attempts) && attempts >= 1))
-        throw new Error(`[logic-sdk] listener attempts must be a whole number of tries, 1 or more (got ${attempts}).`);
+      checkAttempts("listener", attempts);
       if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
         throw new Error(`[logic-sdk] listener delay must be seconds, 0 or more (got ${delay}).`);
       // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
       return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, meta: meta as Listener["meta"], handler });
     },
   };
+}
+
+/** `cron({...})`: `input` is required exactly when the function needs one. */
+type CronDef<S, F extends Fn> = {
+  /** Stable id, local to its module, like every definer's. Defaults to the export name. */
+  id?: string;
+  /** Five fields: minute hour day-of-month month day-of-week. `"*\/15 * * * *"`, `"0 9 * * 1"`. */
+  schedule: string;
+  /** IANA name, like `"Europe/Madrid"`. Default UTC. Matched on the wall clock, like Laravel: mind DST at 1 to 3 am. */
+  timezone?: string;
+  /** Any query, mutation or action: it runs with its policy, validation and tracing. */
+  run: F;
+  /** Who it runs as: a cron has no caller. */
+  scope: S;
+  /** Tries in total, like a listener's. Default 1. */
+  attempts?: number;
+} & (undefined extends FnIn<F> ? { input?: FnIn<F> } : { input: FnIn<F> });
+
+function checkAttempts(what: string, attempts: number | undefined) {
+  if (attempts !== undefined && !(Number.isInteger(attempts) && attempts >= 1))
+    throw new Error(`[logic-sdk] ${what} attempts must be a whole number of tries, 1 or more (got ${attempts}).`);
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -612,6 +673,9 @@ export interface RegisteredListener extends Registered {
   listener: Listener;
   event: EventDef;
 }
+export interface RegisteredCron extends Registered {
+  cron: Cron;
+}
 
 /** `registry.jobs`: what you call from a queue consumer, a cron, or a script. */
 export interface Jobs {
@@ -621,6 +685,12 @@ export interface Jobs {
    * listener has tries left. A `failed` job goes to your adapter's `fail` (the outbox keeps it).
    */
   run(job: Job, options?: { attempt?: number }): Promise<DeliveryOutcome>;
+  /**
+   * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
+   * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run
+   * goes through your jobs adapter, and with `outbox(db)` a minute that's ticked twice still runs each cron once.
+   */
+  tick(at?: Date): Promise<string[]>;
   /**
    * Run what your transport has due, from a cron or an interval: `await registry.jobs.sweep()`. With `outbox(db)`, that's
    * retries whose backoff is over and jobs whose runner crashed. Transports that store nothing resolve zeros.
@@ -644,6 +714,7 @@ export interface Registry<S extends object = object, Mods extends Record<string,
     readonly functions: readonly RegisteredFn[];
     readonly events: readonly RegisteredEvent[];
     readonly listeners: readonly RegisteredListener[];
+    readonly crons: readonly RegisteredCron[];
   };
   /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
   idOf(fnOrEvent: object): string;
@@ -656,6 +727,8 @@ export interface Registry<S extends object = object, Mods extends Record<string,
     derive(more: Overrides): Registry<S, Mods, Cf>;
     /** An event as `emit` would make it, for `t.jobs.perform`. */
     envelope(event: EventDef, payload: unknown, scope: S): Envelope;
+    /** The cron runs due in a minute, for `t.jobs.tick`. */
+    due(at: Date): CronJob[];
   };
 }
 
@@ -726,7 +799,7 @@ function assertPlain(value: unknown, what: string, hint: string): void {
   check(value, "");
 }
 
-const isBranded = (v: unknown): v is Fn | EventDef | Listener => !!v && typeof v === "object" && BRAND in v;
+const isBranded = (v: unknown): v is Fn | EventDef | Listener | Cron => !!v && typeof v === "object" && BRAND in v;
 
 /**
  * Publishing needs `authorize` and `output`. The types say so; this holds for JS callers and casts too, because an
@@ -746,6 +819,7 @@ export function describeModules(modules: Record<string, object>) {
   const functions: RegisteredFn[] = [];
   const events: RegisteredEvent[] = [];
   const listeners: RegisteredListener[] = [];
+  const crons: RegisteredCron[] = [];
 
   const taken = new Map<string, string>();
 
@@ -762,26 +836,28 @@ export function describeModules(modules: Record<string, object>) {
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
+      else if (value.kind === "cron") crons.push({ id, module, name, cron: value });
       else {
         checkExposure(id, value);
         functions.push({ id, module, name, kind: value.kind, fn: value, exposed: value.expose === true });
       }
     }
   }
-  return { ids, functions, events, listeners };
+  return { ids, functions, events, listeners, crons };
 }
 
 function build<S extends object, Mods extends Record<string, object>, Cf = unknown>(
   options: RegistryOptions<Mods>,
   o: Overrides,
 ): Registry<S, Mods, Cf> {
-  const { ids, functions, events, listeners } = describeModules(options.modules);
+  const { ids, functions, events, listeners, crons } = describeModules(options.modules);
 
   const database = o.database ?? options.database;
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
   const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
   const keepFailed = dispatcher.fail?.bind(dispatcher);
+  const enqueue = dispatcher.enqueue?.bind(dispatcher);
   const jobScope = options.jobs?.scope;
   if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Listeners run as a scope, so rebuild it from what store saved.");
   const now = o.now ?? options.now ?? (() => new Date());
@@ -860,39 +936,63 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     );
   }
 
+  /** What `onError` hears about a job. */
+  const infoOf = (job: Job, attempt?: number): FailureInfo =>
+    job.kind === "cron"
+      ? { listener: job.cron, envelope: undefined, delivery: job.id, attempt }
+      : { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt };
+
   /**
-   * Run one listener for one event. Reports every failure; throws only when a retry might help and the listener has
-   * tries left. `fail` keeps a job that failed for good.
+   * Run one job: a listener's share of an event, or a cron's run. Reports every failure; throws only when a retry might
+   * help and there are tries left. `fail` keeps a job that failed for good.
    */
-  async function deliver(delivery: Delivery, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
-    const { envelope } = delivery;
-    const info: FailureInfo = { listener: delivery.listener, envelope, delivery: delivery.id, attempt };
+  async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
+    const info = infoOf(job, attempt);
+    const kind: string = job.kind; // a job queued by another version can have a kind this one doesn't know
     const failed = async (error: unknown) => {
       report(error, { ...info, outcome: "failed" });
       await fail?.(error);
       return "failed" as const;
     };
+    /** One try, with the tries read from the code (like Rails' retry_on: a deploy that changes them applies to queued jobs). */
+    const attemptOnce = async (attempts: number, work: () => Promise<DeliveryOutcome>): Promise<DeliveryOutcome> => {
+      // its last try was claimed but never finished: a crash, or slower than the lease (Laravel checks this too)
+      if (attempt > attempts)
+        return failed(
+          new Error(`[logic-sdk] ${job.id} has used its ${attempts} attempt(s): the last one never finished (crashed or outlived the lease), or its result wasn't recorded.`),
+        );
+      try {
+        return await work();
+      } catch (error) {
+        const retrying = attempt < attempts && !(error instanceof StalePayload) && !(isDomainError(error) && error.kind !== "conflict");
+        if (!retrying) return failed(error);
+        report(error, { ...info, outcome: "retry" });
+        throw error;
+      }
+    };
+
     // code this version doesn't have (renamed or removed): failed at once and kept, like Rails' ClassMissingError.
     // `registry.jobs.retry(id)` runs it once the code is back.
-    if (delivery.kind !== "delivery")
-      return failed(new Error(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`));
-    const l = listenerById.get(delivery.listener);
-    if (!l) return failed(new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so job ${delivery.id} can't run.`));
-    // read from the code, like Rails' retry_on: a deploy that changes it applies to jobs already queued
-    const attempts = l.listener.attempts ?? 1;
-    // its last try was claimed but never finished: a crash, or a listener slower than the lease (Laravel checks this too)
-    if (attempt > attempts)
-      return failed(
-        new Error(`[logic-sdk] ${delivery.id} has used its ${attempts} attempt(s): the last one never finished (crashed or outlived the lease), or its result wasn't recorded.`),
-      );
+    if (job.kind === "cron") {
+      const c = cronById.get(job.cron);
+      if (!c) return failed(new Error(`[logic-sdk] ${job.cron} isn't a registered cron (renamed or removed?), so job ${job.id} can't run.`));
+      return attemptOnce(c.cron.attempts ?? 1, async () => {
+        await invoke(c.cron.run, c.cron.input, enter({ scope: c.cron.scope, depth: -1 }, undefined), ["query", "mutation", "action"]);
+        return "done";
+      });
+    }
+    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${info.delivery} has kind ${JSON.stringify(kind)}, which this version can't run.`));
+    const l = listenerById.get(job.listener);
+    if (!l) return failed(new Error(`[logic-sdk] ${job.listener} isn't a registered listener (renamed or removed?), so job ${job.id} can't run.`));
+    const { envelope } = job;
     const event = eventByName.get(envelope.name);
-    try {
+    return attemptOnce(l.listener.attempts ?? 1, async () => {
       let scope = envelope.scope;
       if (jobScope?.load) {
         const loaded = await jobScope.load(scope);
-        if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${delivery.id}. Return the scope, or null to discard the job.`);
+        if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${job.id}. Return the scope, or null to discard the job.`);
         if (loaded === null) {
-          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${delivery.id}, so it was discarded.`), { ...info, outcome: "discarded" });
+          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...info, outcome: "discarded" });
           return "discarded";
         }
         scope = loaded;
@@ -909,18 +1009,32 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         return l.listener.handler({ ...actionCtx(frame, l.id), event: ctxEvent } as never, payload); // SAFETY: as in invoke
       });
       return "done";
-    } catch (error) {
-      const retrying = attempt < attempts && !(error instanceof StalePayload) && !(isDomainError(error) && error.kind !== "conflict");
-      if (!retrying) return failed(error);
-      report(error, { ...info, outcome: "retry" });
-      throw error;
-    }
+    });
   }
 
   const runner: Runner = {
-    run: deliver,
-    report: (e, job, attempt) => report(e, { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt }),
+    run: runJob,
+    report: (e, job, attempt) => report(e, infoOf(job, attempt)),
   };
+
+  // ── crons ────────────────────────────────────────────────────────────────
+  const scheduled = crons.map((c) => ({ ...c, schedule: parseSchedule(c.cron.schedule) }));
+  const cronById = new Map(crons.map((c) => [c.id, c]));
+  for (const c of crons) {
+    if (!ids.has(c.cron.run))
+      throw new Error(`[logic-sdk] Cron ${c.id} runs a function that isn't registered. Export it from its module's index.ts.`);
+    assertPlain(c.cron.input, `${c.id} input`, "Cron runs travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
+  }
+
+  /** The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once. */
+  function due(at: Date): CronJob[] {
+    if (Number.isNaN(at.getTime())) throw new Error(`[logic-sdk] tick needs a valid date (got ${String(at)}).`);
+    const minute = new Date(Math.floor(at.getTime() / 60_000) * 60_000);
+    const stamp = minute.toISOString().slice(0, 16).replaceAll(/[-:]/g, "") + "Z"; // 20261123T0900Z: no `:`, which BullMQ rejects
+    return scheduled
+      .filter((c) => isDue(c.schedule, minute, c.cron.timezone))
+      .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString() }));
+  }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
   /** The frame a call runs in: one level deeper, with this call's scope patch and signal. */
@@ -1033,7 +1147,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
             const deliveries = toDeliveries(tx.outbox);
-            if (deliveries.length) await dispatcher.enqueue?.(txDb, deliveries);
+            if (deliveries.length) await enqueue?.(txDb, deliveries);
             return { out, outbox: tx.outbox, deliveries };
           });
           break;
@@ -1083,10 +1197,20 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       run: (fn: Fn, input?: unknown, options?: RunOptions) =>
         invoke(fn, input, enter({ scope, depth: -1 }, options), ["query", "mutation", "action"]), // depth 0
     }),
-    definitions: { functions, events, listeners },
+    definitions: { functions, events, listeners, crons },
     idOf,
     jobs: {
-      run: (job, options) => deliver(job, { ...options, fail: keepFailed && ((error) => keepFailed(job, error)) }),
+      run: (job, options) => runJob(job, { ...options, fail: keepFailed && ((error) => keepFailed(job, error)) }),
+      async tick(at = now()) {
+        const jobs = due(at);
+        if (!jobs.length) return [];
+        if (enqueue) {
+          if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like outbox(db)) need `database`.");
+          await database.transaction((tx) => enqueue(tx, jobs));
+        }
+        await dispatcher.deliver(jobs, runner).catch((e) => report(e, { listener: "(dispatcher)", envelope: undefined }));
+        return jobs.map((job) => job.cron);
+      },
       sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
       async retry(id) {
         if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
@@ -1098,6 +1222,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       config,
       derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) as object | undefined }),
       envelope: (event, payload, scope) => envelopeOf(event, payload, scope, 1),
+      due,
     },
   };
 }
