@@ -49,7 +49,7 @@ const react = listener({
 const rows = () => db.select().from(outboxTable);
 const makeDue = () => db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` });
 function setup(jobs: Dispatcher = outbox(db, { maxAttempts: 2 })) {
-  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs: { adapter: jobs }, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }
 
@@ -75,10 +75,10 @@ test("a failure keeps the row with a backoff and the error; a sweep after the ba
   const [row] = await rows();
   expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "smtp down" });
   expect(row!.availableAt.getTime()).toBeGreaterThan(Date.now()); // e^1 seconds from now
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 }); // not due yet
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // not due yet
   next = "ok";
   await makeDue();
-  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["lamp#1", "lamp#2"]);
   expect(await rows()).toEqual([]);
 });
@@ -91,13 +91,13 @@ test("out of attempts it's failed; retry puts it back in line, and only failed r
   expect(await registry.jobs.retry(pending!.id)).toBe(false); // pending: its runner or a sweep owns it, so retry leaves it alone
   expect(await rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
   await makeDue();
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
   const [row] = await rows();
   expect(row).toMatchObject({ status: "failed", attempts: 2 });
   next = "ok";
   expect(await registry.jobs.retry(row!.id)).toBe(true);
-  expect(await registry.jobs.retry("nope:x.react")).toBe(false);
-  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.retry("x.react@nope")).toBe(false);
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["chair#1", "chair#2", "chair#1"]);
 });
 
@@ -111,9 +111,9 @@ test("a rule saying no is failed at once, no retries", async () => {
 test("a runner that crashed after commit: its lease expires and a sweep takes over", async () => {
   const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 }); // still leased
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still leased
   await makeDue(); // the lease ran out
-  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["rug#2"]);
 });
 
@@ -129,4 +129,21 @@ test("the row is the delivery: what was enqueued is what runs", async () => {
   await app.run(add, { name: "mug" });
   const [row] = await db.select().from(outboxTable).where(eq(outboxTable.status, "pending"));
   expect(row!.delivery).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "mug" }, depth: 1 } });
+});
+
+test("a job whose scope can't be loaded is discarded: its row is deleted and the sweep counts it", async () => {
+  let gone = false;
+  const registry = createRegistry({
+    modules: { x: { added, add, react } },
+    database: drizzleAdapter(db),
+    onError: () => {},
+    jobs: { adapter: outbox(db), scope: { load: (s) => (gone ? null : s) } },
+  });
+  next = "throw";
+  await registry.as({ actor: "ana" }).run(add, { name: "lamp" }); // first try fails: the row waits for a retry
+  gone = true; // the account was offboarded meanwhile
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 1, retrying: 0 });
+  expect(await rows()).toEqual([]);
+  expect(ran).toEqual(["lamp#1"]);
 });

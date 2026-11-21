@@ -47,6 +47,8 @@ test("show: schemas from the registry, edges from the source (through this modul
 test("show an event: who emits it and who listens", () => {
   expect(cli(app, "show", "bookings.confirmed", "--json").json()).toEqual({
     id: "bookings.confirmed",
+    module: "bookings",
+    name: "confirmed",
     emittedBy: ["bookings.confirm", "bookings.confirmPaid"],
     listeners: ["enquiries.winOnBooking", "tasks.prepareStay"],
   });
@@ -111,11 +113,11 @@ test("renamed definers (mutation: defineMutation) are checked like any other", (
   expect(codes(r)).toEqual(codes(cli(broken, "check", "--json")));
 });
 
-test("a module can be a single file: queries, mutations, events and listeners in bookings.ts", () => {
+test("a module can be a single file, and explicit ids are what the CLI shows and links", () => {
   const r = cli(fixture("files"), "check", "--json");
-  expect(r.json()).toEqual({ errors: 0, warnings: 0, problems: [] });
-  expect(cli(fixture("files"), "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.reserve"], emits: ["orders.placed"] });
-  expect(cli(fixture("files"), "show", "orders.placed", "--json").json()).toMatchObject({ emittedBy: ["orders.place"], listeners: ["orders.notify"] });
+  expect(r.json()).toEqual({ errors: 0, warnings: 0, problems: [] }); // found in source by export name, not id
+  expect(cli(fixture("files"), "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.hold"], emits: ["orders.created"] });
+  expect(cli(fixture("files"), "show", "orders.created", "--json").json()).toMatchObject({ emittedBy: ["orders.place"], listeners: ["orders.email"] });
 });
 
 test("an app that throws while loading gets a diagnostic with the location, not a stack trace", () => {

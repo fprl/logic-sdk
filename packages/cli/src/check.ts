@@ -62,7 +62,7 @@ export function check(project: Project): Problem[] {
   }
 
   for (const fn of [...project.functions, ...project.listeners]) {
-    const f = source.fns.get(fn.id);
+    const f = source.fns.get(`${fn.module}.${fn.name}`);
     // Never pass silently: what we can't read, we can't check
     if (!f) {
       problems.push({
@@ -70,7 +70,7 @@ export function check(project: Project): Problem[] {
         severity: "warning",
         message: `${fn.id} is registered, but its definition wasn't found in ${fn.module}'s files, so its calls aren't checked.`,
         at: null,
-        fix: `Define it as \`export const ${fn.id.split(".")[1]} = …({ … })\` in ${relative(project.root, source.modules[fn.module]!.dir)}${source.modules[fn.module]!.folder ? "/" : ""}.`,
+        fix: `Define it as \`export const ${fn.name} = …({ … })\` in ${relative(project.root, source.modules[fn.module]!.dir)}${source.modules[fn.module]!.folder ? "/" : ""}.`,
       });
       continue;
     }
@@ -136,7 +136,7 @@ export function check(project: Project): Problem[] {
         severity: "warning",
         message: `${e.listeners.join(", ")} ${e.listeners.length > 1 ? "listen" : "listens"} to ${e.id}, but no function emits it.`,
         at: project.listeners.find((l) => l.event === e.id)?.at ?? null,
-        fix: `Emit it with ctx.emit(${e.id.split(".")[1]}, payload) in a mutation of ${e.id.split(".")[0]}, or remove the listener.`,
+        fix: `Emit it with ctx.emit(${e.name}, payload) in a mutation of ${e.module}, or remove the listener.`,
       });
 
   return problems;

@@ -27,6 +27,8 @@ export interface FnInfo {
 export interface ListenerInfo {
   id: string;
   module: string;
+  /** The export name: how the source refers to it (the id can differ). */
+  name: string;
   event: string;
   description: string | null;
   at: Loc | null;
@@ -34,6 +36,9 @@ export interface ListenerInfo {
 }
 export interface EventInfo {
   id: string;
+  module: string;
+  /** The export name: how the source refers to it (the id can differ). */
+  name: string;
   emittedBy: string[];
   listeners: string[];
 }
@@ -122,9 +127,13 @@ export async function loadProject(root: string): Promise<Project> {
   for (const [key, { index }] of Object.entries(source.modules)) modules[key] = await load(index);
   const described = core.describeModules(modules);
 
-  const at = (id: string) => source.fns.get(id)?.at ?? null;
+  // Source is keyed by `<module>.<export>`; ids can differ when a definition sets its own `id`.
+  const idByExport = new Map<string, string>();
+  for (const d of [...described.functions, ...described.events, ...described.listeners]) idByExport.set(`${d.module}.${d.name}`, d.id);
+  const real = <E extends { to: string }>(edges: E[]) => edges.map((e) => ({ ...e, to: idByExport.get(e.to) ?? e.to }));
+  const src = (d: { module: string; name: string }) => source.fns.get(`${d.module}.${d.name}`);
   const functions: FnInfo[] = described.functions.map((f: any) => {
-    const s = source.fns.get(f.id);
+    const s = src(f);
     return {
       id: f.id,
       module: f.module,
@@ -138,9 +147,9 @@ export async function loadProject(root: string): Promise<Project> {
       input: f.fn.input ? jsonSchemaOf(f.fn.input, "input") : null,
       output: f.fn.output ? jsonSchemaOf(f.fn.output, "output") : null,
       meta: f.fn.meta ?? null,
-      at: at(f.id),
-      runs: s?.runs ?? [],
-      emits: s?.emits ?? [],
+      at: s?.at ?? null,
+      runs: real(s?.runs ?? []),
+      emits: real(s?.emits ?? []),
       checks: s?.checks ?? [],
       config: s?.config ?? [],
       calledBy: [],
@@ -149,10 +158,11 @@ export async function loadProject(root: string): Promise<Project> {
   const listeners: ListenerInfo[] = described.listeners.map((l: any) => ({
     id: l.id,
     module: l.module,
+    name: l.name,
     event: described.ids.get(l.event) ?? "(unknown)",
-    description: source.fns.get(l.id)?.doc ?? null,
-    at: at(l.id),
-    runs: source.fns.get(l.id)?.runs ?? [],
+    description: src(l)?.doc ?? null,
+    at: src(l)?.at ?? null,
+    runs: real(src(l)?.runs ?? []),
   }));
 
   const byId = new Map(functions.map((f) => [f.id, f]));
@@ -161,6 +171,8 @@ export async function loadProject(root: string): Promise<Project> {
 
   const events: EventInfo[] = described.events.map((e: any) => ({
     id: e.id,
+    module: e.module,
+    name: e.name,
     emittedBy: functions.filter((f) => f.emits.some((x) => x.to === e.id)).map((f) => f.id),
     listeners: listeners.filter((l) => l.event === e.id).map((l) => l.id),
   }));

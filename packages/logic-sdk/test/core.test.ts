@@ -235,10 +235,10 @@ test("wrap sees every call with depth", async () => {
 test("custom dispatcher: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
   const seen: string[] = [];
   const { app } = setup({
-    jobs: {
+    jobs: { adapter: {
       async enqueue(tx, deliveries) { seen.push(`enqueue ${deliveries.map((d) => `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
       async deliver(deliveries, run) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
-    },
+    } },
   });
   await app.run(items.add, { name: "q" });
   expect(seen).toEqual(["enqueue items.added→log.onAdded in tx=true", "deliver", "done"]);
@@ -246,11 +246,11 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
 
 test("deliveries are JSON: what a queue carries comes back and runs", async () => {
   const deliveries: Delivery[] = [];
-  const { app, registry } = setup({ jobs: { async deliver(d) { deliveries.push(...d); } } });
+  const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } } } });
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
-  expect(d.id).toEqual(`${d.envelope.id}:log.onAdded`);
+  expect(d).toMatchObject({ kind: "delivery", id: `log.onAdded@${d.envelope.id}` });
   expect(await registry.jobs.run(d, { attempt: 2 })).toEqual("done");
 });
 
@@ -289,7 +289,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: memoryDatabase(),
     services: { log: [] },
-    jobs: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) },
+    jobs: { adapter: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) } },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -480,18 +480,18 @@ test("review #6: a caught nested invalid-input failure dooms the transaction too
 
 test("registry.jobs.sweep runs the transport's sweep with jobs.run; in-process has nothing to sweep", async () => {
   const { registry } = setup();
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   let got: { limit?: number } | undefined;
-  const { registry: swept } = setup({ jobs: { deliver: async () => {}, sweep: async (run, options) => { got = options; expect(run).toBe(swept.jobs.run); return { done: 2, failed: 0, retrying: 1 }; } } });
-  expect(await swept.jobs.sweep({ limit: 5 })).toEqual({ done: 2, failed: 0, retrying: 1 });
+  const { registry: swept } = setup({ jobs: { adapter: { deliver: async () => {}, sweep: async (run, options) => { got = options; expect(run).toBe(swept.jobs.run); return { done: 2, failed: 0, discarded: 0, retrying: 1 }; } } } });
+  expect(await swept.jobs.sweep({ limit: 5 })).toEqual({ done: 2, failed: 0, discarded: 0, retrying: 1 });
   expect(got).toEqual({ limit: 5 });
 });
 
 test("registry.jobs.retry: the transport's answer, or a throw when it stores no jobs", async () => {
   const { registry } = setup();
-  await expect(registry.jobs.retry("e1:log.onAdded")).rejects.toThrow(/stores no jobs, so there's nothing to retry \(e1:log\.onAdded\)/);
+  await expect(registry.jobs.retry("log.onAdded@e1")).rejects.toThrow(/stores no jobs, so there's nothing to retry \(log\.onAdded@e1\)/);
   const asked: string[] = [];
-  const { registry: stored } = setup({ jobs: { deliver: async () => {}, retry: async (id) => (asked.push(id), id === "known") } });
+  const { registry: stored } = setup({ jobs: { adapter: { deliver: async () => {}, retry: async (id) => (asked.push(id), id === "known") } } });
   expect(await stored.jobs.retry("known")).toBe(true);
   expect(await stored.jobs.retry("other")).toBe(false);
   expect(asked).toEqual(["known", "other"]);
@@ -501,11 +501,11 @@ test("registry.jobs.run: done, failed for good, or throws to retry", async () =>
   const reported: FailureInfo[] = [];
   const { d } = regSetup({ onError: (_e, info) => reported.push(info) });
   const envelope = { id: "e1", name: "items.added", payload: { name: "fine" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 };
-  const delivery = (payload: object, listener = "log.onAdded") => ({ id: `e1:${listener}`, listener, envelope: { ...envelope, payload } });
+  const delivery = (payload: object, listener = "log.onAdded") => ({ kind: "delivery" as const, id: `${listener}@e1`, listener, envelope: { ...envelope, payload } });
   expect(await d.jobs.run(delivery({ name: "fine" }))).toEqual("done");
   // an unexpected error: a retry might help, so it throws (the queue redelivers)
   await expect(d.jobs.run(delivery({ name: "listener-fails" }), { attempt: 3 })).rejects.toThrow(/listener exploded/);
-  expect(reported.at(-1)).toMatchObject({ listener: "log.onAdded", delivery: "e1:log.onAdded", attempt: 3 });
+  expect(reported.at(-1)).toMatchObject({ listener: "log.onAdded", delivery: "log.onAdded@e1", attempt: 3 });
   // a payload that no longer matches its schema: retrying can't help
   expect(await d.jobs.run(delivery({ nope: 1 }))).toEqual("failed");
   // a renamed or removed listener throws, so the message ends in the dead-letter queue
@@ -523,7 +523,7 @@ test("a listener's domain error is final (failed, reported); a conflict throws t
   });
   const errors: string[] = [];
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
-  const delivery = (kind: string) => ({ id: "e:x.react", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: { kind }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
+  const delivery = (kind: string) => ({ kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: { kind }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
   expect(await r.jobs.run(delivery("gone"))).toEqual("failed");
   await expect(r.jobs.run(delivery("taken"))).rejects.toMatchObject({ kind: "conflict" });
   expect(errors).toHaveLength(2);
@@ -696,4 +696,117 @@ test("emit snapshots the payload: mutating it afterwards changes nothing", async
   const listen = listener({ event: () => happened, handler: async (_, { name }) => { got.push(name); } });
   await createRegistry<Scope>({ modules: { x: { happened, doIt, listen } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" }).run(doIt, {});
   expect(got).toEqual(["before"]);
+});
+
+test("ids: an explicit id is local to its module, and jobs store it", async () => {
+  const happened = event({ id: "happened", payload: z.object({}) });
+  const doIt = mutation({ id: "do", async handler(ctx) { ctx.emit(happened, {}); } });
+  const ran: string[] = [];
+  const send = listener({ id: "send", event: () => happened, handler: async () => void ran.push("send") });
+  const jobs: Delivery[] = [];
+  const r = createRegistry<Scope>({
+    modules: { notifications: { renamedEvent: happened, renamedFn: doIt, renamedListener: send } },
+    database: memoryDatabase(),
+    jobs: { adapter: { async deliver(d, run) { jobs.push(...d); for (const j of d) await run(j); } } },
+  });
+  expect(r.idOf(doIt)).toBe("notifications.do");
+  expect(r.definitions.listeners.map((l) => [l.id, l.name])).toEqual([["notifications.send", "renamedListener"]]);
+  await r.as({ actor: "a", locale: "es" }).run(doIt);
+  expect(jobs.map((j) => [j.listener, j.envelope.name])).toEqual([["notifications.send", "notifications.happened"]]);
+  expect(ran).toEqual(["send"]);
+});
+
+test("ids: a duplicate or a dotted id throws at createRegistry", () => {
+  const a = query({ handler: async () => 1 });
+  const b = query({ id: "a", handler: async () => 2 });
+  expect(() => createRegistry({ modules: { m: { a, b } } })).toThrow("m.a and m.b both have the id m.a. Ids must be unique");
+  const dotted = query({ id: "other.a", handler: async () => 1 });
+  expect(() => createRegistry({ modules: { m: { dotted } } })).toThrow(/m\.dotted has id "other\.a"\. Give the local name/);
+});
+
+test("jobs.scope: store picks what's saved, load rebuilds it at run time, null discards", async () => {
+  const m = init<{ scope: Scope; db: Store }>();
+  const happened = m.event({ payload: z.object({ n: z.number() }) });
+  const doIt = m.mutation({ input: z.object({ n: z.number() }), async handler(ctx, { n }) { ctx.emit(happened, { n }); } });
+  const seen: Scope[] = [];
+  const react = m.listener({ event: () => happened, async handler({ scope }) { seen.push(scope); } });
+  const stored: object[] = [];
+  const outcomes: string[] = [];
+  const reported: string[] = [];
+  const r = m.createRegistry({
+    modules: { x: { happened, doIt, react } },
+    database: memoryDatabase(),
+    onError: (e) => reported.push((e as Error).message),
+    jobs: {
+      adapter: { async deliver(d, run) { for (const j of d) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
+      scope: {
+        store: (s) => ({ actor: s.actor }), // the locale isn't saved
+        load: async (saved) => (saved.actor === "gone" ? null : { actor: saved.actor, locale: "fresh" }),
+      },
+    },
+  });
+  await r.as({ actor: "ana", locale: "es" }).run(doIt, { n: 1 });
+  await r.as({ actor: "gone", locale: "es" }).run(doIt, { n: 2 });
+  expect(stored).toEqual([{ actor: "ana" }, { actor: "gone" }]);
+  expect(seen).toEqual([{ actor: "ana", locale: "fresh" }]);
+  expect(outcomes).toEqual(["done", "discarded"]);
+  expect(reported).toEqual([expect.stringMatching(/jobs\.scope\.load returned null for x\.react@.+, so it was discarded/)]);
+});
+
+test("jobs.scope: what store returns must be plain JSON; a load that throws is retried", async () => {
+  const happened = event({ payload: z.object({}) });
+  const doIt = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
+  const react = listener({ event: () => happened, async handler() {} });
+  const make = (scope: object) => createRegistry<Scope>({ modules: { x: { happened, doIt, react } }, database: memoryDatabase(), onError: () => {}, jobs: { scope } });
+  await expect(make({ store: () => ({ at: new Date() }), load: () => null }).as({ actor: "a", locale: "es" }).run(doIt)).rejects.toThrow(/scope emitting x\.happened isn't plain data at at: a Date/);
+  const flaky = make({ load: async () => { throw new Error("db down"); } });
+  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  await expect(flaky.jobs.run(job)).rejects.toThrow("db down");
+});
+
+test("a job of a kind this version doesn't know throws, so the queue keeps it", async () => {
+  const { registry } = setup({ onError: () => {} });
+  const job = { kind: "call", id: "x", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
+  await expect(registry.jobs.run(job as never)).rejects.toThrow(/job x has kind "call", which this version can't run/);
+});
+
+test("jobs.scope types: load gets what store saved, and returns the app's scope", () => {
+  const m = init<{ scope: Scope }>();
+  m.createRegistry({
+    modules: {},
+    jobs: {
+      scope: {
+        store: (s) => ({ who: s.actor }),
+        load: (saved) => {
+          // @ts-expect-error: only what store saved
+          void saved.locale;
+          return { actor: saved.who, locale: "es" };
+        },
+      },
+    },
+  });
+  m.createRegistry({
+    modules: {},
+    jobs: {
+      scope: {
+        // load first: annotate its parameter, since TypeScript reads the object in order (or write store first)
+        load: (saved: { who: string | null }) => ({ actor: saved.who, locale: "es" }),
+        store: (s) => ({ who: s.actor }),
+      },
+    },
+  });
+  m.createRegistry({
+    modules: {},
+    // @ts-expect-error: load must return the app's scope (or null)
+    jobs: { scope: { load: () => ({ nope: 1 }) } },
+  });
+});
+
+test("jobs.scope: store without load throws; load returning undefined retries instead of discarding", async () => {
+  expect(() => createRegistry({ modules: {}, jobs: { scope: { store: (s: object) => s } as never } })).toThrow("jobs.scope has store but no load");
+  const happened = event({ payload: z.object({}) });
+  const react = listener({ event: () => happened, async handler() {} });
+  const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: (() => undefined) as never } } });
+  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  await expect(r.jobs.run(job)).rejects.toThrow(/load returned undefined for x\.react@e\. Return the scope, or null to discard/);
 });
