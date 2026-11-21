@@ -1,6 +1,6 @@
 name: Idea
 description: A feature, an API change, or a question about the design
-labels: [idea]
+labels: [enhancement]
 body:
   - type: textarea
     id: idea
