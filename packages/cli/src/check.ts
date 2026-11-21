@@ -136,7 +136,7 @@ export function check(project: Project): Problem[] {
         severity: "warning",
         message: `${e.listeners.join(", ")} ${e.listeners.length > 1 ? "listen" : "listens"} to ${e.id}, but no function emits it.`,
         at: project.listeners.find((l) => l.event === e.id)?.at ?? null,
-        fix: `Emit it with ctx.emit(${e.id.split(".")[1]}, payload) in a mutation of ${e.id.split(".")[0]}, or remove the listener.`,
+        fix: `Emit it with ctx.emit(${e.name}, payload) in a mutation of ${e.module}, or remove the listener.`,
       });
 
   return problems;

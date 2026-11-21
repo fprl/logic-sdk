@@ -373,10 +373,12 @@ export const inProcess = (): Dispatcher => ({
 /**
  * Who a job runs as, at rest. `store` picks what's saved with the job (ids, not whole objects); `load` rebuilds the
  * scope when it runs, so policies see today's roles. `load` returning null discards the job (reported to `onError`),
- * a throw retries it. Both optional: by default the scope is stored as it was at emit.
+ * a throw retries it. By default the scope is stored as it was at emit. `store` needs `load`: listeners run as a scope,
+ * not as what was saved.
  */
 export interface JobScope<S = object, T = any> {
   store?: (scope: S) => T;
+  /** What `store` saved. Write `store` first so TypeScript infers it (or annotate this parameter). */
   load?: (stored: T) => S | null | Promise<S | null>;
 }
 
@@ -701,7 +703,7 @@ export function describeModules(modules: Record<string, object>) {
     for (const [name, value] of Object.entries(ns)) {
       if (!isBranded(value) || ids.has(value)) continue;
       const local = value.id ?? name;
-      if (value.id !== undefined && !/^[A-Za-z0-9_-]+$/.test(value.id))
+      if (value.id !== undefined && (typeof value.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(value.id)))
         throw new Error(`[logic-sdk] ${module}.${name} has id ${JSON.stringify(value.id)}. Give the local name ("send"): the module key is added, so it's ${module}.<id>.`);
       const id = `${module}.${local}`;
       const other = taken.get(id);
@@ -730,6 +732,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
   const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
   const jobScope = options.jobs?.scope;
+  if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Listeners run as a scope, so rebuild it from what store saved.");
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
@@ -818,7 +821,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       let scope = envelope.scope;
       if (jobScope?.load) {
         const loaded = await jobScope.load(scope);
-        if (loaded == null) {
+        if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${delivery.id}. Return the scope, or null to discard the job.`);
+        if (loaded === null) {
           report(new Error(`[logic-sdk] jobs.scope.load returned null for ${delivery.id}, so it was discarded.`), info);
           return "discarded";
         }

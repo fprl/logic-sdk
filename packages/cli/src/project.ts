@@ -36,6 +36,9 @@ export interface ListenerInfo {
 }
 export interface EventInfo {
   id: string;
+  module: string;
+  /** The export name: how the source refers to it (the id can differ). */
+  name: string;
   emittedBy: string[];
   listeners: string[];
 }
@@ -168,6 +171,8 @@ export async function loadProject(root: string): Promise<Project> {
 
   const events: EventInfo[] = described.events.map((e: any) => ({
     id: e.id,
+    module: e.module,
+    name: e.name,
     emittedBy: functions.filter((f) => f.emits.some((x) => x.to === e.id)).map((f) => f.id),
     listeners: listeners.filter((l) => l.event === e.id).map((l) => l.id),
   }));

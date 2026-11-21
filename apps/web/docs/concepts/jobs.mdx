@@ -82,6 +82,7 @@ export const sendAll = listener({
 - **Local to the module:** `"send"` in `notifications` is `notifications.send`, so the module key still comes first.
 - **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls will store function ids.
 - **Unique:** a clash throws at `createRegistry`.
+- **Where else it shows:** the [fetch adapter](/docs/adapters/fetch)'s routes and error codes (`notifications.send.forbidden`) use the id. oRPC routers and AI tools keep the export name, because their types come from your modules' export names.
 
 ## Who a job runs as
 
@@ -90,7 +91,9 @@ By default a job stores the scope it was emitted with, so a retry two days later
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
 - **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
 - **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same.
-- **`load` throwing retries the job,** like any other failure.
+- **`load` throwing retries the job,** like any other failure. So does returning `undefined`, which is almost always a missing `return`.
+- **`store` needs `load`:** listeners run as a scope, not as what was saved. `createRegistry` throws otherwise.
+- **`load` runs once per job,** before the listener and outside `wrap`: an event with five listeners loads five times. Write `store` first in the object so TypeScript infers what `load` gets, or annotate its parameter.
 
 The registry applies `scope` in every adapter, `inProcess()` and tests included, so what passes in tests passes in production.
 

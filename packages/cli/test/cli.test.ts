@@ -47,6 +47,8 @@ test("show: schemas from the registry, edges from the source (through this modul
 test("show an event: who emits it and who listens", () => {
   expect(cli(app, "show", "bookings.confirmed", "--json").json()).toEqual({
     id: "bookings.confirmed",
+    module: "bookings",
+    name: "confirmed",
     emittedBy: ["bookings.confirm", "bookings.confirmPaid"],
     listeners: ["enquiries.winOnBooking", "tasks.prepareStay"],
   });

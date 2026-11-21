@@ -758,7 +758,7 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
   const doIt = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
   const react = listener({ event: () => happened, async handler() {} });
   const make = (scope: object) => createRegistry<Scope>({ modules: { x: { happened, doIt, react } }, database: memoryDatabase(), onError: () => {}, jobs: { scope } });
-  await expect(make({ store: () => ({ at: new Date() }) }).as({ actor: "a", locale: "es" }).run(doIt)).rejects.toThrow(/scope emitting x\.happened isn't plain data at at: a Date/);
+  await expect(make({ store: () => ({ at: new Date() }), load: () => null }).as({ actor: "a", locale: "es" }).run(doIt)).rejects.toThrow(/scope emitting x\.happened isn't plain data at at: a Date/);
   const flaky = make({ load: async () => { throw new Error("db down"); } });
   const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   await expect(flaky.jobs.run(job)).rejects.toThrow("db down");
@@ -787,7 +787,26 @@ test("jobs.scope types: load gets what store saved, and returns the app's scope"
   });
   m.createRegistry({
     modules: {},
+    jobs: {
+      scope: {
+        // load first: annotate its parameter, since TypeScript reads the object in order (or write store first)
+        load: (saved: { who: string | null }) => ({ actor: saved.who, locale: "es" }),
+        store: (s) => ({ who: s.actor }),
+      },
+    },
+  });
+  m.createRegistry({
+    modules: {},
     // @ts-expect-error: load must return the app's scope (or null)
     jobs: { scope: { load: () => ({ nope: 1 }) } },
   });
+});
+
+test("jobs.scope: store without load throws; load returning undefined retries instead of discarding", async () => {
+  expect(() => createRegistry({ modules: {}, jobs: { scope: { store: (s: object) => s } as never } })).toThrow("jobs.scope has store but no load");
+  const happened = event({ payload: z.object({}) });
+  const react = listener({ event: () => happened, async handler() {} });
+  const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: (() => undefined) as never } } });
+  const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
+  await expect(r.jobs.run(job)).rejects.toThrow(/load returned undefined for x\.react@e\. Return the scope, or null to discard/);
 });
