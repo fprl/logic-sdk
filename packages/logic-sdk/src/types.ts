@@ -154,6 +154,8 @@ export interface CallJob {
    * function that schedules itself with no delay stops like a listener loop. A delayed one starts a new chain (0).
    */
   depth: number;
+  /** Its `replace` key: a newer call to `fn` with the same key replaces this one while it waits. */
+  replace?: string;
   /** When it may run (ISO). */
   runAt?: string;
 }
@@ -270,12 +272,17 @@ export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C
    * Run a mutation or action once, later, as this scope: `ctx.schedule(guests.remind, { bookingId }, { at })` or
    * `{ delay: 3600 }` (seconds). Committed with this transaction, so a rollback never leaves one behind. Returns its job
    * id. It runs whatever happens meanwhile, so it should check that its reason still holds ("still confirmed?").
-   * `attempts`: tries in total, default 1; give an action that calls an API a few.
+   * `attempts`: tries in total, default 1; give an action that calls an API a few. `replace`: a key, so a newer call
+   * with it replaces the one still waiting (`replace: booking.id` when the dates change), like Oban's `replace`.
    */
   schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, options: ScheduleOptions): string;
 }
 /** When a scheduled call runs (`at` or `delay` in seconds), and how many tries it gets. */
-export type ScheduleOptions = ({ at: Date; delay?: never } | { delay: number; at?: never }) & { attempts?: number };
+export type ScheduleOptions = ({ at: Date; delay?: never } | { delay: number; at?: never }) & {
+  attempts?: number;
+  /** A key: the call to this function waiting with the same key (not started yet) is replaced by this one. */
+  replace?: string;
+};
 export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
   /** Call any function: `await ctx.run(bookings.confirmPaid, { bookingId })`. Each mutation you run commits on its own. */
@@ -397,6 +404,12 @@ export interface Dispatcher {
    * them early or lose them.
    */
   holds?: true | { max: number };
+  /**
+   * Can replace a call waiting to run: `enqueue` gets a call with `replace`, and a pending call to the same `fn` with
+   * the same key that hasn't started is replaced by it. The outbox can; a queue that already has the message can't.
+   * Without it, `ctx.schedule` with `replace` is refused.
+   */
+  replaces?: true;
   /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */

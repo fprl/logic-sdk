@@ -1146,6 +1146,37 @@ test("a cron starts a chain: what its function emits is the first hop", async ()
   expect(depths).toEqual([1]);
 });
 
+test("ctx.schedule replace: in tests too, the newer call replaces the one waiting, so only it runs", async () => {
+  const sent: string[] = [];
+  const remind = action({ input: z.object({ at: z.string() }), async handler(_ctx, { at }) { sent.push(at); } });
+  const book = mutation({
+    input: z.object({ checkIn: z.string(), twice: z.boolean().optional() }),
+    async handler(ctx, { checkIn, twice }) {
+      if (twice) ctx.schedule(remind, { at: "draft" }, { delay: 60, replace: "b1" }); // the later one in this transaction wins
+      ctx.schedule(remind, { at: checkIn }, { delay: 3600, replace: "b1" });
+    },
+  });
+  const replacing = { holds: true as const, replaces: true as const, async deliver() {} };
+  const registry = createRegistry<Scope>({ modules: { x: { remind, book } }, database: memoryDatabase(), jobs: { adapter: replacing, scope: { load: (saved) => saved } } });
+  const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
+  await t.begin();
+  const app = t.as({ actor: "ana", locale: "es" });
+  await app.run(book, { checkIn: "July 3", twice: true });
+  await app.run(book, { checkIn: "July 9" }); // the dates changed
+  expect(t.jobs.scheduled.map((j) => j.input)).toEqual([{ at: "July 9" }]);
+  await t.jobs.drain({ until: "2026-07-02T00:00:00Z" });
+  expect(sent).toEqual(["July 9"]);
+  await t.rollback();
+});
+
+test("ctx.schedule replace: refused where nothing can replace (in-process), and the key can't be empty", async () => {
+  const ping = action({ async handler() {} });
+  const go = mutation({ input: z.object({ key: z.string() }), async handler(ctx, { key }) { ctx.schedule(ping, undefined, { delay: 0, replace: key }); } });
+  const app = createRegistry<Scope>({ modules: { x: { ping, go } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" });
+  await expect(app.run(go, { key: "b1" })).rejects.toThrow(/your jobs adapter can't replace one it already has\. Use outbox\(db\)/);
+  await expect(app.run(go, { key: "" })).rejects.toThrow(/replace must be a non-empty key/);
+});
+
 test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {
   const { registry: onInProcess, book } = scheduleSetup({ jobs: {} });
   const t = createTestRegistry(onInProcess);

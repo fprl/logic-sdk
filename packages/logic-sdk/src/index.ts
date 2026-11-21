@@ -454,12 +454,17 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         check.catch(() => {}); // surfaced at commit; never an unhandled rejection
         tx.pending.push(check);
       },
-      schedule: (fn, input, { at, delay, attempts = 1 }) => {
+      schedule: (fn, input, { at, delay, attempts = 1, replace }) => {
         const fnId = idOf(fn);
         const seconds = at ? (at.getTime() - now().getTime()) / 1000 : (delay ?? NaN);
         if (!Number.isFinite(seconds) || (!at && seconds < 0))
           throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
         checkAttempts(`ctx.schedule(${fnId})`, attempts);
+        if (replace !== undefined) {
+          if (!replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty key.`);
+          if (!dispatcher.replaces)
+            throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use outbox(db).`);
+        }
         // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
         const waits = seconds > 0;
         if (waits) checkHold(`ctx.schedule(${fnId})`, seconds);
@@ -474,6 +479,13 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           depth: waits ? 0 : (frame.eventDepth ?? 0) + 1, // due now, it's the next hop of this chain; a real wait starts a new one
         };
         if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
+        if (replace !== undefined) {
+          job.replace = replace;
+          // scheduled twice in this transaction: the later one wins here too (the dropped one's input is still checked:
+          // a bad input is a bug wherever it is)
+          const earlier = tx.calls.findIndex((c) => c.fn === fnId && c.replace === replace);
+          if (earlier >= 0) tx.calls.splice(earlier, 1);
+        }
         tx.calls.push(job);
         // our own code passed it: a bad input is a bug, surfaced at commit like an event's payload
         if (fn.input) {

@@ -83,12 +83,18 @@ class Rollback extends Error {}
 
 /**
  * The test's jobs adapter. What waits (a delayed listener, `ctx.schedule`) is held for `drain()`, and in `"manual"` so
- * is everything else; the rest runs now. It holds what your app's adapter holds, so a test fails where production would.
+ * is everything else; the rest runs now. It holds and replaces what your app's adapter does, so a test fails where
+ * production would.
  */
-const testJobs = (mode: TestOptions["jobs"], holds: Dispatcher["holds"], queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
-  holds,
+const testJobs = (mode: TestOptions["jobs"], app: Dispatcher | undefined, queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
+  holds: app?.holds,
+  replaces: app?.replaces,
   async deliver(jobs, runner) {
     for (const job of jobs) {
+      if (job.kind === "call" && job.replace !== undefined) {
+        const waiting = scheduled.findIndex((c) => c.fn === job.fn && c.replace === job.replace);
+        if (waiting >= 0) scheduled.splice(waiting, 1);
+      }
       const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
       if (!waits) await runner.run(job).catch(() => {}); // reported, so the test sees it
       else if (job.kind === "call") scheduled.push(job);
@@ -151,7 +157,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       now: clock,
       stubs,
       record: (e) => events.push(e),
-      adapter: testJobs(options.jobs, registryOptions.jobs?.adapter?.holds, queued, scheduled),
+      adapter: testJobs(options.jobs, registryOptions.jobs?.adapter, queued, scheduled),
       waitUntil: undefined, // listeners finish before a call returns, inside the test
       onError(error, info) {
         if (info.outcome !== "discarded") failures.push(error);

@@ -1,5 +1,5 @@
 import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { DatabaseAdapter, DeliveryOutcome, Dispatcher, Job, Runner, SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
@@ -45,6 +45,9 @@ export function sqlState(error: unknown): string | undefined {
  * Outbox: events written in the mutation's transaction, delivered after commit, retried until done
  * ──────────────────────────────────────────────────────────────────────────── */
 
+/** Rows not claimed yet: what `replace` may still replace. */
+const waiting = sql`status = 'pending' and attempts = 0`;
+
 /**
  * The outbox table (Postgres). Re-export it from your schema so drizzle-kit adds it to your migrations:
  * `export { outboxTable } from "logic-sdk/drizzle";`. One row per pending delivery; done rows are deleted,
@@ -63,9 +66,15 @@ export const outboxTable = pgTable(
     /** Due from then on. While claimed: when the lease ends and a sweep may take it over. */
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     lastError: text("last_error"),
+    /** A scheduled call's `replace` key, `<function id>@<key>`: a newer call with it replaces this row while it waits. */
+    replaceKey: text("replace_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("logic_outbox_due").on(t.availableAt).where(sql`${t.status} = 'pending'`)],
+  (t) => [
+    index("logic_outbox_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
+    // one waiting call per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
+    uniqueIndex("logic_outbox_replace").on(t.replaceKey).where(waiting),
+  ],
 );
 
 /**
@@ -194,6 +203,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
 
   return {
     holds: true, // rows wait until they're due, however long, so `via`'s limits on delays don't apply
+    replaces: true, // a waiting row is replaced in place; under `via` too, since rows wait here until they're due
     /** Must share the transaction it writes in. */
     check({ database }) {
       if (database && database.db !== db)
@@ -209,9 +219,30 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async enqueue(tx: unknown, jobs: Job[]) {
       const client = tx as PgClient;
       const firstTicks = await recordTicks(client, jobs.filter((j) => j.kind === "cron"));
-      const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id));
-      if (!rows.length) return;
-      await client.insert(t).values(rows.map((j) => ({ id: j.id, delivery: j, attempts: 0, availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease) })));
+      const row = (j: Job) => ({
+        id: j.id,
+        delivery: j,
+        attempts: 0,
+        availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease),
+        replaceKey: j.kind === "call" && j.replace !== undefined ? `${j.fn}@${j.replace}` : null,
+      });
+      const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id)).map(row);
+      const plain = rows.filter((r) => r.replaceKey === null);
+      // in key order, so two transactions replacing the same keys lock them in the same order and can't deadlock
+      const replacing = rows
+        .filter((r): r is typeof r & { replaceKey: string } => r.replaceKey !== null)
+        .sort((a, b) => a.replaceKey.localeCompare(b.replaceKey));
+      if (plain.length) await client.insert(t).values(plain);
+      // the waiting call with this key becomes the new one: its id, job and time (Oban's `replace`)
+      if (replacing.length)
+        await client
+          .insert(t)
+          .values(replacing)
+          .onConflictDoUpdate({
+            target: t.replaceKey,
+            targetWhere: waiting,
+            set: { id: sql`excluded.id`, delivery: sql`excluded.delivery`, availableAt: sql`excluded.available_at`, lastError: null },
+          });
     },
     /**
      * After commit, in this request: claim the jobs that are due (one update), then run them or hand them over. A crash
@@ -261,7 +292,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async retry(id) {
       const revived = await db
         .update(t)
-        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null })
+        // its key goes: it has run, so it's no longer a call a newer one replaces (and one may be waiting with it)
+        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null, replaceKey: null })
         .where(and(eq(t.id, id), eq(t.status, "failed")))
         .returning({ id: t.id });
       return revived.length > 0;

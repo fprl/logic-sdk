@@ -21,8 +21,9 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
       CREATE TABLE logic_outbox (
         id text PRIMARY KEY, delivery jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
         attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
-        last_error text, created_at timestamptz DEFAULT now() NOT NULL
+        last_error text, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
       )`);
+    await db.execute(sql`CREATE UNIQUE INDEX logic_outbox_replace ON logic_outbox (replace_key) WHERE status = 'pending' and attempts = 0`);
 
     const { event, listener, createRegistry } = init<{ scope: object; db: DrizzleTx<typeof db> }>();
     const happened = event({ payload: z.object({ n: z.number() }) });
