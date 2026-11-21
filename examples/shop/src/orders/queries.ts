@@ -1,7 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { query } from "../logic";
-import { signedIn, staff } from "../policies";
+import { signedIn, staffOrSystem } from "../policies";
 import { canCancel } from "./data";
 import { Order, orders } from "./schema";
 
@@ -21,9 +21,9 @@ export const mine = query({
   },
 });
 
-/** How many orders wait to ship. Staff only. */
+/** How many orders wait to ship. Staff, and the morning digest. */
 export const toShip = query({
-  authorize: staff,
+  authorize: staffOrSystem,
   output: z.number(),
   async handler(ctx) {
     const rows = await ctx.db.select({ id: orders.id }).from(orders).where(eq(orders.status, "placed"));

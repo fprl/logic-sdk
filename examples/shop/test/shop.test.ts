@@ -2,6 +2,7 @@ import { createTestRegistry } from "logic-sdk/testing";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import * as catalog from "../src/catalog";
 import { createApi } from "../src/http";
+import { asSystem } from "../src/logic";
 import * as orders from "../src/orders";
 import { ana, guest, leo, memoryMailer, sam, shop } from "./setup";
 
@@ -109,4 +110,10 @@ test("weekday mornings, staff get a digest of what's waiting to ship", async () 
   expect(await t.jobs.tick("2026-12-01T07:00:00Z")).toEqual(["orders.morningDigest"]); // a Tuesday, 8:00 in Madrid
   expect(mailer.sent).toEqual([{ to: "staff", subject: "1 orders to ship", text: "https://shop.test/orders" }]);
   expect(await t.jobs.tick("2026-12-05T07:00:00Z")).toEqual([]); // Saturday
+});
+
+test("the system can do only what a policy grants it: the digest, not placing orders", async () => {
+  const digest = t.as(asSystem("orders.morningDigest"));
+  expect(await digest.run(orders.toShip)).toBe(0);
+  expect((await digest.run(orders.place, mug()).catch((e) => e)).kind).toBe("forbidden");
 });
