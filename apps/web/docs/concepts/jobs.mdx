@@ -103,6 +103,13 @@ export const confirm = mutation({
 - **Run a mutation or action once, later,** at a time this mutation decides. A listener's `delay` is the same for every event; this one is yours per call.
 - **Only from mutations:** it's committed with the transaction, so a booking that rolls back never leaves a reminder behind, as in Convex. An action or listener that wants to schedule runs a mutation that does.
 - **`{ at }` or `{ delay }`, not both:** a `Date` (from `ctx.now()`), or seconds like a listener's `delay`. It returns the job id. Due now (`delay: 0`, an `at` already past) runs right after commit, like a listener.
+- **`replace: key` when it can change:** a newer call to the same function with the same key replaces the one still waiting, its input, time and tries. Move a booking's dates and the reminder moves with it, instead of two going out:
+
+  ```ts
+  ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: bookingId });
+  ```
+
+  A call that already started isn't touched; the new one runs on its own. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`outbox(db)`, also with `via`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
@@ -154,6 +161,7 @@ For writing an adapter:
 - **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
 - **Three job kinds:** a delivery `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, a cron run `{ kind: "cron", id, cron, scheduledAt, attempts }` and a scheduled call `{ kind: "call", id, fn, input, scope, attempts, depth, runAt? }`. All are JSON; an adapter stores and sends them without looking inside, except `attempts` and `runAt` if its backend needs them at send time.
 - **Every adapter but `inProcess()` needs `jobs.scope.load`:** the registry assumes yours keeps jobs, so `createRegistry` asks the app to rebuild the scope they run as.
+- **`replaces: true`** says `enqueue` replaces a waiting call with the same `fn` and `replace` key (one not started yet). Without it, `ctx.schedule` with `replace` is refused.
 - **`holds: true | { max }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour. **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the job is out of its `attempts`. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.
