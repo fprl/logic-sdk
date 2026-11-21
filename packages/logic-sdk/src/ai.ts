@@ -97,7 +97,7 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
 ): Partial<AIToolsOf<Mods>> {
   const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn)?.tool === true);
   const tools: Record<string, Tool> = {};
-  for (const f of registry.functions)
+  for (const f of registry.definitions.functions)
     if (f.exposed && filter(f))
       tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, { onError: options.onError, description: options.describe?.(f) });
   return tools as Partial<AIToolsOf<Mods>>;

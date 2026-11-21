@@ -110,6 +110,9 @@ export interface Delivery<P = unknown, S = object> {
   envelope: Envelope<P, S>;
 }
 
+/** One unit of background work, what `registry.jobs` runs, sweeps and retries. Today every job is a delivery. */
+export type Job = Delivery;
+
 /**
  * What delivering one resolved to. `failed`: a rule said no (`invalid`, `unauthenticated`, `forbidden`, `not_found`,
  * `rejected`) or the payload no longer matches its schema. Retrying can't help, so acknowledge it; it's been reported.
@@ -319,11 +322,22 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
 /** Delivers one: resolves when the listener is done or failed for good (acknowledge it), throws when a retry might help. */
 export type RunDelivery = (delivery: Delivery, options?: { attempt?: number }) => Promise<DeliveryOutcome>;
 
+/** What a sweep did: delivered, failed for good, or put back with a backoff. */
+export interface SweepResult {
+  done: number;
+  failed: number;
+  retrying: number;
+}
+
 export interface Dispatcher {
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
   enqueue?(tx: unknown, deliveries: Delivery[]): Promise<void>;
   /** After commit. Every failure `run` meets is already reported to `onError`; a throw means "retry it". */
   deliver(deliveries: Delivery[], run: RunDelivery): Promise<void>;
+  /** Run what's due (retries, deliveries whose runner crashed). Only dispatchers that store deliveries have it. */
+  sweep?(run: RunDelivery, options?: { limit?: number }): Promise<SweepResult>;
+  /** Put a failed job back in line. `false` when there's no failed job with that id. Only dispatchers that store them. */
+  retry?(id: string): Promise<boolean>;
 }
 
 /** What `onError` gets with a failure after commit. `delivery` and `attempt` are set when one listener's delivery failed. */
@@ -359,7 +373,8 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
-  events?: Dispatcher;
+  /** Where listeners' work goes after commit: `inProcess()` (default) or a durable transport like `outbox(db)`. */
+  jobs?: Dispatcher;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
   /**
@@ -488,7 +503,7 @@ export interface Overrides {
   services?: object;
   /** Merged over the registry's config, section by section. */
   config?: object;
-  events?: Dispatcher;
+  jobs?: Dispatcher;
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   record?: (envelope: Envelope) => void;
@@ -502,23 +517,41 @@ export interface RegisteredListener extends Registered {
   event: EventDef;
 }
 
+/** `registry.jobs`: what you call from a queue consumer, a cron, or a script. */
+export interface Jobs {
+  /**
+   * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
+   * Resolves `"done"` or `"failed"` (acknowledge both), throws when a retry might help.
+   */
+  run(job: Job, options?: { attempt?: number }): Promise<DeliveryOutcome>;
+  /**
+   * Run what your transport has due, from a cron or an interval: `await registry.jobs.sweep()`. With `outbox(db)`, that's
+   * retries whose backoff is over and jobs whose runner crashed. Transports that store nothing resolve zeros.
+   */
+  sweep(options?: { limit?: number }): Promise<SweepResult>;
+  /**
+   * Put a failed job back in line with a fresh set of attempts. `false` when no failed job has that id (it's pending,
+   * running, done, or never existed). Throws when your transport stores no jobs, like `inProcess()`.
+   */
+  retry(id: string): Promise<boolean>;
+}
+
 /** What `createRegistry` returns. `Cf` is your config's type, so tests can override parts of it. */
 export interface Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> {
   /** The modules you registered (typed), for adapters that build typed routers. */
   readonly modules: Mods;
   /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
   as(scope: S): Caller<S>;
-  /** Everything the registry can do. Adapters read this. */
-  readonly functions: readonly RegisteredFn[];
-  readonly events: readonly RegisteredEvent[];
-  readonly listeners: readonly RegisteredListener[];
+  /** Everything you registered, with ids. Adapters and plugins read this. */
+  readonly definitions: {
+    readonly functions: readonly RegisteredFn[];
+    readonly events: readonly RegisteredEvent[];
+    readonly listeners: readonly RegisteredListener[];
+  };
   /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
   idOf(fnOrEvent: object): string;
-  /**
-   * Run one stored delivery (queue consumers): `await registry.deliver(message.body, { attempt: message.attempts })`.
-   * Resolves `"done"` or `"failed"` (acknowledge both), throws when a retry might help.
-   */
-  deliver: RunDelivery;
+  /** The background work your `jobs` transport holds. */
+  readonly jobs: Jobs;
   /** @internal used by `logic-sdk/testing` */
   readonly [INTERNAL]: {
     options: RegistryOptions<Mods>;
@@ -640,7 +673,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const database = o.database ?? options.database;
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
-  const dispatcher = o.events ?? options.events ?? inProcess();
+  const dispatcher = o.jobs ?? options.jobs ?? inProcess();
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
@@ -903,11 +936,16 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       run: (fn: Fn, input?: unknown, options?: RunOptions) =>
         invoke(fn, input, enter({ scope, depth: -1 }, options), ["query", "mutation", "action"]), // depth 0
     }),
-    functions,
-    events,
-    listeners,
+    definitions: { functions, events, listeners },
     idOf,
-    deliver,
+    jobs: {
+      run: deliver,
+      sweep: async (options) => (await dispatcher.sweep?.(deliver, options)) ?? { done: 0, failed: 0, retrying: 0 },
+      async retry(id) {
+        if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
+        return dispatcher.retry(id);
+      },
+    },
     [INTERNAL]: {
       options,
       config,

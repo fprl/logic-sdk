@@ -1,6 +1,6 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, RunDelivery } from "./index.ts";
+import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, RunDelivery, SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -55,7 +55,7 @@ export const outboxTable = pgTable(
     /** The delivery id, `<event id>:<listener id>`. */
     id: text("id").primaryKey(),
     delivery: jsonb("delivery").$type<Delivery>().notNull(),
-    /** `failed`: out of attempts, or a rule said no. Retrying is your call (`events.retry(id)`). */
+    /** `failed`: out of attempts, or a rule said no. Retrying is your call (`registry.jobs.retry(id)`). */
     status: text("status").$type<"pending" | "failed">().notNull().default("pending"),
     /** Incremented when a runner claims it, so a crash still uses an attempt. */
     attempts: integer("attempts").notNull().default(0),
@@ -76,21 +76,12 @@ export interface OutboxOptions {
   backoff?: (attempt: number) => number;
 }
 
-export interface SweepResult {
-  done: number;
-  failed: number;
-  retrying: number;
-}
-
-/** The outbox dispatcher, plus what you run yourself: `sweep` from a cron or an interval, `retry` for a failed row. */
+/** The outbox transport. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
 export interface Outbox extends Dispatcher {
-  /**
-   * Run what's due: retries whose backoff is over, and deliveries whose runner crashed (lease expired).
-   * Claims one at a time, so every claim gets a full lease.
-   */
-  sweep(registry: { deliver: RunDelivery }, options?: { limit?: number }): Promise<SweepResult>;
-  /** Put a failed delivery back in line, with a fresh set of attempts. */
-  retry(id: string): Promise<void>;
+  /** Retries whose backoff is over and deliveries whose runner crashed (lease expired), claimed one at a time. */
+  sweep(run: RunDelivery, options?: { limit?: number }): Promise<SweepResult>;
+  /** Put a failed row back in line, with a fresh set of attempts. `false` when no failed row has that id. */
+  retry(id: string): Promise<boolean>;
 }
 
 /** Anything Drizzle that can run these queries: your database, or the mutation's transaction. */
@@ -102,9 +93,8 @@ type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "d
  * left behind. At least once: a crash between a listener finishing and its row being deleted runs it again.
  *
  * ```ts
- * const events = outbox(db);
- * const registry = createRegistry({ modules, database: drizzleAdapter(db), events });
- * setInterval(() => events.sweep(registry), 60_000); // or a cron
+ * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: outbox(db) });
+ * setInterval(() => registry.jobs.sweep(), 60_000); // or a cron
  * ```
  */
 export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
@@ -147,7 +137,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async deliver(deliveries: Delivery[], run: RunDelivery) {
       for (const d of deliveries) await settle(d, 1, run);
     },
-    async sweep(registry, { limit = 100 } = {}) {
+    async sweep(run, { limit = 100 } = {}) {
       const result: SweepResult = { done: 0, failed: 0, retrying: 0 };
       for (let i = 0; i < limit; i++) {
         const due = db
@@ -163,12 +153,18 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .where(inArray(t.id, due))
           .returning({ delivery: t.delivery, attempts: t.attempts });
         if (!row) break;
-        result[await settle(row.delivery, row.attempts, registry.deliver)]++;
+        result[await settle(row.delivery, row.attempts, run)]++;
       }
       return result;
     },
+    /** Failed rows only: a pending one belongs to its runner or a sweep, and resetting it could run it twice at once. */
     async retry(id) {
-      await db.update(t).set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null }).where(eq(t.id, id));
+      const revived = await db
+        .update(t)
+        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null })
+        .where(and(eq(t.id, id), eq(t.status, "failed")))
+        .returning({ id: t.id });
+      return revived.length > 0;
     },
   };
 }

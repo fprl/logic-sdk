@@ -45,18 +45,26 @@ export { outboxTable } from "logic-sdk/drizzle";
 // registry.ts
 import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
 
-export const events = outbox(db);
-export const registry = createRegistry({ modules, database: drizzleAdapter(db), events });
+export const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: outbox(db) });
 
 // a cron or an interval: what a crash or a failure left behind
-await events.sweep(registry);
+await registry.jobs.sweep();
+```
+
+On Workers, build it per invocation and sweep from a Cron Trigger:
+
+```ts
+export default {
+  fetch: app.fetch,
+  scheduled: (_controller, env, ctx) => ctx.waitUntil(makeRegistry(env, ctx).jobs.sweep()),
+};
 ```
 
 - **After commit, the request runs them** (through `waitUntil` on serverless), and deletes each row once its listener is done.
-- **A failure keeps the row** with the error and a backoff (`e^attempt` seconds: 3, 7, 20, 55… about 3.5 hours over 10 tries); `sweep` runs it when it's due. After 10 attempts (`maxAttempts`) it's `failed`.
+- **A failure keeps the row** with the error and a backoff (`e^attempt` seconds: 3, 7, 20, 55… about 3.5 hours over 10 tries); `registry.jobs.sweep()` runs it when it's due. After 10 attempts (`maxAttempts`) it's `failed`.
 - **A rule saying no is `failed` at once:** a domain error other than `conflict`, or a payload that no longer matches its schema. Retrying can't help.
-- **A crash is a lease running out.** A runner owns a row for `lease` seconds (default 300, longer than your slowest listener); after that, `sweep` takes it over. Completion writes are fenced, so a slow runner can't undo a newer one.
-- **Failed rows are yours to query** with Drizzle (`status = 'failed'`, `last_error`), and `events.retry(id)` puts one back in line.
+- **A crash is a lease running out.** A runner owns a row for `lease` seconds (default 300, longer than your slowest listener); after that, `registry.jobs.sweep()` takes it over. Completion writes are fenced, so a slow runner can't undo a newer one.
+- **Failed rows are yours to query** with Drizzle (`status = 'failed'`, `last_error`), and `registry.jobs.retry(id)` puts one back in line. It only touches failed rows (a pending one belongs to its runner) and returns `false` when there's none with that id.
 - **At least once.** A crash between a listener finishing and its row being deleted runs it again, so listeners must be idempotent: dedupe on `ctx.event.id`.
 
 ## Not D1, not HTTP drivers

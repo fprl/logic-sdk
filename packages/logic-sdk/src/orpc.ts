@@ -43,7 +43,7 @@ export function toORPCRouter<S extends object, Mods extends Record<string, objec
   const base = os.$context<ORPCContext<S>>().$config({ disableInputValidation: true, disableOutputValidation: true });
   const router: Record<string, Record<string, unknown>> = {};
 
-  for (const f of registry.functions) {
+  for (const f of registry.definitions.functions) {
     if (!f.exposed) continue;
     let b = f.fn.input ? base.input(f.fn.input) : base;
     if (f.fn.output) b = b.output(f.fn.output) as any;

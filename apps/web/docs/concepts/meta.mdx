@@ -36,4 +36,4 @@ createRegistry({
 });
 ```
 
-Adapters read it from `registry.functions`, each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
+Adapters read it from `registry.definitions.functions`, each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
