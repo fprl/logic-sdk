@@ -1,6 +1,6 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, Runner, SweepResult } from "./index.ts";
+import { UnknownJob, type DatabaseAdapter, type Delivery, type DeliveryOutcome, type Dispatcher, type Runner, type SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -17,9 +17,10 @@ export type DrizzleReader<Db> = Omit<
 >;
 
 /**
- * Use a Drizzle database for mutations. Needs a driver with interactive transactions
- * (node-postgres, postgres.js, PGlite, Neon websocket, Hyperdrive, better-sqlite3, libsql...).
- * Not D1 or HTTP drivers.
+ * Use a Drizzle database for mutations. Needs a driver with async interactive transactions: node-postgres, postgres.js,
+ * PGlite, Neon websocket, Hyperdrive, libsql. Not D1 or HTTP drivers, and not Drizzle's synchronous SQLite drivers
+ * (better-sqlite3, bun:sqlite, node:sqlite, Durable Objects): they commit before an async mutation finishes, and
+ * Drizzle's types already reject them here.
  */
 export function drizzleAdapter<Db extends Transactional>(db: Db): DatabaseAdapter<Db, DrizzleTx<Db>> {
   return {
@@ -75,11 +76,15 @@ export interface OutboxOptions {
   lease?: number;
   /**
    * Hand jobs to a queue instead of running them here: `outbox(db, { via: cloudflareQueue(env.JOBS) })`. The row makes the
-   * handoff durable; after it, the queue owns retries and its dead-letter queue. `maxAttempts` and `backoff` then count
-   * failed handoffs. A send that lands but whose row isn't deleted is sent again, so a job can run twice, even at once.
+   * handoff durable, and the jobs of one commit go in one send. After it, the queue runs them and redelivers what throws;
+   * a job that fails for good comes back here as a failed row. A send that lands but whose row isn't deleted is sent
+   * again, so a job can run twice, even at once.
    */
   via?: Dispatcher;
-  /** Tries before a delivery is marked failed. Default 10: about 3.5 hours of backoff in all. */
+  /**
+   * Failed sends to `via`, and runs of jobs this code can't load (an unknown listener), before the row is marked failed.
+   * Default 10: about 3.5 hours of backoff in all. A listener's own tries are its `attempts`.
+   */
   maxAttempts?: number;
   /** Seconds to wait after a failed try. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
   backoff?: (attempt: number) => number;
@@ -112,53 +117,86 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   const backoff = options.backoff ?? ((attempt: number) => Math.exp(Math.min(attempt, 10)));
   const t = outboxTable;
   const inSeconds = (seconds: number) => sql`now() + make_interval(secs => ${seconds})`;
-  /** Writes only land if no one has claimed the row since: a slow listener can't undo a newer runner's work. */
-  const mine = (id: string, attempt: number) => and(eq(t.id, id), eq(t.attempts, attempt));
+  /**
+   * Writes only land on rows still pending under this claim: a slow runner can't undo a newer runner's work, and a
+   * handoff that finishes late can't delete the failure a consumer already recorded.
+   */
+  const mine = (ids: string[], attempt: number) => and(inArray(t.id, ids), eq(t.attempts, attempt), eq(t.status, "pending"));
   const via = options.via;
 
-  /** Run it here, or hand it to `via`: then it's done once the queue has it. */
-  async function attemptOnce(delivery: Delivery, attempt: number, runner: Runner): Promise<DeliveryOutcome> {
-    if (!via) return runner.run(delivery, { attempt });
-    try {
-      await via.deliver([delivery], runner);
-      return "done";
-    } catch (e) {
-      runner.report(e, delivery, attempt); // the queue's failure, not the listener's: run never saw it
-      throw e;
+  /** A try that threw: back off, or mark failed once out of tries. */
+  async function retryLater(ids: string[], attempt: number, limit: number, error: unknown): Promise<"failed" | "retrying"> {
+    const lastError = messageOf(error);
+    if (attempt >= limit) {
+      await db.update(t).set({ status: "failed", lastError }).where(mine(ids, attempt));
+      return "failed";
     }
+    await db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError }).where(mine(ids, attempt));
+    return "retrying";
   }
 
-  /** Try one claimed delivery and record how it went. */
-  async function settle(delivery: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
+  /**
+   * Run one claimed job here and record how it went. A listener's `attempts` decide when it's `failed` (the core resolves
+   * it); `maxAttempts` only stops jobs this code can't run.
+   */
+  async function run(job: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
-      outcome = await attemptOnce(delivery, attempt, runner);
+      outcome = await runner.run(job, { attempt });
     } catch (e) {
-      const lastError = e instanceof Error ? e.message : String(e);
-      if (attempt >= maxAttempts) {
-        await db.update(t).set({ status: "failed", lastError }).where(mine(delivery.id, attempt));
-        return "failed";
-      }
-      await db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError }).where(mine(delivery.id, attempt));
-      return "retrying";
+      return retryLater([job.id], attempt, e instanceof UnknownJob ? maxAttempts : Infinity, e);
     }
-    if (outcome === "done" || outcome === "discarded") {
-      await db.delete(t).where(mine(delivery.id, attempt));
-      return outcome;
+    if (outcome === "failed") {
+      await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine([job.id], attempt));
+      return "failed";
     }
-    await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine(delivery.id, attempt));
-    return "failed";
+    await db.delete(t).where(mine([job.id], attempt));
+    return outcome;
   }
 
+  /** Hand claimed jobs to `via` in one send. Done once the queue has them; a failed send keeps them all for a retry. */
+  async function handOff(queue: Dispatcher, jobs: Delivery[], attempt: number, runner: Runner): Promise<keyof SweepResult> {
+    const ids = jobs.map((j) => j.id);
+    try {
+      await queue.deliver(jobs, runner);
+    } catch (e) {
+      for (const job of jobs) runner.report(e, job, attempt); // the queue's failure, not the listener's: run never saw it
+      return retryLater(ids, attempt, maxAttempts, e);
+    }
+    await db.delete(t).where(mine(ids, attempt));
+    return "done";
+  }
+
+  const settle = (job: Delivery, attempt: number, runner: Runner) => (via ? handOff(via, [job], attempt, runner) : run(job, attempt, runner));
+
   return {
-    /** Inside the mutation's transaction: one row per delivery, already claimed by this request for its first try. */
+    /** Holds `delay`s itself, so `via`'s limits on them don't apply. Must share the transaction it writes in. */
+    check({ database }) {
+      if (database && database.db !== db)
+        throw new Error(
+          "[logic-sdk] outbox(db) must use the same database as `database`: jobs are written in your mutation's transaction. " +
+            "For a queue in another database, use it as `via`.",
+        );
+    },
+    /** Inside the mutation's transaction: one row per job. Due now: claimed by this request for its first try. Delayed: left for a sweep. */
     async enqueue(tx: unknown, deliveries: Delivery[]) {
-      await (tx as PgClient).insert(t).values(deliveries.map((d) => ({ id: d.id, delivery: d, attempts: 1, availableAt: inSeconds(lease) })));
+      await (tx as PgClient).insert(t).values(
+        deliveries.map((d) =>
+          d.runAt
+            ? { id: d.id, delivery: d, attempts: 0, availableAt: new Date(d.runAt) }
+            : { id: d.id, delivery: d, attempts: 1, availableAt: inSeconds(lease) },
+        ),
+      );
     },
-    /** After commit, in this request: the first try (or handoff) of each. */
+    /** After commit, in this request: the first try of each job that's due now, or one handoff for all of them. */
     async deliver(deliveries, runner) {
-      for (const d of deliveries) await settle(d, 1, runner);
+      const due = deliveries.filter((d) => !d.runAt);
+      if (!due.length) return;
+      if (via) await handOff(via, due, 1, runner);
+      // one job's bookkeeping error (a lost connection) mustn't stop the others: the sweep sorts it out
+      else for (const d of due) await run(d, 1, runner).catch((e) => runner.report(e, d, 1));
     },
+    /** One at a time, so a job the queue rejects (too big) can't hold back the others. */
     async sweep(runner, { limit = 100 } = {}) {
       const result: SweepResult = { done: 0, failed: 0, discarded: 0, retrying: 0 };
       for (let i = 0; i < limit; i++) {
@@ -188,5 +226,15 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
         .returning({ id: t.id });
       return revived.length > 0;
     },
+    /** A job that failed for good in a queue consumer: keep it as a failed row, so you can query it and `retry` it. */
+    async fail(job, error) {
+      const lastError = messageOf(error);
+      await db
+        .insert(t)
+        .values({ id: job.id, delivery: job, status: "failed", lastError })
+        .onConflictDoUpdate({ target: t.id, set: { status: "failed", lastError } });
+    },
   };
 }
+
+const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));

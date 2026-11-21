@@ -126,11 +126,12 @@ mutation({ input: z.object({}), handler: async ({ emit }) => {
 } });
 listener({ event: () => transforming, handler: async (_, { at }) => { const d: Date = at; void d; } });
 import { createTestRegistry } from "../src/testing.ts";
-void createTestRegistry(registry).transaction(async (tx) => {
-  tx.stub(getOne, async (_, input) => ({ id: input.id, n: 2 }));
+{
+  const t = createTestRegistry(registry);
+  t.stub(getOne, async (_, input) => ({ id: input.id, n: 2 }));
   // @ts-expect-error stub must return the function's output type
-  tx.stub(getOne, async () => ({ nope: true }));
-});
+  t.stub(getOne, async () => ({ nope: true }));
+}
 
 // meta: one shape declared in init, values set per function, typed in wrap
 {

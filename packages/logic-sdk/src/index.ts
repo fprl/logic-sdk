@@ -114,6 +114,8 @@ export interface Delivery<P = unknown, S = object> {
   /** The listener's id, `"<module>.<id or export>"`. */
   listener: string;
   envelope: Envelope<P, S>;
+  /** When it may run (ISO), for a listener with a `delay`. Absent: right away. */
+  runAt?: string;
 }
 
 /** One unit of background work, what `registry.jobs` runs, sweeps and retries. Today every job is a delivery. */
@@ -143,6 +145,10 @@ export interface Listener<O = unknown> {
   readonly id?: string;
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
   readonly event: () => EventDef<unknown, O>;
+  /** Tries in total, the first included. Default 1. */
+  readonly attempts?: number;
+  /** Seconds after the event before the first try. Default 0. */
+  readonly delay?: number;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }
@@ -233,8 +239,8 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 type NoInput = StandardSchemaV1<undefined, undefined>;
 type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
   /**
-   * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
-   * the export: queued jobs keep finding this code. Defaults to the export name.
+   * Stable id, local to its module: in a `notifications` module, `id: "send"` is `notifications.send`. Jobs store it,
+   * so set it before you rename the export and queued jobs keep finding this code. Defaults to the export name.
    */
   id?: string;
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
@@ -352,6 +358,8 @@ export interface Runner {
 }
 
 export interface Dispatcher {
+  /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
+  check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
   enqueue?(tx: unknown, deliveries: Delivery[]): Promise<void>;
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
@@ -360,17 +368,27 @@ export interface Dispatcher {
   sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed job back in line. `false` when there's no failed job with that id. Only dispatchers that store them. */
   retry?(id: string): Promise<boolean>;
+  /**
+   * Keep a job that failed for good after it left the adapter: `registry.jobs.run` calls it from a queue consumer, so
+   * the outbox stores the failure Cloudflare would otherwise drop. Not called for jobs the adapter ran itself.
+   */
+  fail?(job: Job, error: unknown): Promise<void>;
 }
 
-/** What `onError` gets with a failure after commit. `delivery` and `attempt` are set when one listener's delivery failed. */
+/** What `onError` gets with a failure after commit. `delivery`, `attempt` and `outcome` are set when a listener's job failed. */
 export interface FailureInfo {
   listener: string;
   envelope: Envelope | undefined;
   delivery?: string;
   attempt?: number;
+  /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
+  outcome?: "retry" | "failed" | "discarded";
 }
 
-/** Default dispatcher: delivers right after commit, in this process, once. Lost on crash: use an outbox when that matters. */
+/**
+ * Default dispatcher: delivers right after commit, in this process, once, ignoring `attempts` and `delay` (like Laravel's
+ * sync queue). Lost on crash: use an outbox when that matters.
+ */
 export const inProcess = (): Dispatcher => ({
   async deliver(deliveries, { run }) {
     for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
@@ -501,8 +519,8 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /** Something that happened. Emitted by mutations, delivered after commit. */
     event: <S extends Schema>(def: {
       /**
-       * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
-       * the export: queued jobs keep finding this code. Defaults to the export name.
+       * Stable id, local to its module: in a `notifications` module, `id: "send"` is `notifications.send`. Jobs store it,
+       * so set it before you rename the export and queued jobs keep finding this code. Defaults to the export name.
        */
       id?: string;
       payload: S;
@@ -514,18 +532,29 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
      */
     listener: <O>(def: {
       /**
-       * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
-       * the export: queued jobs keep finding this code. Defaults to the export name.
+       * Stable id, local to its module: in a `notifications` module, `id: "send"` is `notifications.send`. Jobs store it,
+       * so set it before you rename the export and queued jobs keep finding this code. Defaults to the export name.
        */
       id?: string;
       /** The event it reacts to, as a thunk so modules can import each other's barrels without cycles. */
       event: () => EventDef<unknown, O>;
+      /**
+       * Tries in total, the first included, like Laravel's `$tries`. Default 1: a retry repeats side effects, so opt in.
+       * Once they're used, the job is `failed` (kept by the outbox, retried with `registry.jobs.retry(id)`).
+       */
+      attempts?: number;
+      /** Seconds after the event before the first try. `inProcess()` ignores it, like Laravel's sync queue. */
+      delay?: number;
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
-      const { id, event, meta, handler } = def;
+      const { id, event, attempts, delay, meta, handler } = def;
+      if (attempts !== undefined && !(Number.isInteger(attempts) && attempts >= 1))
+        throw new Error(`[logic-sdk] listener attempts must be a whole number of tries, 1 or more (got ${attempts}).`);
+      if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
+        throw new Error(`[logic-sdk] listener delay must be seconds, 0 or more (got ${delay}).`);
       // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
-      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, meta: meta as Listener["meta"], handler });
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, meta: meta as Listener["meta"], handler });
     },
   };
 }
@@ -563,6 +592,9 @@ export interface Overrides {
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   record?: (envelope: Envelope) => void;
+  onError?: (error: unknown, info: FailureInfo) => void;
+  /** Present and undefined turns the registry's off. */
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 export interface RegisteredEvent extends Registered {
@@ -577,7 +609,8 @@ export interface RegisteredListener extends Registered {
 export interface Jobs {
   /**
    * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
-   * Resolves `"done"` or `"failed"` (acknowledge both), throws when a retry might help.
+   * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
+   * listener has tries left. A `failed` job goes to your adapter's `fail` (the outbox keeps it).
    */
   run(job: Job, options?: { attempt?: number }): Promise<DeliveryOutcome>;
   /**
@@ -652,6 +685,9 @@ const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 class StalePayload extends Error {}
+
+/** A job this code can't run: an unknown kind, or a listener that was renamed or removed. A retry after a deploy might help. */
+export class UnknownJob extends Error {}
 
 /**
  * Plain data, what survives JSON: plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped).
@@ -738,14 +774,16 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
   const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
+  const keepFailed = dispatcher.fail?.bind(dispatcher);
   const jobScope = options.jobs?.scope;
   if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Listeners run as a scope, so rebuild it from what store saved.");
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
   const attempts = Math.max(1, options.retry?.attempts ?? 3);
+  const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
-    options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.listener} failed`, e));
+    o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.listener} failed`, e));
   const report = (e: unknown, info: FailureInfo) => {
     try {
       reportRaw(e, info);
@@ -762,6 +800,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   for (const l of listeners)
     if (!l.event || !ids.has(l.event))
       throw new Error(`[logic-sdk] Listener ${l.id} listens to an event that isn't registered in any module.`);
+  dispatcher.check?.({ listeners, database });
 
   const idOf = (x: object) => {
     const id = ids.get(x);
@@ -804,25 +843,45 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), { listener: "(dispatcher)", envelope: tooDeep });
       return [];
     }
-    return envelopes.flatMap((e) => (byEvent.get(e.name) ?? []).map((l) => ({ kind: "delivery" as const, id: `${l.id}@${e.id}`, listener: l.id, envelope: e })));
+    return envelopes.flatMap((e) =>
+      (byEvent.get(e.name) ?? []).map((l): Delivery => {
+        const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e };
+        const delay = l.listener.delay;
+        if (delay) job.runAt = new Date(Date.parse(e.occurredAt) + delay * 1000).toISOString();
+        return job;
+      }),
+    );
   }
 
-  /** Run one listener for one event. Reports every failure; throws only when a retry might help. */
-  async function deliver(delivery: Delivery, options: { attempt?: number } = {}): Promise<DeliveryOutcome> {
+  /**
+   * Run one listener for one event. Reports every failure; throws only when a retry might help and the listener has
+   * tries left. `fail` keeps a job that failed for good, when it ran outside its adapter (a queue consumer).
+   */
+  async function deliver(delivery: Delivery, options: { attempt?: number } = {}, fail?: (error: unknown) => Promise<void>): Promise<DeliveryOutcome> {
     const { envelope } = delivery;
     const attempt = options.attempt ?? 1;
     const info: FailureInfo = { listener: delivery.listener, envelope, delivery: delivery.id, attempt };
+    const failed = async (error: unknown) => {
+      report(error, { ...info, outcome: "failed" });
+      await fail?.(error);
+      return "failed" as const;
+    };
     if (delivery.kind !== "delivery") {
-      const e = new Error(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
-      report(e, info);
+      const e = new UnknownJob(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
+      report(e, { ...info, outcome: "retry" });
       throw e;
     }
     const l = listenerById.get(delivery.listener);
     if (!l) {
-      const e = new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
-      report(e, info);
+      const e = new UnknownJob(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
+      report(e, { ...info, outcome: "retry" });
       throw e;
     }
+    // read from the code, like Rails' retry_on: a deploy that changes it applies to jobs already queued
+    const attempts = l.listener.attempts ?? 1;
+    // its last try was claimed but never finished: a crash, or a listener slower than the lease (Laravel checks this too)
+    if (attempt > attempts)
+      return failed(new Error(`[logic-sdk] ${delivery.id} has used its ${attempts} attempt(s): the last one never finished (crashed or outlived the lease).`));
     const event = eventByName.get(envelope.name);
     try {
       let scope = envelope.scope;
@@ -830,7 +889,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         const loaded = await jobScope.load(scope);
         if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${delivery.id}. Return the scope, or null to discard the job.`);
         if (loaded === null) {
-          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${delivery.id}, so it was discarded.`), info);
+          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${delivery.id}, so it was discarded.`), { ...info, outcome: "discarded" });
           return "discarded";
         }
         scope = loaded;
@@ -848,8 +907,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       });
       return "done";
     } catch (error) {
-      report(error, info);
-      if (error instanceof StalePayload || (isDomainError(error) && error.kind !== "conflict")) return "failed";
+      const retrying = attempt < attempts && !(error instanceof StalePayload) && !(isDomainError(error) && error.kind !== "conflict");
+      if (!retrying) return failed(error);
+      report(error, { ...info, outcome: "retry" });
       throw error;
     }
   }
@@ -1002,9 +1062,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       const delivery = (async () => dispatcher.deliver(deliveries, runner))().catch((e) =>
         report(e, { listener: "(dispatcher)", envelope: outbox[0] }),
       );
-      if (options.waitUntil) {
+      if (waitUntil) {
         try {
-          options.waitUntil(delivery);
+          waitUntil(delivery);
           return;
         } catch (e) {
           report(e, { listener: "(waitUntil)", envelope: outbox[0] });
@@ -1026,7 +1086,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     definitions: { functions, events, listeners },
     idOf,
     jobs: {
-      run: deliver,
+      run: (job, options) => deliver(job, options, keepFailed && ((error) => keepFailed(job, error))),
       sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
       async retry(id) {
         if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);

@@ -1,5 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
+import { Database } from "bun:sqlite";
 import { eq, sql } from "drizzle-orm";
+import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import { drizzle } from "drizzle-orm/pglite";
 import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, test } from "bun:test";
@@ -38,6 +40,7 @@ let next: "ok" | "throw" | "deny" | "lose-lease" = "ok";
 const ran: string[] = [];
 const react = listener({
   event: () => added,
+  attempts: 2,
   async handler(ctx, { name }) {
     ran.push(`${name}#${ctx.event.attempt}`);
     if (next === "throw") throw new Error("smtp down");
@@ -48,7 +51,7 @@ const react = listener({
 
 const rows = () => db.select().from(outboxTable);
 const makeDue = () => db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` });
-function setup(jobs: Dispatcher = outbox(db, { maxAttempts: 2 })) {
+function setup(jobs: Dispatcher = outbox(db)) {
   const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs: { adapter: jobs }, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }
@@ -148,11 +151,12 @@ test("a job whose scope can't be loaded is discarded: its row is deleted and the
   expect(ran).toEqual(["lamp#1"]);
 });
 
-/** A queue that records what it got, or fails while `down`. */
+/** A queue that records what it got (and in how many sends), or fails while `down`. */
 const fakeVia = () => {
   const got: string[] = [];
-  const via = { down: false, got, async deliver(jobs: Delivery[]) {
+  const via = { down: false, got, sends: 0, async deliver(jobs: Delivery[]) {
     if (via.down) throw new Error("queue unavailable");
+    via.sends++;
     got.push(...jobs.map((j) => j.id));
   } };
   return via;
@@ -174,7 +178,7 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
     modules: { x: { added, add, react } },
     database: drizzleAdapter(db),
     onError: (_e, info) => reported.push(info),
-    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }) },
+    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }) }, // two failed sends, then failed
   });
   via.down = true;
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
@@ -188,4 +192,84 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 }); // done: handed off
   expect(via.got).toEqual([row!.id]);
   expect(await rows()).toEqual([]);
+});
+
+test("a last try that never finished is failed on the next sweep, without running again", async () => {
+  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
+  await app.run(add, { name: "rug" });
+  await db.update(outboxTable).set({ attempts: 2 }); // it died on its second and last try too
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
+  expect(ran).toEqual([]);
+  expect(await rows()).toMatchObject([{ status: "failed", attempts: 3 }]);
+});
+
+test("delay: the row waits unclaimed until it's due, then a sweep runs it", async () => {
+  const later = listener({ event: () => added, delay: 60, async handler(_ctx, { name }) { ran.push(`later ${name}`); } });
+  const registry = createRegistry({ modules: { x: { added, add, react, later } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(ran).toEqual(["desk#1"]); // react ran; later waits
+  const [row] = await rows();
+  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.later@/), status: "pending", attempts: 0 });
+  expect(row!.availableAt.getTime() - Date.now()).toBeGreaterThan(55_000);
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["desk#1", "later desk"]);
+});
+
+test("via: the jobs of one commit go in one send", async () => {
+  const also = listener({ event: () => added, async handler() {} });
+  const via = fakeVia();
+  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { via }) } });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(via.sends).toBe(1);
+  expect(via.got).toHaveLength(2);
+  expect(await rows()).toEqual([]);
+});
+
+test("via: a job that fails for good in the consumer comes back as a failed row, even if the handoff's delete lands after", async () => {
+  let consumer: ReturnType<typeof setup>["registry"] | undefined;
+  const via = { async deliver(jobs: Delivery[]) {
+    for (const job of jobs) await consumer!.jobs.run(job, { attempt: 2 }); // the queue ran it before this request deleted the row
+  } };
+  const { app, registry } = setup(outbox(db, { via }));
+  consumer = registry;
+  next = "throw";
+  await app.run(add, { name: "lamp" });
+  const [row] = await rows();
+  expect(row).toMatchObject({ status: "failed", lastError: "smtp down" });
+  next = "ok";
+  expect(await registry.jobs.retry(row!.id)).toBe(true);
+});
+
+test("outbox(db) must share the registry's database: it writes in the mutation's transaction", () => {
+  const other = drizzle({ client: pg });
+  expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: outbox(other) } })).toThrow(/must use the same database as `database`/);
+});
+
+test("Drizzle's synchronous SQLite drivers don't type-check: they commit before an async mutation finishes", () => {
+  // @ts-expect-error Drizzle: "Sync drivers can't use async functions in transactions!"
+  drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
+});
+
+test("a job this code can't run (its listener was removed) stops after maxAttempts", async () => {
+  const { registry } = setup(outbox(db, { maxAttempts: 2 }));
+  const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
+  await db.insert(outboxTable).values({ id: "x.removed@e", delivery: { kind: "delivery", id: "x.removed@e", listener: "x.removed", envelope } });
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 1 });
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
+});
+
+test("a listener's attempts beyond maxAttempts still get their tries", async () => {
+  const stubborn = listener({ event: () => added, attempts: 4, async handler() { ran.push("stubborn"); throw new Error("still down"); } });
+  const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { maxAttempts: 2 }) }, onError: () => {} });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  for (let i = 0; i < 3; i++) {
+    await makeDue();
+    await registry.jobs.sweep();
+  }
+  expect(ran).toEqual(["stubborn", "stubborn", "stubborn", "stubborn"]);
+  expect(await rows()).toMatchObject([{ status: "failed", attempts: 4 }]);
 });
