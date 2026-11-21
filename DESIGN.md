@@ -201,11 +201,11 @@ createRegistry({ modules, plugins: [audit(), rateLimit({ store })] });  // a val
 Configured once, where the registry is created:
 
 ```ts
-createRegistry({ modules, jobs: inProcess() });                                // default: zero infra, lost on a crash
-createRegistry({ modules, jobs: cloudflareQueue(env.EVENTS) });                // sent after commit: the Rails/Laravel model, lossy
-createRegistry({ modules, jobs: outbox(db) });                                 // durable, Postgres only
-createRegistry({ modules, jobs: outbox(db, { via: cloudflareQueue(env.EVENTS) }) }); // durable handoff, plus queue retries, DLQ, concurrency
-createRegistry({ modules, jobs: pgBoss(boss) });                               // transactional natively, no outbox needed
+jobs: { adapter: inProcess() }                                  // default: zero infra, lost on a crash
+jobs: { adapter: cloudflareQueue(env.JOBS) }                    // sent after commit: the Rails/Laravel model, lossy
+jobs: { adapter: outbox(db) }                                   // durable, Postgres only
+jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }) } // durable handoff, plus queue retries, DLQ, concurrency
+jobs: { adapter: pgBoss(boss) }                                 // transactional natively, no outbox needed
 ```
 
 - **Ship the lossy mode.** It's the Rails 8.2 and Laravel `after_commit` model, and fine for consequences you can lose (a live update, a cache warm-up). Fizzy uses it on purpose.
@@ -248,6 +248,19 @@ export const expireCarts = cron({
 
 Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retention.
 
+**Both live on the listener; the difference is fields vs `meta`.** Correctness options are portable fields (`key`, `retries`), honoured by every adapter or refused at startup. What only one adapter has and only tunes it goes in that adapter's meta namespace, typed by the adapter like `meta.ai`:
+
+```ts
+export const report = listener({
+  event: () => eventEmitted,
+  retries: 0,                                    // correctness: every adapter
+  meta: { pgBoss: { deleteAfterSeconds: 60 } },  // tuning: ignored by the others, and the result is still correct
+  handler: ...,
+});
+```
+
+Never a correctness option in `meta.<adapter>`: switching adapters would mean rewriting every listener, and `inProcess()` would ignore it in tests. Fable caught this in our own draft (`meta: { pgBoss: { policy: "key_strict_fifo" } }` is `key`). Precedent is split: Laravel's `WithoutOverlapping($key)` is job middleware that works on any driver (from its docs, not re-checked), while Rails leaves it to the adapter (Solid Queue's `limits_concurrency key:`, [README](https://github.com/rails/solid_queue)). We follow Laravel. Flat fields, not an `options: {}` group, like every definer and like Inngest `createFunction({ retries })`, Trigger.dev `task({ retry, queue })` and Oban `use Oban.Worker, max_attempts:`; a field nests only when it has sub-options (`retry: { attempts, backoff }`).
+
 **Not every transport supports every option.** pg-boss covers all of them, going by its docs and a real app's use (retry options per job, `singletonKey`, the `key_strict_fifo` policy, `startAfter`). Cloudflare Queues takes delay per message but retries, concurrency and the DLQ per consumer; we found no per-key ordering guarantee (unverified either way; a real app's notes say per-key FIFO needs a Durable Object or ordering in Postgres). Vercel Queues has retry callbacks, delay and idempotency keys; per-key ordering is unknown. So:
 
 - each transport declares **capabilities**
@@ -257,7 +270,7 @@ Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retent
 
 ### The delivery contract (step 1 of durable events)
 
-- **A delivery is one listener's share of one event:** `{ id: "<event id>:<listener id>", listener, envelope }`. Queues carry one message per delivery, so a failing listener retries alone and the id is the dedupe key every transport agrees on.
+- **A delivery is one listener's share of one event:** `{ kind: "delivery", id: "<listener id>@<event id>", listener, envelope }`. `kind` is stored with every job, like Rails' `job_class` and Oban's `worker` column, so jobs queued today still run once scheduled calls and cron ticks exist; a kind this version doesn't know throws, so the queue keeps it. `@`, not `:`, because BullMQ rejects custom job ids containing `:` ([job ids](https://docs.bullmq.io/guide/jobs/job-ids)). Queues carry one message per delivery, so a failing listener retries alone and the id is the dedupe key every transport agrees on.
 - **Three outcomes, not two.** `registry.jobs.run` resolves `"done"` or `"failed"` and throws only when a retry might help. Domain errors other than `conflict` (and a payload that no longer matches its schema) are `failed`: deterministic, so retrying burns attempts. Precedents split: Rails retries nothing unless `retry_on`, Inngest retries four times and offers `NonRetriableError`, Cloudflare retries three times by default. What would change it: an app where `not_found` heals on retry; then a per-listener opt-in.
 - **`attempt` comes from the transport** (`registry.jobs.run(d, { attempt: message.attempts })`), not the stored delivery, 1-based like Cloudflare's `attempts`, and listeners see it as `ctx.event.attempt`.
 - **Plain JSON at emit, for payload and scope,** in every dispatcher: a `Date` that survives `structuredClone` in-process arrives as a string through any queue and fails its schema only in production.
@@ -281,7 +294,7 @@ Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retent
 ### Naming the slot: `jobs`
 
 ```ts
-createRegistry({ modules, database, jobs: outbox(db) });             // default inProcess()
+createRegistry({ modules, database, jobs: { adapter: outbox(db), scope: { store, load } } });
 await registry.jobs.sweep();                                          // a cron or an interval
 await registry.jobs.retry(id);                                        // failed jobs only; false otherwise
 await registry.jobs.run(message.body, { attempt: message.attempts }); // a queue consumer
@@ -306,19 +319,27 @@ The slot is `jobs`, not `queue`: every method on it acts on a job, and in every 
 - `queue`: the closest second. It's the adapter's config name in Rails and Laravel, but there it holds named queues, and lanes are something we'll want (`route` below).
 - `dispatcher`, `background`: describe the mechanism or an adjective, not the thing you act on.
 
-**One value, not an options object.** Rails and Laravel spread it over several keys (adapter, connection, retries); we don't need to:
+**An object: the adapter, plus what every adapter honours.** We first shipped a single value (`jobs: outbox(db)`) on the claim that no setting survives every adapter. Reading the configs says otherwise:
 
-- **No generic option survives every transport.** Retries and the dead-letter queue belong to wrangler on Cloudflare, to `createQueue` on pg-boss, and to us only in the outbox. A top-level `maxAttempts` would be a second source of truth.
-- **Sibling fields can express nonsense** (`{ adapter: pgBoss(boss), store: outbox(db) }`); wrapping can't: `outbox(db, { via: cloudflareQueue(...) })`.
-- **Reversible:** `jobs` can accept an object later without breaking the single value.
+| | Common to every adapter | Adapter-specific | Per job, never in config |
+|---|---|---|---|
+| Laravel ([`config/queue.php`](https://github.com/laravel/laravel/blob/13.x/config/queue.php)) | `driver`, `queue`, `after_commit` | `table`, `region`, `block_for` | `$tries`, `$backoff` |
+| Rails ([configuring](https://guides.rubyonrails.org/configuring.html#configuring-active-job)) | `queue_adapter`, `default_queue_name`, `queue_name_prefix`, `enqueue_after_transaction_commit` | the adapter's own file (`config/queue.yml`) | `retry_on`, Solid Queue's `limits_concurrency` |
+| Oban ([`config.ex`](https://github.com/oban-bg/oban/blob/main/lib/oban/config.ex)) | `engine`, `queues`, `prefix`, `testing` | engine options | `max_attempts`, `unique` on the worker |
 
-Correctness options go on the listener, tuning in each transport's factory ("Options" above).
+So: lanes, commit timing and test mode are common; retries never are. Ours:
+
+- **`adapter`** (Rails' word, and ours already: `drizzleAdapter`). Its own options go in its factory, `outbox(db, { lease })`, not a `driver: "database"` string with a typed union: Laravel can use strings because its container builds the client, and we have none. The pg-boss instance, your `db`, a Worker's per-request binding come from your code, and adapters are subpaths with optional peers the core can't type.
+- **`scope`**, applied by the core in every adapter ("Before durable events ship", 4).
+- **Later `queue`**, the default lane, when lanes land. Commit timing is the contract, test mode is `createTestRegistry`.
+- **Object only, no `jobs: outbox(db)` shorthand.** Adding a shorthand later breaks no one; removing one does. Fable preferred keeping both, for brevity when there's no `scope`.
+- **Wrapping still composes adapters:** `outbox(db, { via: cloudflareQueue(...) })`, since sibling fields (`{ adapter, store }`) could express nonsense.
 
 **Lanes (multiple queues)** are normal in every stack, for isolation, priority, per-lane concurrency and retry policy. Ours is a `route` in the transport, with no core change: `cloudflareQueue({ jobs: env.JOBS, mail: env.MAIL }, { route })`, `pgBoss(boss, { route })`. `inProcess()` and plain `outbox(db)` have none; an unknown lane throws. Built with the Cloudflare and pg-boss transports, when the first app needs a second lane. **What would move the lane onto the listener** (`listener({ queue: "mail" })`): two transports implementing lanes, or routing by id prefix getting brittle.
 
 **`registry.definitions`** holds the lists (`functions`, `events`, `listeners`, later `crons`), so the registry's top level is what you call (`as`, `jobs`, `idOf`) and a new definer adds a list without taking a name there.
 
-**What would change it:** a `job()` definer (then `jobs` would name a definition and the infrastructure), or a transport that needs two values in the slot.
+**What would change it:** a `job()` definer (then `jobs` would name a definition and the infrastructure).
 
 ### Before durable events ship
 
@@ -326,21 +347,22 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 
 1. **Deliver per (event, listener), not per event.** Today one failing listener makes the healthy ones re-run on retry. Rails, Laravel and Oban all make the job the unit; a listener is our job.
 2. **Let transports acknowledge.** `deliver` gets a `dispatch` that never throws, so a queue adapter can't ack or retry a message, while `registry.dispatch` throws: two paths with different rules. One dispatch that returns per-listener results, with `inProcess` doing the swallowing.
-3. **Stable listener ids.** Ids are export names; with durable delivery they become queue or consumer names, and a rename orphans messages in flight. Inngest's function id "should not change between deploys". An optional `id`, or a CLI check on renames.
-4. **Scope at rest goes stale.** The envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Precedents split (RESEARCH.md, "Scope at rest"): Convex carries nothing, Laravel's Context carries a snapshot of what you put in it, Fizzy carries only the account and reloads it. Least machinery that's still safe, configured on the dispatcher because only durable ones store scope (`inProcess()` delivers milliseconds later in the same request):
+3. **Stable ids. Landed:** an optional `id` on every definer (`listener({ id: "send" })`), local to the module so `notifications` + `"send"` is `notifications.send`. Jobs store listener ids and event names, and a rename orphans them in flight: Rails raises `UnknownJobClassError` ([core.rb](https://github.com/rails/rails/blob/main/activejob/lib/active_job/core.rb)), Oban "unknown worker" ([worker.ex](https://github.com/oban-bg/oban/blob/main/lib/oban/worker.ex)); Inngest's function id "should not change between deploys", and Trigger.dev's task id is top-level too. A core field, not `meta`: the core reads it for lookup, dedupe and errors, and meta is what the core never reads. Local, not full: a full id would let `billing` claim `notifications.send`, and `ctx.errors` codes assume the module prefix. Duplicates throw at `createRegistry`. Renaming a module key still orphans jobs; a CLI rename check or `aliases` comes if that bites.
+4. **Scope at rest goes stale.** The envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Precedents split (RESEARCH.md, "Scope at rest"): Convex carries nothing, Laravel's Context carries a snapshot of what you put in it, Fizzy carries only the account and reloads it. Least machinery that's still safe, **landed** on the registry, not the adapter: the core applies `store` at emit and `load` in `jobs.run`, so `inProcess()` and tests exercise the same projection, and `outbox(db, { via })` never asks whose scope wins. (We first had it on each durable adapter, because only they store scope; that repeats it per factory and skips it in tests.)
 
    ```ts
-   jobs: outbox(db, {
+   jobs: {
+     adapter: outbox(db),
      scope: {
        store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId, locale: s.locale }), // optional: what's saved
        load: async (stored) => scopeFor(stored),                                             // optional: rebuilt fresh at delivery
      },
-   })
+   }
    ```
 
    - **Default: the scope as-is,** what `emit` already stores. Checked to be plain JSON at emit in every dispatcher, `inProcess()` and tests included, so a `Date` or class instance fails in tests, not in production.
    - **`store` is a projection:** keep ids, drop what shouldn't sit in an outbox table or a third-party queue (emails, session data).
-   - **`load` rebuilds fresh,** so every `ctx.run` re-checks policies with today's roles. `null` discards (recorded, reported to `onError`), a throw retries, like Rails' `discard_on` and Laravel's `DeleteWhenMissingModels`, which are opt-in too.
+   - **`load` rebuilds fresh,** so every `ctx.run` re-checks policies with today's roles. `null` discards: a `"discarded"` outcome, reported to `onError`, the outbox row deleted and counted by `sweep`. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` discard silently and are opt-in; returning `null` is the opt-in. Fable argued for `failed` instead (visible, retryable), so offboarding can't silently eat work; we followed the stacks and report it. A throw retries.
    - **`logic-sdk check` prints it** next to the delivery guarantee: "scope at rest: snapshot" or "rebuilt".
    - Crons resolve their scope in code and store nothing. What would make `load` required for at-least-once dispatchers: an app where revoking access must stop queued work (B2B offboarding with retries over days).
 5. **Old payloads after a deploy.** Payloads are validated again at delivery, so a schema change can turn queued messages into poison that retries forever. Laravel stores exhausted jobs in `failed_jobs` (`queue:retry` re-runs them) and can discard jobs whose model is gone; Oban marks jobs `discarded` after `max_attempts`; Solid Queue doesn't auto-retry a job whose process died. We need the same: a failed state you can list and retry, and a versioning rule for payloads.

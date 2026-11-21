@@ -52,7 +52,7 @@ export function sqlState(error: unknown): string | undefined {
 export const outboxTable = pgTable(
   "logic_outbox",
   {
-    /** The delivery id, `<event id>:<listener id>`. */
+    /** The job id, `<listener id>@<event id>`. */
     id: text("id").primaryKey(),
     delivery: jsonb("delivery").$type<Delivery>().notNull(),
     /** `failed`: out of attempts, or a rule said no. Retrying is your call (`registry.jobs.retry(id)`). */
@@ -93,7 +93,7 @@ type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "d
  * left behind. At least once: a crash between a listener finishing and its row being deleted runs it again.
  *
  * ```ts
- * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: outbox(db) });
+ * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
  * setInterval(() => registry.jobs.sweep(), 60_000); // or a cron
  * ```
  */
@@ -120,9 +120,9 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       await db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError }).where(mine(delivery.id, attempt));
       return "retrying";
     }
-    if (outcome === "done") {
+    if (outcome === "done" || outcome === "discarded") {
       await db.delete(t).where(mine(delivery.id, attempt));
-      return "done";
+      return outcome;
     }
     await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine(delivery.id, attempt));
     return "failed";
@@ -138,7 +138,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       for (const d of deliveries) await settle(d, 1, run);
     },
     async sweep(run, { limit = 100 } = {}) {
-      const result: SweepResult = { done: 0, failed: 0, retrying: 0 };
+      const result: SweepResult = { done: 0, failed: 0, discarded: 0, retrying: 0 };
       for (let i = 0; i < limit; i++) {
         const due = db
           .select({ id: t.id })

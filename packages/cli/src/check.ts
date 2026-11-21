@@ -62,7 +62,7 @@ export function check(project: Project): Problem[] {
   }
 
   for (const fn of [...project.functions, ...project.listeners]) {
-    const f = source.fns.get(fn.id);
+    const f = source.fns.get(`${fn.module}.${fn.name}`);
     // Never pass silently: what we can't read, we can't check
     if (!f) {
       problems.push({
@@ -70,7 +70,7 @@ export function check(project: Project): Problem[] {
         severity: "warning",
         message: `${fn.id} is registered, but its definition wasn't found in ${fn.module}'s files, so its calls aren't checked.`,
         at: null,
-        fix: `Define it as \`export const ${fn.id.split(".")[1]} = …({ … })\` in ${relative(project.root, source.modules[fn.module]!.dir)}${source.modules[fn.module]!.folder ? "/" : ""}.`,
+        fix: `Define it as \`export const ${fn.name} = …({ … })\` in ${relative(project.root, source.modules[fn.module]!.dir)}${source.modules[fn.module]!.folder ? "/" : ""}.`,
       });
       continue;
     }

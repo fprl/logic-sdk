@@ -53,6 +53,8 @@ const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean> {
   readonly [BRAND]: K;
   readonly kind: K;
+  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  readonly id?: string;
   /** What callers pass, validated on every call. Left out: the function takes nothing (`run(fn)`). */
   readonly input?: Schema;
   /** What callers get back, checked before it leaves. */
@@ -80,6 +82,8 @@ export type FnOut<F> = F extends Fn<Kind, unknown, infer O> ? O : never;
 export interface EventDef<I = unknown, O = I> {
   readonly [BRAND]: "event";
   readonly kind: "event";
+  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  readonly id?: string;
   /** The payload's schema, checked when emitted and again at delivery. */
   readonly payload: Schema;
   readonly [types]?: { input: I; payload: O };
@@ -101,11 +105,13 @@ export interface Envelope<P = unknown, S = object> {
 
 /**
  * One listener's share of one event: what a queue carries, one message each, so a failing listener retries alone.
- * `id` (`<event id>:<listener id>`) is the key to dedupe on.
+ * `id` (`<listener id>@<event id>`) is the key to dedupe on.
  */
 export interface Delivery<P = unknown, S = object> {
+  /** What kind of job this is. Stored with it, so jobs queued today still run when other kinds exist. */
+  kind: "delivery";
   id: string;
-  /** The listener's id, `"<module>.<export>"`. */
+  /** The listener's id, `"<module>.<id or export>"`. */
   listener: string;
   envelope: Envelope<P, S>;
 }
@@ -116,8 +122,9 @@ export type Job = Delivery;
 /**
  * What delivering one resolved to. `failed`: a rule said no (`invalid`, `unauthenticated`, `forbidden`, `not_found`,
  * `rejected`) or the payload no longer matches its schema. Retrying can't help, so acknowledge it; it's been reported.
+ * `discarded`: `jobs.scope.load` returned null (who it ran as is gone). Acknowledge it too; it's been reported.
  */
-export type DeliveryOutcome = "done" | "failed";
+export type DeliveryOutcome = "done" | "failed" | "discarded";
 
 /** The event a listener is handling. No scope here: `ctx.scope` is the one it runs as. */
 export interface ListenerEvent<O = unknown> {
@@ -132,6 +139,8 @@ export interface ListenerEvent<O = unknown> {
 export interface Listener<O = unknown> {
   readonly [BRAND]: "listener";
   readonly kind: "listener";
+  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  readonly id?: string;
   /** Lazy, so listeners can import other modules' barrels without import cycles. */
   readonly event: () => EventDef<unknown, O>;
   readonly meta?: Readonly<Record<string, unknown>>;
@@ -223,6 +232,11 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 /** What a function without `input` gets: nothing. */
 type NoInput = StandardSchemaV1<undefined, undefined>;
 type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
+  /**
+   * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
+   * the export: queued jobs keep finding this code. Defaults to the export name.
+   */
+  id?: string;
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
   input?: IS;
   /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
@@ -326,6 +340,7 @@ export type RunDelivery = (delivery: Delivery, options?: { attempt?: number }) =
 export interface SweepResult {
   done: number;
   failed: number;
+  discarded: number;
   retrying: number;
 }
 
@@ -355,6 +370,24 @@ export const inProcess = (): Dispatcher => ({
   },
 });
 
+/**
+ * Who a job runs as, at rest. `store` picks what's saved with the job (ids, not whole objects); `load` rebuilds the
+ * scope when it runs, so policies see today's roles. `load` returning null discards the job (reported to `onError`),
+ * a throw retries it. Both optional: by default the scope is stored as it was at emit.
+ */
+export interface JobScope<S = object, T = any> {
+  store?: (scope: S) => T;
+  load?: (stored: T) => S | null | Promise<S | null>;
+}
+
+/** `createRegistry({ jobs })`: where background work goes, and what every adapter applies. */
+export interface JobsOptions<S = object, T = any> {
+  /** `inProcess()` (default), or a durable one like `outbox(db)`. Its own options go in its factory. */
+  adapter?: Dispatcher;
+  /** Applied by the registry in every adapter, `inProcess()` and tests included. */
+  scope?: JobScope<S, T>;
+}
+
 export interface Call<M = unknown> {
   id: string;
   kind: Kind | "listener";
@@ -373,8 +406,8 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
-  /** Where listeners' work goes after commit: `inProcess()` (default) or a durable transport like `outbox(db)`. */
-  jobs?: Dispatcher;
+  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is. */
+  jobs?: JobsOptions;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
   /**
@@ -419,7 +452,9 @@ export interface RegisteredFn extends Registered {
  * init: typed constructors
  * ──────────────────────────────────────────────────────────────────────────── */
 
-type TypedOptions<C extends Config, Mods extends Record<string, object>> = Omit<RegistryOptions<Mods>, "wrap"> & {
+type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Omit<RegistryOptions<Mods>, "wrap" | "jobs"> & {
+  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is. */
+  jobs?: JobsOptions<ScopeOf<C>, T>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call<MetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
 } &
@@ -446,7 +481,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
 
   return {
     /** Create the registry once at startup: `createRegistry({ modules, database, services })`. */
-    createRegistry: <const Mods extends Record<string, object>>(options: TypedOptions<C, Mods>) =>
+    createRegistry: <const Mods extends Record<string, object>, T = ScopeOf<C>>(options: TypedOptions<C, Mods, T>) =>
       build<ScopeOf<C>, Mods, ConfigOf<C>>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by MetaOf<C>; the values come from typed defs
     /** Reads data. Can run other queries. No writes, no events, no services. */
     query: make("query") as Constructor<C, "query">,
@@ -455,21 +490,33 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /** Talks to the outside world (payments, email, AI). No transaction; each mutation it runs commits on its own. */
     action: make("action") as Constructor<C, "action">,
     /** Something that happened. Emitted by mutations, delivered after commit. */
-    event: <S extends Schema>(def: { payload: S }): EventDef<In<S>, Out<S>> =>
+    event: <S extends Schema>(def: {
+      /**
+       * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
+       * the export: queued jobs keep finding this code. Defaults to the export name.
+       */
+      id?: string;
+      payload: S;
+    }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
     /**
      * React to an event after commit, like an action. Must be idempotent.
      * `listener({ event: () => bookings.confirmed, async handler(ctx, payload) {…} })`
      */
     listener: <O>(def: {
+      /**
+       * Stable id, local to the module (`"send"` becomes `"notifications.send"`). Jobs store it, so set it before you rename
+       * the export: queued jobs keep finding this code. Defaults to the export name.
+       */
+      id?: string;
       /** The event it reacts to, as a thunk so modules can import each other's barrels without cycles. */
       event: () => EventDef<unknown, O>;
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
-      const { event, meta, handler } = def;
+      const { id, event, meta, handler } = def;
       // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
-      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, event, meta: meta as Listener["meta"], handler });
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, meta: meta as Listener["meta"], handler });
     },
   };
 }
@@ -503,7 +550,7 @@ export interface Overrides {
   services?: object;
   /** Merged over the registry's config, section by section. */
   config?: object;
-  jobs?: Dispatcher;
+  adapter?: Dispatcher;
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   record?: (envelope: Envelope) => void;
@@ -648,10 +695,18 @@ export function describeModules(modules: Record<string, object>) {
   const events: RegisteredEvent[] = [];
   const listeners: RegisteredListener[] = [];
 
+  const taken = new Map<string, string>();
+
   for (const [module, ns] of Object.entries(modules)) {
     for (const [name, value] of Object.entries(ns)) {
       if (!isBranded(value) || ids.has(value)) continue;
-      const id = `${module}.${name}`;
+      const local = value.id ?? name;
+      if (value.id !== undefined && !/^[A-Za-z0-9_-]+$/.test(value.id))
+        throw new Error(`[logic-sdk] ${module}.${name} has id ${JSON.stringify(value.id)}. Give the local name ("send"): the module key is added, so it's ${module}.<id>.`);
+      const id = `${module}.${local}`;
+      const other = taken.get(id);
+      if (other) throw new Error(`[logic-sdk] ${module}.${other} and ${module}.${name} both have the id ${id}. Ids must be unique: jobs find their code by it.`);
+      taken.set(id, name);
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
@@ -673,7 +728,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const database = o.database ?? options.database;
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
-  const dispatcher = o.jobs ?? options.jobs ?? inProcess();
+  const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
+  const jobScope = options.jobs?.scope;
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
@@ -738,7 +794,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       report(new Error(`[logic-sdk] event chain deeper than ${maxEventDepth}: stopped delivering (listener loop?)`), { listener: "(dispatcher)", envelope: tooDeep });
       return [];
     }
-    return envelopes.flatMap((e) => (byEvent.get(e.name) ?? []).map((l) => ({ id: `${e.id}:${l.id}`, listener: l.id, envelope: e })));
+    return envelopes.flatMap((e) => (byEvent.get(e.name) ?? []).map((l) => ({ kind: "delivery" as const, id: `${l.id}@${e.id}`, listener: l.id, envelope: e })));
   }
 
   /** Run one listener for one event. Reports every failure; throws only when a retry might help. */
@@ -746,6 +802,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const { envelope } = delivery;
     const attempt = options.attempt ?? 1;
     const info: FailureInfo = { listener: delivery.listener, envelope, delivery: delivery.id, attempt };
+    if (delivery.kind !== "delivery") {
+      const e = new Error(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
+      report(e, info);
+      throw e;
+    }
     const l = listenerById.get(delivery.listener);
     if (!l) {
       const e = new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
@@ -753,9 +814,18 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       throw e;
     }
     const event = eventByName.get(envelope.name);
-    const frame: Frame = { scope: envelope.scope, depth: 0, eventDepth: envelope.depth };
     try {
-      await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope: envelope.scope, depth: 0 }, async () => {
+      let scope = envelope.scope;
+      if (jobScope?.load) {
+        const loaded = await jobScope.load(scope);
+        if (loaded == null) {
+          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${delivery.id}, so it was discarded.`), info);
+          return "discarded";
+        }
+        scope = loaded;
+      }
+      const frame: Frame = { scope, depth: 0, eventDepth: envelope.depth };
+      await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
         let payload = envelope.payload;
         if (event) {
           const r = await event.payload["~standard"].validate(payload);
@@ -804,14 +874,15 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         const name = idOf(event);
         // a queue carries JSON: a Date or a class instance would work in-process and break only in production
         assertPlain(payload, `${name} payload`, "Events travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
-        assertPlain(frame.scope, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids and plain values");
+        const stored = jobScope?.store ? jobScope.store(frame.scope) : frame.scope;
+        assertPlain(stored, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids (jobs.scope.store picks what's saved)");
         payload = structuredClone(payload); // what was emitted is what gets delivered, even if the caller mutates it after
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope: Envelope = {
           id: crypto.randomUUID(),
           name,
           payload,
-          scope: structuredClone(frame.scope),
+          scope: structuredClone(stored),
           occurredAt: now().toISOString(),
           depth: (frame.eventDepth ?? 0) + 1,
         };
@@ -940,7 +1011,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     idOf,
     jobs: {
       run: deliver,
-      sweep: async (options) => (await dispatcher.sweep?.(deliver, options)) ?? { done: 0, failed: 0, retrying: 0 },
+      sweep: async (options) => (await dispatcher.sweep?.(deliver, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
       async retry(id) {
         if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
         return dispatcher.retry(id);

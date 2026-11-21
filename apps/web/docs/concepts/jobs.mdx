@@ -1,0 +1,104 @@
+---
+title: Jobs
+description: Work that runs after commit, where it runs, and who it runs as.
+---
+
+```ts
+createRegistry({
+  modules,
+  database: drizzleAdapter(db),
+  jobs: {
+    adapter: outbox(db),                                        // where jobs go; default inProcess()
+    scope: {
+      store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId }), // what's saved with each job
+      load: (saved) => scopeFor(saved),                         // rebuilt when it runs; null discards it
+    },
+  },
+});
+```
+
+A **job** is one piece of work that runs after your transaction commits. It comes in three kinds, and all of them go through the same `jobs` slot:
+
+| Kind | Where it comes from | |
+|---|---|---|
+| A listener's share of an event | `ctx.emit(event, payload)` in a mutation: one job per listener | today |
+| A scheduled call | `ctx.schedule(fn, input, { at })`: run this function later | planned |
+| A cron tick | `cron({ schedule, run })`: run this every N minutes | planned |
+
+If you've used Rails, Laravel or Oban, a listener is what you'd write as a job class, and the `jobs` slot is their queue adapter.
+
+## Adapters
+
+The adapter decides where a job waits and what survives a crash.
+
+```txt
+inProcess()  default, zero infra
+  mutation ─ commit ─► run the listeners in this process
+  lost if the process dies after commit
+
+outbox(db)  durable, Postgres
+  mutation ─ insert a row ─ commit ─► run it, delete the row
+                                   └► failed or crashed: registry.jobs.sweep() runs it again
+
+outbox(db, { via: queue })  planned: Cloudflare Queues, Vercel Queues, Redis (BullMQ), Inngest
+  mutation ─ insert a row ─ commit ─► hand it to the queue ─► your consumer ─► registry.jobs.run(job)
+                                   └► crashed before the handoff: registry.jobs.sweep() sends it again
+  after the handoff, the queue owns retries, concurrency and its dead-letter queue
+
+pgBoss(boss)  planned: durable, pg-boss enqueues inside your transaction
+  mutation ─ pg-boss insert ─ commit ─► pg-boss worker ─► registry.jobs.run(job)
+```
+
+- **Why the outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between, which is the Rails and Laravel `after_commit` default. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
+- **pg-boss needs no outbox:** it lives in your database, so its insert commits or rolls back with your writes, like Oban.
+- **The adapter's own options go in its factory:** `outbox(db, { lease, maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
+
+## Running, sweeping, retrying
+
+```ts
+await registry.jobs.run(message.body, { attempt: message.attempts }); // a queue consumer
+await registry.jobs.sweep();                                          // a cron or an interval (outbox)
+await registry.jobs.retry(id);                                        // put a failed job back in line
+```
+
+- **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when a retry might help (`conflict`, anything unexpected). Every failure goes to `onError` with the job id and attempt.
+- **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, so one cron handler works with any of them.
+- **`retry` only revives failed jobs** and returns whether it did. A pending one belongs to its runner, and resetting it could run it twice at once. It throws on `inProcess()`, which stores none.
+
+## Ids
+
+A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: Rails raises `UnknownJobClassError` in the same spot, Oban "unknown worker". Give it an `id` before you rename:
+
+```ts
+// notifications/listeners.ts
+export const sendAll = listener({
+  id: "send",                    // stays notifications.send, whatever the export is called
+  event: () => conversations.messageReceived,
+  async handler(ctx, payload) { ... },
+});
+```
+
+- **Optional.** The default is the export name, as before.
+- **Local to the module:** `"send"` in `notifications` is `notifications.send`, so the module key still comes first.
+- **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls will store function ids.
+- **Unique:** a clash throws at `createRegistry`.
+
+## Who a job runs as
+
+By default a job stores the scope it was emitted with, so a retry two days later still runs with that day's roles. `jobs.scope` fixes that:
+
+- **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
+- **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
+- **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same.
+- **`load` throwing retries the job,** like any other failure.
+
+The registry applies `scope` in every adapter, `inProcess()` and tests included, so what passes in tests passes in production.
+
+## The contract
+
+For writing an adapter:
+
+- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope }`, where `id` is `<listener id>@<event id>`, the key to dedupe on. A failing listener retries alone.
+- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, run)`** after commit. Optional **`sweep(run)`** and **`retry(id)`** for adapters that store jobs.
+- **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.
+- **Listeners get `ctx.event`** (`id`, `name`, `payload`, `occurredAt`, `attempt`), without the stored scope: `ctx.scope` is the one they run as.
