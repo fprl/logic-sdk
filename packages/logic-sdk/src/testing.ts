@@ -1,8 +1,8 @@
 import {
-  inProcess,
   internal,
   type Caller,
   type DeepPartial,
+  type CallJob,
   type Delivery,
   type DeliveryOutcome,
   type Dispatcher,
@@ -25,17 +25,23 @@ export interface TestOptions<Cf = unknown> {
   /**
    * `"inline"` (default): listeners run right after each mutation, inside the test. `"manual"`: jobs wait in
    * `t.jobs.queued` until you `drain()` them, to test one module without the others reacting. Like Oban's
-   * `testing: :inline | :manual`. Either way your app's adapter (an outbox, a queue) is never used.
+   * `testing: :inline | :manual`. Either way, what waits (a listener's `delay`, `ctx.schedule`) waits for `drain()`, and
+   * your app's adapter (an outbox, a queue) is never used.
    */
   jobs?: "inline" | "manual";
 }
 
 /** The jobs of the current test, like `registry.jobs` in production. */
 export interface TestJobs<S> {
-  /** Listener jobs committed mutations queued, and nothing ran yet (`jobs: "manual"`). */
+  /** Listener jobs waiting: every one in `jobs: "manual"`, and the delayed ones in either mode. */
   readonly queued: readonly Delivery[];
-  /** Run the queued jobs, and the ones they queue, until none are left. Throws a listener's failure. */
-  drain(): Promise<void>;
+  /** What `ctx.schedule` asked for, waiting for `drain()`. */
+  readonly scheduled: readonly CallJob[];
+  /**
+   * Run what's due at the test's now (or `until`), and what that queues, until nothing due is left. Throws a failure.
+   * Like Rails' `perform_enqueued_jobs(at:)` and Oban's `drain_queue(with_scheduled:)`.
+   */
+  drain(options?: { until?: Date | string }): Promise<void>;
   /** Run one listener by hand, as if its event had been emitted as `scope`. Throws its failure, like `drain()`. */
   perform<O>(listener: Listener<O>, payload: O, options: { scope: S; attempt?: number }): Promise<DeliveryOutcome>;
   /** Run the crons due in `at`'s minute (default: the test's now), here and now. Resolves their ids; throws a failure. */
@@ -67,6 +73,7 @@ interface Open<S extends object, Mods extends Record<string, object>, Cf> {
   events: Envelope[];
   stubs: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   queued: Delivery[];
+  scheduled: CallJob[];
   /** Listener failures during the current call. */
   failures: unknown[];
   close(): Promise<void>;
@@ -74,15 +81,29 @@ interface Open<S extends object, Mods extends Record<string, object>, Cf> {
 
 class Rollback extends Error {}
 
-/** `jobs: "manual"`: listener jobs wait in `queued`; a cron's run (from `registry.jobs.tick`) runs, as it was asked for. */
-const manual = (queued: Delivery[]): Dispatcher => ({
+/**
+ * The test's jobs adapter. What waits (a delayed listener, `ctx.schedule`) is held for `drain()`, and in `"manual"` so
+ * is everything else; the rest runs now. It holds what your app's adapter holds, so a test fails where production would.
+ */
+const testJobs = (mode: TestOptions["jobs"], holds: Dispatcher["holds"], queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
+  holds,
   async deliver(jobs, runner) {
     for (const job of jobs) {
-      if (job.kind === "delivery") queued.push(job);
-      else await runner.run(job).catch(() => {}); // reported, so the test sees it
+      const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
+      if (!waits) await runner.run(job).catch(() => {}); // reported, so the test sees it
+      else if (job.kind === "call") scheduled.push(job);
+      else if (job.kind === "delivery") queued.push(job);
     }
   },
 });
+
+/** Removes the jobs that are due from `list` and returns them. */
+function takeDue<T extends Job>(list: T[], cutoff: number): T[] {
+  const due = (job: T) => !job.runAt || Date.parse(job.runAt) <= cutoff;
+  const ready = list.filter(due);
+  list.splice(0, list.length, ...list.filter((job) => !due(job)));
+  return ready;
+}
 
 /**
  * Run each test inside a transaction that's rolled back, set up once with hooks:
@@ -103,6 +124,12 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
   const { options: registryOptions } = internal(registry);
   const fixed = options.now;
   const now = typeof fixed === "function" ? fixed : fixed === undefined ? undefined : () => new Date(fixed);
+  /** While `drain()` runs a job that waited, the time it was due: what `ctx.now()` reads then. */
+  let travelled: number | undefined;
+  const clock = () => {
+    const base = (now ?? registryOptions.now ?? (() => new Date()))();
+    return travelled !== undefined && travelled > base.getTime() ? new Date(travelled) : base;
+  };
   let open: Open<S, Mods, Cf> | undefined;
 
   const current = () => {
@@ -115,22 +142,23 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     const events: Envelope[] = [];
     const stubs: Open<S, Mods, Cf>["stubs"] = new Map();
     const queued: Delivery[] = [];
+    const scheduled: CallJob[] = [];
     const failures: unknown[] = [];
     const derived = internal(registry).derive({
       database: db !== undefined && database?.nest ? database.nest(db) : database,
       services: options.services,
       config: options.config as object | undefined,
-      now,
+      now: clock,
       stubs,
       record: (e) => events.push(e),
-      adapter: options.jobs === "manual" ? manual(queued) : inProcess(),
+      adapter: testJobs(options.jobs, registryOptions.jobs?.adapter?.holds, queued, scheduled),
       waitUntil: undefined, // listeners finish before a call returns, inside the test
       onError(error, info) {
         if (info.outcome !== "discarded") failures.push(error);
         registryOptions.onError?.(error, info);
       },
     });
-    return { registry: derived, db, events, stubs, queued, failures, close };
+    return { registry: derived, db, events, stubs, queued, scheduled, failures, close };
   }
 
   /** Run `work`, then throw the first listener failure since the last one thrown (calls through `t.registry` included). */
@@ -209,10 +237,28 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       get queued() {
         return current().queued;
       },
-      async drain() {
+      get scheduled() {
+        return current().scheduled;
+      },
+      async drain({ until } = {}) {
         const state = current();
-        while (state.queued.length)
-          for (const job of state.queued.splice(0)) await settle(state, () => state.registry.jobs.run(job));
+        const end = until === undefined ? clock() : new Date(until);
+        if (Number.isNaN(end.getTime())) throw new Error(`[logic-sdk] drain({ until }) needs a valid date (got ${String(until)}).`);
+        try {
+          for (let round = 1; ; round++) {
+            const ready = [...takeDue(state.queued, end.getTime()), ...takeDue(state.scheduled, end.getTime())];
+            if (!ready.length) return;
+            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one schedule itself with no delay?");
+            ready.sort((a, b) => (a.runAt ?? "").localeCompare(b.runAt ?? ""));
+            for (const job of ready) {
+              // the job runs at the time it was due, so a self-rescheduling one moves forward and its checks see that time
+              if (job.runAt) travelled = Math.max(travelled ?? 0, Date.parse(job.runAt));
+              await settle(state, () => state.registry.jobs.run(job));
+            }
+          }
+        } finally {
+          travelled = undefined;
+        }
       },
       perform(listener, payload, { scope, attempt }) {
         const state = current();
@@ -224,7 +270,6 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       },
       async tick(at) {
         const state = current();
-        const clock = now ?? registryOptions.now ?? (() => new Date());
         const jobs = internal(state.registry).due(at === undefined ? clock() : new Date(at));
         for (const job of jobs) await settle(state, () => state.registry.jobs.run(job));
         return jobs.map((job) => job.cron);

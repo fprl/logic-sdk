@@ -23,7 +23,7 @@ const db = drizzle({ client: pg });
 const items = pgTable("items", { name: text("name").primaryKey() });
 
 type Scope = { actor: string };
-const { mutation, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleTx<typeof db> }>();
+const { mutation, action, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleTx<typeof db> }>();
 
 const added = event({ payload: z.object({ name: z.string() }) });
 const add = mutation({
@@ -299,4 +299,18 @@ test("crons: several servers ticking the same minute run each cron once, and old
   expect(ran).toEqual(["tidy"]);
   expect(await db.select({ id: cronRunsTable.id }).from(cronRunsTable)).toEqual([{ id: "x.nightly@20261123T0300Z" }]);
   expect(await rows()).toEqual([]); // ran and deleted
+});
+
+test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs it", async () => {
+  const remind = action({ input: z.object({ who: z.string() }), async handler(_ctx, { who }) { ran.push(`remind ${who}`); } });
+  const book = mutation({ async handler(ctx) { ctx.schedule(remind, { who: "guest" }, { delay: 3600 }); } });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
+  await registry.as({ actor: "ana" }).run(book);
+  const [row] = await rows();
+  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind" } });
+  expect(row!.availableAt.getTime() - Date.now()).toBeGreaterThan(3500_000);
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["remind guest"]);
 });

@@ -134,8 +134,24 @@ export interface CronJob {
   runAt?: string;
 }
 
-/** One unit of background work, what `registry.jobs` runs, sweeps and retries: a listener's share of an event, or a cron's run. */
-export type Job = Delivery | CronJob;
+/** A function `ctx.schedule` asked to run later: `id` is `<function id>@<uuid>`, returned by `ctx.schedule`. */
+export interface CallJob {
+  kind: "call";
+  id: string;
+  /** The function's id, `"<module>.<id or export>"`. */
+  fn: string;
+  input: unknown;
+  /** Who it runs as, as `jobs.scope.store` saved it (`load` rebuilds it when it runs). */
+  scope: object;
+  /** When it may run (ISO). */
+  runAt?: string;
+}
+
+/**
+ * One unit of background work, what `registry.jobs` runs, sweeps and retries: a listener's share of an event, a cron's
+ * run, or a call `ctx.schedule` asked for.
+ */
+export type Job = Delivery | CronJob | CallJob;
 
 /** A function to run on a schedule, as `scope`. Export it from a module, like listeners. */
 export interface Cron {
@@ -239,6 +255,12 @@ export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C
   run: Run<"query" | "mutation", ScopeOf<C>>;
   /** Queue an event. Delivered to listeners only after the transaction commits. */
   emit<I>(event: EventDef<I, unknown>, payload: I): void;
+  /**
+   * Run a mutation or action once, later, as this scope: `ctx.schedule(guests.remind, { bookingId }, { at })` or
+   * `{ delay: 3600 }` (seconds). Committed with this transaction, so a rollback never leaves one behind. Returns its job
+   * id. It runs whatever happens meanwhile, so it should check that its reason still holds ("still confirmed?").
+   */
+  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, when: { at: Date; delay?: never } | { delay: number; at?: never }): string;
 }
 export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
@@ -355,6 +377,12 @@ export interface Runner {
 }
 
 export interface Dispatcher {
+  /**
+   * It can hold a job until its `runAt` (a listener's `delay`, `ctx.schedule`): `true`, or for at most `max` seconds.
+   * Without it (`inProcess()`), `createRegistry` refuses delayed listeners and `ctx.schedule` throws, rather than run
+   * them early or lose them.
+   */
+  holds?: true | { max: number };
   /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
@@ -374,7 +402,7 @@ export interface Dispatcher {
 
 /** What `onError` gets with a failure after commit. `delivery`, `attempt` and `outcome` are set when a listener's job failed. */
 export interface FailureInfo {
-  /** The listener or cron that failed (or the part of the registry, like `"(dispatcher)"`). */
+  /** The listener, cron or scheduled function that failed (or the part of the registry, like `"(dispatcher)"`). */
   listener: string;
   envelope: Envelope | undefined;
   /** The job's id. */
