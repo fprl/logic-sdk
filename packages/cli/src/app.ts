@@ -1,7 +1,7 @@
 import { buildApplication, buildCommand, buildRouteMap, type CommandContext } from "@stricli/core";
 import { ParseError } from "./analyze.ts";
 import { check } from "./check.ts";
-import { CliError, loadProject, type FnInfo, type ListenerInfo, type Project } from "./project.ts";
+import { CliError, loadProject, type CronInfo, type FnInfo, type ListenerInfo, type Project } from "./project.ts";
 import { bold, diagnostic, dim, kind, paint, shape, table, where } from "./render.ts";
 
 export interface Context extends CommandContext {
@@ -55,7 +55,7 @@ const list = buildCommand({
     const rows = [
       ...p.functions.map((f) => ({ ...plainFn(f), kind: f.kind as FnInfo["kind"] | "listener" | "cron" })),
       ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, authorize: null, exposed: false, description: l.description ?? `on ${l.event}`, event: l.event })),
-      ...p.crons.map((c) => ({ ...c, kind: "cron" as const, authorize: null, exposed: false, description: `${c.schedule} ${c.timezone} → ${c.runs}` })),
+      ...p.crons.map((c) => ({ ...c, kind: "cron" as const, authorize: null, exposed: false, description: `${c.schedule} ${c.timezone} → ${c.run}` })),
     ].filter(
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind) && (!flags.exposed || r.exposed),
     );
@@ -106,7 +106,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     } else if (cron) {
       lines.push(`${bold(cron.id)}  ${kind("cron")}`, ...(cron.description ? [cron.description] : []), dim(where(cron.at)), "");
       row("schedule", `${cron.schedule} ${dim(cron.timezone)}`);
-      row("runs", cron.runs);
+      row("runs", cron.run);
     } else if (event) {
       lines.push(`${bold(event.id)}  ${dim("event")}`, "");
       row("emitted by", event.emittedBy.join(", ") || dim("nothing"));
@@ -134,13 +134,14 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         ...l.runs.map((e) => ({ from: l.id, to: e.to, type: "runs" as const })),
       ]),
       ...p.functions.flatMap((f) => f.emits.map((e) => ({ from: f.id, to: e.to, type: "emits" as const }))),
+      ...p.crons.map((c) => ({ from: c.id, to: c.run, type: "runs" as const })),
     ];
     const touches = (id: string) => !flags.module || id.startsWith(flags.module + ".");
     const shown = edges.filter((e) => touches(e.from) || touches(e.to));
 
     if (flags.format === "json")
       return print(this, {
-        nodes: [...p.functions.map((f) => ({ id: f.id, kind: f.kind, authorize: f.authorize, exposed: f.exposed })), ...p.listeners.map((l) => ({ id: l.id, kind: "listener" })), ...p.events.map((e) => ({ id: e.id, kind: "event" }))].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
+        nodes: [...p.functions.map((f) => ({ id: f.id, kind: f.kind, authorize: f.authorize, exposed: f.exposed })), ...p.listeners.map((l) => ({ id: l.id, kind: "listener" })), ...p.crons.map((c) => ({ id: c.id, kind: "cron", schedule: c.schedule, timezone: c.timezone })), ...p.events.map((e) => ({ id: e.id, kind: "event" }))].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
         edges: shown,
       });
 
@@ -151,6 +152,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         lines.push(`  subgraph ${m}`);
         for (const f of p.functions.filter((f) => f.module === m)) lines.push(`    ${id(f.id)}["${f.name}"]`);
         for (const l of p.listeners.filter((l) => l.module === m)) lines.push(`    ${id(l.id)}(["${l.id.split(".")[1]}"])`);
+        for (const c of p.crons.filter((c) => c.module === m)) lines.push(`    ${id(c.id)}{{"${c.name} · ${c.schedule}"}}`);
         lines.push("  end");
       }
       for (const e of shown.filter((e) => e.type === "runs")) lines.push(`  ${id(e.from)} --> ${id(e.to)}`);
@@ -164,19 +166,25 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
     const listenersOf = (eventId: string) => p.listeners.filter((l) => l.event === eventId).map((l) => l.id);
     const blocks: string[] = [];
     for (const m of p.modules.filter((m) => !flags.module || m === flags.module)) {
-      const members: (FnInfo | ListenerInfo)[] = [...p.functions.filter((f) => f.module === m), ...p.listeners.filter((l) => l.module === m)];
+      const members: (FnInfo | ListenerInfo | CronInfo)[] = [
+        ...p.functions.filter((f) => f.module === m),
+        ...p.listeners.filter((l) => l.module === m),
+        ...p.crons.filter((c) => c.module === m),
+      ];
+      const kindOf = (f: FnInfo | ListenerInfo | CronInfo) => ("kind" in f ? f.kind : "schedule" in f ? "cron" : "listener");
       const width = Math.max(...members.map((f) => f.id.length - m.length - 1));
-      const kindWidth = Math.max(...members.map((f) => ("kind" in f ? f.kind : "listener").length));
+      const kindWidth = Math.max(...members.map((f) => kindOf(f).length));
       const lines = [bold(m)];
       members.forEach((f, i) => {
         const last = i === members.length - 1;
         const branch = dim(last ? "└─ " : "├─ ");
         const rest = dim(last ? "   " : "│  ");
-        const k = "kind" in f ? f.kind : "listener";
+        const k = kindOf(f);
         const head = `${f.id.slice(m.length + 1).padEnd(width)}  ${kind(k)}${" ".repeat(kindWidth - k.length)}`;
         const details: string[] = [];
         if ("event" in f) details.push(`${dim("on")} ${f.event}`);
-        if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
+        if ("schedule" in f) details.push(`${dim("at")} ${f.schedule} ${dim(f.timezone)}`, `${dim("runs")} ${f.run}`);
+        else if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
         if ("emits" in f) for (const e of f.emits) details.push(`${dim("emits")} ${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
         lines.push(`${branch}${head}${details.length ? "  " + details[0] : ""}`.trimEnd());
         for (const d of details.slice(1)) lines.push(`${rest}${" ".repeat(width + kindWidth + 4)}${d}`);
