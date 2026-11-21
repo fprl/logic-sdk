@@ -47,8 +47,8 @@ import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
 
 export const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
 
-// a cron or an interval: what a crash or a failure left behind
-await registry.jobs.sweep();
+// what a crash or a failure left behind: a platform trigger, or on Node
+startTicking(registry); // from logic-sdk/node: ticks crons, sweeps every minute
 ```
 
 On Workers, build it per invocation and sweep from a Cron Trigger:
