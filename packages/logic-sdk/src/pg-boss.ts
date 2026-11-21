@@ -21,11 +21,15 @@ export type PgBossMeta = {
 };
 type Tuning = NonNullable<PgBossMeta["pgBoss"]>;
 
+/** Our queues' names start with it, so they can't collide with your own pg-boss queues, and `work()` can find ours. */
+const PREFIX = "logic-sdk.";
+/** A listener's or cron's queue: `logic-sdk.notifications.send`. */
+export const queueName = (id: string) => `${PREFIX}${id}`;
 /** Where scheduled calls (`ctx.schedule`) wait: one queue for all of them, so no function needs a worker of its own. */
-export const CALLS_QUEUE = "logic-sdk.calls";
+export const CALLS_QUEUE = "logic-sdk.calls"; // ids always have a dot, so no listener's queue is this one
 
-/** A job's queue: its listener's or its cron's, named by the id, or the shared one for scheduled calls. */
-const queueOf = (job: Job) => (job.kind === "delivery" ? job.listener : job.kind === "cron" ? job.cron : CALLS_QUEUE);
+/** A job's queue: its listener's or its cron's, or the shared one for scheduled calls. */
+const queueOf = (job: Job) => (job.kind === "delivery" ? queueName(job.listener) : job.kind === "cron" ? queueName(job.cron) : CALLS_QUEUE);
 
 /** A queue as `meta.pgBoss.queue` tunes it. Backoff on, as on every job we insert, which `retryDelayMax` needs. */
 const queueConfig = (queue: Tuning["queue"]) => ({ ...queue, retryBackoff: true });
@@ -78,7 +82,8 @@ export function pgBoss(boss: PgBoss): Dispatcher {
 
   /**
    * pg-boss needs a job's queue to exist, and `work()` creates them all; this covers a process that enqueues first (a
-   * new listener, deployed before its worker). The miss is pg-boss's cache, before any SQL, so the transaction is fine.
+   * new listener, deployed before its worker). pg-boss looks it up and creates it on its own connection, before any SQL
+   * on your transaction, so the transaction is fine (on PGlite, with one connection, it would wait: run `work()` first).
    */
   async function inQueue(name: string, write: () => Promise<unknown>) {
     try {
@@ -103,7 +108,7 @@ export function pgBoss(boss: PgBoss): Dispatcher {
       const { jobs: locked } = await boss.update(CALLS_QUEUE, undefined, { singletonKey: key, match: "all", db });
       if (!locked.length) continue;
       const queued = await boss.findJobs<Job>(CALLS_QUEUE, { key, queued: true, db });
-      const waiting = queued.filter((j) => j.state === "created" && locked.includes(j.id)).map((j) => j.id);
+      const waiting = queued.filter((j) => j.state === "created").map((j) => j.id); // `retry` ones have started
       if (waiting.length) await boss.deleteJob(CALLS_QUEUE, waiting, { db });
     }
   }
@@ -138,8 +143,9 @@ export function pgBoss(boss: PgBoss): Dispatcher {
     async retry(id) {
       // its queue: the listener's or cron's (the id's prefix), or the calls queue. Looked up first: inside the
       // transaction, a lookup on pg-boss's own connection would wait for it on PGlite.
-      const prefix = id.slice(0, id.lastIndexOf("@"));
-      const names = [prefix, CALLS_QUEUE].filter((name) => /^[\w.\-/]+$/.test(name)); // pg-boss's queue names
+      const at = id.lastIndexOf("@");
+      if (at < 0) return false; // not a job id
+      const names = [queueName(id.slice(0, at)), CALLS_QUEUE].filter((name) => /^[\w.\-/]+$/.test(name)); // pg-boss's rule: an id from anywhere
       const queues = await boss.getQueues(names);
       if (!database || !queues.length) return false;
       const uuid = pgBossId(id);
@@ -165,7 +171,9 @@ export function pgBoss(boss: PgBoss): Dispatcher {
 export interface PgBossWorkOptions {
   /** The shared queue of scheduled calls, tuned like a listener's `meta.pgBoss`: `{ worker: { localConcurrency: 10 } }`. */
   calls?: Tuning;
-  /** Where a failed cron tick goes. Default `console.error`. */
+  /** Every cron's queue, tuned the same way (crons have no `meta`): `{ queue: { expireInSeconds: 3600 } }` for a long one. */
+  crons?: Tuning;
+  /** Where a failed cron tick goes, and a queue left with jobs but no listener. Default `console.error`. */
   onError?: (error: unknown) => void;
 }
 
@@ -185,9 +193,10 @@ export async function work(
   options: PgBossWorkOptions = {},
 ): Promise<void> {
   const { listeners, crons } = registry.definitions;
+  const onError = options.onError ?? ((error) => console.error("[logic-sdk]", error));
   const queues: { name: string; tuning: Tuning | undefined }[] = [
-    ...listeners.map((l) => ({ name: l.id, tuning: tuningOf(l.listener.meta) })),
-    ...crons.map((c) => ({ name: c.id, tuning: undefined })),
+    ...listeners.map((l) => ({ name: queueName(l.id), tuning: tuningOf(l.listener.meta) })),
+    ...crons.map((c) => ({ name: queueName(c.id), tuning: options.crons })),
     { name: CALLS_QUEUE, tuning: options.calls },
   ];
 
@@ -211,8 +220,15 @@ export async function work(
     await boss.work<Job>(name, { ...tuning?.worker, perJobResults: true }, (jobs) => Promise.all(jobs.map(settle)));
   }
 
+  // a renamed or removed listener leaves its queue with no worker, and pg-boss's retention deletes those jobs unrun:
+  // say so, like a job the outbox can't find code for (it fails at once, kept)
+  const ours = new Set(queues.map((q) => q.name));
+  for (const q of await boss.getQueues())
+    if (q.name.startsWith(PREFIX) && !ours.has(q.name) && q.queuedCount > 0)
+      onError(new Error(`[logic-sdk] pg-boss queue ${q.name} has ${q.queuedCount} job(s) and no listener or cron here (renamed or removed?). Give it its old id back, or delete the queue.`));
+
   if (!crons.length) return;
   // ticked by every worker: the minute's job id is the same everywhere, so pg-boss inserts one row
-  const stop = startTicking(registry, { sweepEvery: 0, onError: options.onError });
+  const stop = startTicking(registry, { sweepEvery: 0, onError });
   boss.once("stopped", () => void stop());
 }

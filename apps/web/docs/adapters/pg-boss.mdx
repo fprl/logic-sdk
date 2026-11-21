@@ -33,9 +33,10 @@ pg-boss 12, Postgres, Drizzle 1.0. pg-boss lives in your database, so its insert
 
 - **Start it in every process,** the web ones too: pg-boss throws on an insert before `boss.start()`.
 - **Same database as `database`:** jobs are inserted through your mutation's transaction (pg-boss's `fromDrizzle`). `createRegistry` throws without `database`.
-- **One queue per listener and per cron,** named by its id (`notifications.send`), so each has its own workers and tuning. Scheduled calls share one, `logic-sdk.calls`, so a function doesn't need a worker of its own. `work()` creates them; a process that enqueues first creates the one it needs.
+- **One queue per listener and per cron,** named by its id with a prefix (`logic-sdk.notifications.send`), so each has its own workers and tuning, and none collides with your own pg-boss queues. Scheduled calls share one, `logic-sdk.calls`, so a function doesn't need a worker of its own. `work()` creates them; a process that enqueues first creates the one it needs (on Postgres; on PGlite, with one connection, run `work()` first).
 - **`work()` ticks your crons every minute** in each worker process. A cron's minute is one job id everywhere, so several workers ticking it insert one row: no `startTicking` needed.
-- **Failed jobs stay in pg-boss** (`state = 'failed'`), with the error as the job's `output`. Query them with pg-boss (`boss.findJobs`), and `registry.jobs.retry(id)` puts one back. `pgBossId(id)` turns a logic-sdk job id into pg-boss's.
+- **Failed jobs stay in pg-boss** (`state = 'failed'`) for the queue's `deleteAfterSeconds` (7 days by default), with the error as the job's `output`. Query them with pg-boss (`boss.findJobs`), and `registry.jobs.retry(id)` puts one back until pg-boss deletes it. `pgBossId(id)` turns a logic-sdk job id into pg-boss's.
+- **Rename a listener and its old queue has no worker:** pg-boss deletes those jobs unrun when they expire (14 days). `work()` reports a `logic-sdk.` queue with jobs and no listener to `onError`. Give it its old [`id`](/docs/concepts/jobs#ids) back, or delete the queue.
 
 ## Tuning
 
@@ -49,13 +50,16 @@ export const sendReceipt = listener({
   async handler(ctx, { orderId }) { ... },
 });
 
-await work(registry, boss, { calls: { worker: { localConcurrency: 10 } } }); // the scheduled calls' queue
+await work(registry, boss, {
+  calls: { worker: { localConcurrency: 10 } },   // the scheduled calls' queue: one at a time by default
+  crons: { queue: { expireInSeconds: 3600 } },   // every cron's queue (crons have no meta)
+});
 ```
 
-- **`queue`** is pg-boss's queue options (`expireInSeconds`, `retryDelay`, `retryDelayMax`, `deleteAfterSeconds`, `deadLetter`…), applied by `work()` each time it starts. Removing one doesn't reset it: set it back. `partition` only applies when the queue is created.
+- **`queue`** is pg-boss's queue options (`expireInSeconds`, `retryDelay`, `retryDelayMax`, `deleteAfterSeconds`, `deadLetter`…), applied by `work()` each time it starts. pg-boss copies them onto each job when it's inserted, so a change applies to jobs queued after it. Removing one doesn't reset it: set it back. `partition` only applies when the queue is created, and a `deadLetter` queue must exist first (`boss.createQueue`).
 - **`worker`** is pg-boss's `work()` options (`localConcurrency`, `batchSize`, `pollingIntervalSeconds`…), for that listener's workers in each process.
-- **Not in `meta`:** retries (a listener's `attempts` decide them, with pg-boss's exponential backoff always on) and the queue `policy`. Crons have no `meta`, so their queues take pg-boss's defaults.
-- **Set `expireInSeconds` above your slowest listener** (pg-boss's default is 15 minutes). A job still running then counts as crashed, and pg-boss runs it again.
+- **Not in `meta`:** retries (a listener's `attempts` decide them, with pg-boss's exponential backoff always on) and the queue `policy`. Crons have no `meta`: tune their queues with `work(..., { crons })`.
+- **Set `expireInSeconds` above your slowest listener** (pg-boss's default is 15 minutes). A job still running then counts as crashed, and pg-boss runs it again. The calls queue is shared, so set it for your slowest scheduled call, or use `heartbeatSeconds`.
 
 ## What differs from the outbox
 

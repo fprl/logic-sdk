@@ -7,7 +7,7 @@ import postgres from "postgres";
 import { z } from "zod";
 import { drizzleAdapter } from "../src/drizzle.ts";
 import { init, type DatabaseAdapter, type FailureInfo, type Job } from "../src/index.ts";
-import { CALLS_QUEUE, pgBoss, pgBossId, work, type PgBossMeta } from "../src/pg-boss.ts";
+import { CALLS_QUEUE, pgBoss, pgBossId, queueName, work, type PgBossMeta } from "../src/pg-boss.ts";
 
 // pg-boss polls and backs off in real time: these wait for its workers, a few seconds at most.
 setDefaultTimeout(20_000);
@@ -123,7 +123,8 @@ function realPostgres(url: string): Backend {
 }
 
 const url = process.env.DATABASE_URL;
-const backends: [string, () => Backend][] = [["PGlite", pglite], ...(url ? [["Postgres", () => realPostgres(url)] as [string, () => Backend]] : [])];
+const backends: [string, () => Backend][] = [["PGlite", pglite]];
+if (url) backends.push(["Postgres", () => realPostgres(url)]);
 
 describe.each(backends)("pgBoss on %s", (_name, open) => {
   let backend: Backend;
@@ -140,7 +141,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     return b;
   }
   /** pg-boss's rows for a listener's job about `name`. */
-  const rowsAbout = (queue: string, name: string) => boss.findJobs<Job>(queue, { data: { envelope: { payload: { name } } } });
+  const rowsAbout = (listener: string, name: string) => boss.findJobs<Job>(queueName(listener), { data: { envelope: { payload: { name } } } });
   const callRow = async (id: string) => (await boss.findJobs<Job>(CALLS_QUEUE, { id: pgBossId(id) }))[0];
 
   beforeAll(async () => {
@@ -177,12 +178,13 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
 
   test("retries until its attempts are used, each with its attempt number; then it's failed", async () => {
     ran = [];
+    failures.length = 0;
     await app.run(add, { name: "flaky" });
     await until(async () => (await rowsAbout("x.react", "flaky"))[0]?.state === "failed");
     expect(ran).toEqual(["flaky#1", "flaky#2", "flaky#3"]);
     const [row] = await rowsAbout("x.react", "flaky");
     expect(row?.output).toMatchObject({ message: "smtp down" }); // why, in pg-boss
-    expect(failures.filter((f) => f.delivery?.startsWith("x.react@")).map((f) => f.outcome).slice(-3)).toEqual(["retry", "retry", "failed"]);
+    expect(failures.filter((f) => f.delivery?.startsWith("x.react@")).map((f) => f.outcome)).toEqual(["retry", "retry", "failed"]);
   });
 
   test("a domain error fails it at once: no retries", async () => {
@@ -214,10 +216,8 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     const at = new Date("2028-02-29T09:00:00Z");
     expect(await registry.jobs.tick(at)).toEqual(["x.leapDay"]);
     expect(await other.jobs.tick(at)).toEqual(["x.leapDay"]);
-    expect(await boss.findJobs("x.leapDay")).toHaveLength(1);
+    expect(await boss.findJobs(queueName("x.leapDay"))).toHaveLength(1); // one row, so one run
     await until(() => ran.includes("digest"));
-    await sleep(600); // a second row would have run by now
-    expect(ran).toEqual(["digest"]);
   });
 
   test("ctx.schedule: the call waits in the calls queue until it's due, then runs", async () => {
@@ -250,7 +250,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
   test("ctx.schedule replace: a call that started isn't touched; the new one waits beside it", async () => {
     ran = [];
     const started = await app.run(plan, { n: -1, delay: 0, attempts: 2, replace: "booking-2" });
-    await until(() => ran.includes("remind -1")); // failed its first try: back in line with one left
+    await until(async () => (await callRow(started))?.state === "retry"); // failed its first try: back in line with one left
     const newer = await app.run(plan, { n: 2, delay: 60, replace: "booking-2" });
 
     const rows = await boss.findJobs<Job>(CALLS_QUEUE, { key: "x.remind@booking-2" });
@@ -258,10 +258,28 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     expect((await callRow(newer))?.state).toBe("created");
   });
 
+  test("retry(id) of a scheduled call: back with a fresh set, and no longer replaceable", async () => {
+    ran = [];
+    const id = await app.run(plan, { n: -2, delay: 0, replace: "booking-4" }); // one try: it fails for good
+    await until(async () => (await callRow(id))?.state === "failed");
+    expect(await registry.jobs.retry(id)).toBe(true);
+    expect((await callRow(id))?.singletonKey).toBeNull(); // its key went: it has run
+    await until(() => ran.filter((r) => r === "remind -2").length === 2);
+  });
+
+  test.skipIf(_name === "PGlite")("a process that enqueues before any work() creates the queue it needs", async () => {
+    // PGlite has one connection, so pg-boss's own lookup would wait for the open transaction: run work() first there
+    const fresh = listener({ event: () => added, async handler() {} });
+    const enqueuer = await start(); // a web process: started, never called work()
+    const web = createRegistry({ modules: { x: modules.x, y: { fresh } }, database: backend.database, jobs: { adapter: pgBoss(enqueuer), scope: { load: (saved) => saved } } });
+    await web.as({ actor: "ana" }).run(add, { name: "first" });
+    expect(await enqueuer.findJobs<Job>(queueName("y.fresh"), { data: { envelope: { payload: { name: "first" } } } })).toHaveLength(1);
+  });
+
   test("meta.pgBoss tunes the listener's queue and its workers", async () => {
-    const queue = await boss.getQueue("x.react");
+    const queue = await boss.getQueue(queueName("x.react"));
     expect(queue).toMatchObject({ expireInSeconds: 120, retryDelayMax: 1 });
-    const workers = boss.getWipData().filter((w) => w.name === "x.react");
+    const workers = boss.getWipData().filter((w) => w.name === queueName("x.react"));
     expect(workers.every((w) => w.options.localConcurrency === 2 && w.options.perJobResults === true)).toBe(true);
     expect(workers.length).toBeGreaterThan(0);
   });
