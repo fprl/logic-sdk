@@ -24,7 +24,7 @@
     "logic-sdk": "workspace:*",
     "@hono/node-server": "^2.1.9",
     "@orpc/server": "2.0.0-beta.51",
-    "drizzle-orm": "1.0.0-rc.5",
+    "drizzle-orm": "1.0.0-rc.6",
     "hono": "^4.13.19",
     "postgres": "^4.1.1",
     "zod": "^4.6.7"
