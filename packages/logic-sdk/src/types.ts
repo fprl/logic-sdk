@@ -1,3 +1,5 @@
+// The public types (re-exported from index.ts), the helper types the core shares, and the two symbols that brand
+// definitions and hide the registry's internals.
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type { DomainError } from "./errors.ts";
 

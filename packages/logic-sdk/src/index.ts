@@ -212,7 +212,6 @@ function checkAttempts(what: string, attempts: number | undefined) {
  * createRegistry
  * ──────────────────────────────────────────────────────────────────────────── */
 
-
 interface TxState {
   db: unknown;
   doomed: boolean;
@@ -261,7 +260,6 @@ function freezeConfig(value: unknown): unknown {
   };
   return freeze(structuredClone(value));
 }
-
 
 /**
  * Plain data, what survives JSON: plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped).

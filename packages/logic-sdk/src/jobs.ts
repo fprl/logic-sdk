@@ -70,6 +70,9 @@ export function makeJobs(deps: JobsDeps) {
 
   const listenerById = new Map(listeners.map((l) => [l.id, l]));
 
+  const scheduled = crons.map((c) => ({ ...c, schedule: parseSchedule(c.cron.schedule) }));
+  const cronById = new Map(crons.map((c) => [c.id, c]));
+
   /** One delivery per listener of each event, unless the chain is too deep (a listener loop). */
   function toDeliveries(envelopes: Envelope[]): Delivery[] {
     const tooDeep = envelopes.find((e) => e.depth > maxEventDepth);
@@ -156,7 +159,7 @@ export function makeJobs(deps: JobsDeps) {
           payload = r.value;
         }
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
-        return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id), event: ctxEvent } as never, payload); // SAFETY: as in invoke
+        return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
       });
       return "done";
     });
@@ -166,10 +169,6 @@ export function makeJobs(deps: JobsDeps) {
     run: runJob,
     report: (e, job, attempt) => report(e, infoOf(job, attempt)),
   };
-
-  // ── crons ────────────────────────────────────────────────────────────────
-  const scheduled = crons.map((c) => ({ ...c, schedule: parseSchedule(c.cron.schedule) }));
-  const cronById = new Map(crons.map((c) => [c.id, c]));
 
   /** The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once. */
   function due(at: Date): CronJob[] {
