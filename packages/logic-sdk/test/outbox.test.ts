@@ -1,7 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { Database } from "bun:sqlite";
-import { eq, sql } from "drizzle-orm";
-import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, test } from "bun:test";
@@ -115,9 +113,11 @@ test("a runner that crashed after commit: its lease expires and a sweep takes ov
   const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still leased
+  const [row] = await rows(); // the row is the job: what was enqueued is what runs
+  expect(row!.delivery).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "rug" }, depth: 1 } });
   await makeDue(); // the lease ran out
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
-  expect(ran).toEqual(["rug#2"]);
+  expect(ran).toEqual(["rug#1"]); // never started, so this is its first try
 });
 
 test("a slow runner can't undo a newer claim: completion writes are fenced on attempts", async () => {
@@ -125,13 +125,6 @@ test("a slow runner can't undo a newer claim: completion writes are fenced on at
   next = "lose-lease";
   await app.run(add, { name: "vase" });
   expect(await rows()).toMatchObject([{ status: "pending", attempts: 2 }]); // the newer runner still owns it
-});
-
-test("the row is the delivery: what was enqueued is what runs", async () => {
-  const { app } = setup({ ...outbox(db), deliver: async () => {} });
-  await app.run(add, { name: "mug" });
-  const [row] = await db.select().from(outboxTable).where(eq(outboxTable.status, "pending"));
-  expect(row!.delivery).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "mug" }, depth: 1 } });
 });
 
 test("a job whose scope can't be loaded is discarded: its row is deleted and the sweep counts it", async () => {
@@ -248,18 +241,17 @@ test("outbox(db) must share the registry's database: it writes in the mutation's
   expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: outbox(other) } })).toThrow(/must use the same database as `database`/);
 });
 
-test("Drizzle's synchronous SQLite drivers don't type-check: they commit before an async mutation finishes", () => {
-  // @ts-expect-error Drizzle: "Sync drivers can't use async functions in transactions!"
-  drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
-});
-
-test("a job this code can't run (its listener was removed) stops after maxAttempts", async () => {
-  const { registry } = setup(outbox(db, { maxAttempts: 2 }));
+test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
+  const { registry } = setup();
   const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
-  await db.insert(outboxTable).values({ id: "x.removed@e", delivery: { kind: "delivery", id: "x.removed@e", listener: "x.removed", envelope } });
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 1 });
-  await makeDue();
+  await db.insert(outboxTable).values({ id: "x.react@e", delivery: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope } });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
+  expect(await rows()).toMatchObject([{ status: "failed", lastError: expect.stringMatching(/x\.removed isn't a registered listener/) }]);
+  // the code is back (here: the row points at a listener that exists)
+  await db.update(outboxTable).set({ delivery: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope } });
+  expect(await registry.jobs.retry("x.react@e")).toBe(true);
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["gone#1"]);
 });
 
 test("a listener's attempts beyond maxAttempts still get their tries", async () => {
@@ -272,4 +264,24 @@ test("a listener's attempts beyond maxAttempts still get their tries", async () 
   }
   expect(ran).toEqual(["stubborn", "stubborn", "stubborn", "stubborn"]);
   expect(await rows()).toMatchObject([{ status: "failed", attempts: 4 }]);
+});
+
+test("a crash between commit and the first try: the sweep's claim is the first try, so a one-try listener still runs", async () => {
+  const once = listener({ event: () => added, async handler(_ctx, { name }) { ran.push(`once ${name}`); } });
+  const died = { ...outbox(db), deliver: async () => {} }; // committed, then the process died before delivering
+  const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: died }, onError: () => {} });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(await rows()).toMatchObject([{ status: "pending", attempts: 0 }]);
+  await makeDue(); // the lease ran out
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["once desk"]);
+});
+
+test("sweep({ limit }) claims at most that many", async () => {
+  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} });
+  await app.run(add, { name: "a" });
+  await app.run(add, { name: "b" });
+  await makeDue();
+  expect(await registry.jobs.sweep({ limit: 1 })).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(await rows()).toHaveLength(1);
 });

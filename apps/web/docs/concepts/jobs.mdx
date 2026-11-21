@@ -89,7 +89,7 @@ export const sendReceipt = listener({
 
 ## Ids
 
-A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: Rails raises `UnknownJobClassError` in the same spot, Oban "unknown worker". Give it an `id` before you rename, and queued jobs keep finding it:
+A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: they fail at once and are kept, like Rails' `ClassMissingError` in Solid Queue, and `registry.jobs.retry(id)` runs them once the code is back. Give it an `id` before you rename, and queued jobs keep finding it:
 
 ```ts
 // notifications/listeners.ts
@@ -113,7 +113,7 @@ By default a job stores the scope it was emitted with, so a retry two days later
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
 - **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
 - **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same.
-- **`load` throwing retries the job,** like any other failure. So does returning `undefined`, which is almost always a missing `return`.
+- **`load` throwing counts as a try,** like the listener throwing: with tries left it's retried, at the default of one it's `failed`. So does returning `undefined`, which is almost always a missing `return`.
 - **`store` needs `load`:** listeners run as a scope, not as what was saved. `createRegistry` throws otherwise.
 - **`load` runs once per job,** before the listener and outside `wrap`: an event with five listeners loads five times. Write `store` first in the object so TypeScript infers what `load` gets, or annotate its parameter.
 
@@ -123,7 +123,7 @@ The registry applies `scope` in every adapter, `inProcess()` and tests included,
 
 For writing an adapter:
 
-- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, runAt? }`, where `id` is `<listener id>@<event id>`, the key to dedupe on. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
+- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, runAt? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
 - **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
 - **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour (Cloudflare refuses a delay over 24 hours). **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the listener is out of tries. An adapter only maps outcomes: `failed` is kept, a throw is retried later.

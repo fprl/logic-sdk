@@ -340,7 +340,14 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
 }
 
 /** Delivers one: resolves when the listener is done or failed for good (acknowledge it), throws when a retry might help. */
-export type RunDelivery = (delivery: Delivery, options?: { attempt?: number }) => Promise<DeliveryOutcome>;
+export type RunDelivery = (delivery: Delivery, options?: RunJobOptions) => Promise<DeliveryOutcome>;
+
+export interface RunJobOptions {
+  /** 1 on the first try; the transport counts. */
+  attempt?: number;
+  /** Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it (the outbox writes a failed row). */
+  fail?: (error: unknown) => Promise<void>;
+}
 
 /** What a sweep did: delivered, failed for good, or put back with a backoff. */
 export interface SweepResult {
@@ -440,7 +447,7 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   /**
    * Serverless: let listeners finish after the response. Pass the platform's global:
    * `import { waitUntil } from "cloudflare:workers"` or `import { waitUntil } from "@vercel/functions"`.
-   * Without it, `run` waits for listeners, which is what tests and long-lived servers want.
+   * Without it, `run` waits for listeners. On a long-lived server, `() => {}` answers first and lets them run on.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Failures after commit land here (listeners, dispatcher). They never fail the caller. */
@@ -646,6 +653,8 @@ export interface Registry<S extends object = object, Mods extends Record<string,
     options: RegistryOptions<Mods>;
     config: Frozen<Cf>;
     derive(more: Overrides): Registry<S, Mods, Cf>;
+    /** An event as `emit` would make it, for `t.jobs.perform`. */
+    envelope(event: EventDef, payload: unknown, scope: S): Envelope;
   };
 }
 
@@ -685,9 +694,6 @@ const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 class StalePayload extends Error {}
-
-/** A job this code can't run: an unknown kind, or a listener that was renamed or removed. A retry after a deploy might help. */
-export class UnknownJob extends Error {}
 
 /**
  * Plain data, what survives JSON: plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped).
@@ -855,33 +861,29 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 
   /**
    * Run one listener for one event. Reports every failure; throws only when a retry might help and the listener has
-   * tries left. `fail` keeps a job that failed for good, when it ran outside its adapter (a queue consumer).
+   * tries left. `fail` keeps a job that failed for good.
    */
-  async function deliver(delivery: Delivery, options: { attempt?: number } = {}, fail?: (error: unknown) => Promise<void>): Promise<DeliveryOutcome> {
+  async function deliver(delivery: Delivery, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
     const { envelope } = delivery;
-    const attempt = options.attempt ?? 1;
     const info: FailureInfo = { listener: delivery.listener, envelope, delivery: delivery.id, attempt };
     const failed = async (error: unknown) => {
       report(error, { ...info, outcome: "failed" });
       await fail?.(error);
       return "failed" as const;
     };
-    if (delivery.kind !== "delivery") {
-      const e = new UnknownJob(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
-      report(e, { ...info, outcome: "retry" });
-      throw e;
-    }
+    // code this version doesn't have (renamed or removed): failed at once and kept, like Rails' ClassMissingError.
+    // `registry.jobs.retry(id)` runs it once the code is back.
+    if (delivery.kind !== "delivery")
+      return failed(new Error(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`));
     const l = listenerById.get(delivery.listener);
-    if (!l) {
-      const e = new UnknownJob(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
-      report(e, { ...info, outcome: "retry" });
-      throw e;
-    }
+    if (!l) return failed(new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so job ${delivery.id} can't run.`));
     // read from the code, like Rails' retry_on: a deploy that changes it applies to jobs already queued
     const attempts = l.listener.attempts ?? 1;
     // its last try was claimed but never finished: a crash, or a listener slower than the lease (Laravel checks this too)
     if (attempt > attempts)
-      return failed(new Error(`[logic-sdk] ${delivery.id} has used its ${attempts} attempt(s): the last one never finished (crashed or outlived the lease).`));
+      return failed(
+        new Error(`[logic-sdk] ${delivery.id} has used its ${attempts} attempt(s): the last one never finished (crashed or outlived the lease), or its result wasn't recorded.`),
+      );
     const event = eventByName.get(envelope.name);
     try {
       let scope = envelope.scope;
@@ -947,28 +949,25 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       ...baseCtx(frame, id, ["query", "mutation"]),
       db: tx.db,
       emit: (event, payload) => {
-        const name = idOf(event);
-        // a queue carries JSON: a Date or a class instance would work in-process and break only in production
-        assertPlain(payload, `${name} payload`, "Events travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
-        const stored = jobScope?.store ? jobScope.store(frame.scope) : frame.scope;
-        assertPlain(stored, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids (jobs.scope.store picks what's saved)");
-        payload = structuredClone(payload); // what was emitted is what gets delivered, even if the caller mutates it after
         // reserve the slot now so events keep emit order, even with async schemas
-        const envelope: Envelope = {
-          id: crypto.randomUUID(),
-          name,
-          payload,
-          scope: structuredClone(stored),
-          occurredAt: now().toISOString(),
-          depth: (frame.eventDepth ?? 0) + 1,
-        };
+        const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
         tx.outbox.push(envelope);
-        const check = parseOwn(event.payload, payload, `${name} payload`).then(() => {});
+        const check = parseOwn(event.payload, envelope.payload, `${envelope.name} payload`).then(() => {});
         check.catch(() => {}); // surfaced at commit; never an unhandled rejection
         tx.pending.push(check);
       },
     };
   }
+  /** An emitted event as jobs carry it: plain JSON, and copied, so what was emitted is what gets delivered. */
+  function envelopeOf(event: EventDef, payload: unknown, scope: object, depth: number): Envelope {
+    const name = idOf(event);
+    // a queue carries JSON: a Date or a class instance would work in-process and break only in production
+    assertPlain(payload, `${name} payload`, "Events travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
+    const stored = jobScope?.store ? jobScope.store(scope) : scope;
+    assertPlain(stored, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids (jobs.scope.store picks what's saved)");
+    return { id: crypto.randomUUID(), name, payload: structuredClone(payload), scope: structuredClone(stored), occurredAt: now().toISOString(), depth };
+  }
+
   const actionCtx = (frame: Frame, id: string): ActionCtx<any> => ({
     ...baseCtx(frame, id, ["query", "mutation", "action"]),
     signal: frame.signal,
@@ -1086,7 +1085,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     definitions: { functions, events, listeners },
     idOf,
     jobs: {
-      run: (job, options) => deliver(job, options, keepFailed && ((error) => keepFailed(job, error))),
+      run: (job, options) => deliver(job, { ...options, fail: keepFailed && ((error) => keepFailed(job, error)) }),
       sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
       async retry(id) {
         if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
@@ -1097,6 +1096,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       options,
       config,
       derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) as object | undefined }),
+      envelope: (event, payload, scope) => envelopeOf(event, payload, scope, 1),
     },
   };
 }

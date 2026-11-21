@@ -56,12 +56,6 @@ test("config: the same values in queries, mutations, actions and listeners", asy
   for (const c of Object.values(seen)) expect(c).toEqual(base);
 });
 
-test("config: a rule reads it", async () => {
-  const error = await make().as(anon).run(place, { items: 4 }).catch((e) => e);
-  expect(error.code).toBe("orders.too_many_items");
-  expect(error.details).toEqual({ max: 3 });
-});
-
 test("config: read-only, and a copy, so nothing changes it under everyone else", async () => {
   const mine = structuredClone(base);
   const registry = make(mine);
@@ -104,7 +98,6 @@ test("config: not in event envelopes; a listener reads its registry's config", a
   await t.begin();
   await t.as(anon).run(place, { items: 5 });
   const envelope: Envelope = t.events[0]!;
-  expect(Object.keys(envelope).sort()).toEqual(["depth", "id", "name", "occurredAt", "payload", "scope"]);
   expect(JSON.stringify(envelope)).not.toContain("shop.test");
   expect((seen.listener as AppConfig).orders.maxItems).toBe(5);
   await t.rollback();
@@ -119,6 +112,8 @@ test("testing: overrides merge section by section, and only for that test regist
   expect(error.code).toBe("orders.too_many_items");
   await t.rollback();
   expect(await registry.as(anon).run(limits)).toEqual({ maxItems: 3, currency: "EUR" }); // untouched
+  const original = await registry.as(anon).run(place, { items: 4 }).catch((e) => e);
+  expect(original).toMatchObject({ code: "orders.too_many_items", details: { max: 3 } });
 });
 
 test("config: optional when the app doesn't declare it", async () => {

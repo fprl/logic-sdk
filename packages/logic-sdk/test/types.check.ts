@@ -1,4 +1,7 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
+import { drizzleAdapter } from "../src/drizzle.ts";
+import { Database } from "bun:sqlite";
+import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import { z } from "zod";
 import { init } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
@@ -206,3 +209,41 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
   // @ts-expect-error and a function without input takes nothing else
   void caller.run(total, { id: "x" });
 }
+
+// jobs.scope: load gets what store saved, and returns the app's scope
+{
+  type JobScopeApp = { actor: string | null; locale: string };
+  const m = init<{ scope: JobScopeApp }>();
+  m.createRegistry({
+    modules: {},
+    jobs: {
+      scope: {
+        store: (s) => ({ who: s.actor }),
+        load: (saved) => {
+          // @ts-expect-error: only what store saved
+          void saved.locale;
+          return { actor: saved.who, locale: "es" };
+        },
+      },
+    },
+  });
+  m.createRegistry({
+    modules: {},
+    jobs: {
+      scope: {
+        // load first: annotate its parameter, since TypeScript reads the object in order (or write store first)
+        load: (saved: { who: string | null }) => ({ actor: saved.who, locale: "es" }),
+        store: (s) => ({ who: s.actor }),
+      },
+    },
+  });
+  m.createRegistry({
+    modules: {},
+    // @ts-expect-error: load must return the app's scope (or null)
+    jobs: { scope: { load: () => ({ nope: 1 }) } },
+  });
+}
+
+// Drizzle's synchronous SQLite drivers commit before an async mutation finishes, and Drizzle's types reject them
+// @ts-expect-error "Sync drivers can't use async functions in transactions!"
+drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
