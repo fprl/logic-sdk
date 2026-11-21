@@ -6,7 +6,7 @@ description: Jobs through Cloudflare Queues, durable through the outbox.
 ```ts
 // worker.ts
 import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
-import { cloudflareQueue, handleQueue } from "logic-sdk/cloudflare";
+import { cloudflareQueue, handleQueue, handleScheduled } from "logic-sdk/cloudflare";
 import type { Job } from "logic-sdk";
 
 const makeRegistry = (env: Env, ctx: ExecutionContext) => {
@@ -27,9 +27,9 @@ export default {
     await handleQueue(makeRegistry(env, ctx), batch);
   },
 
-  // sends what never reached the queue, and delayed jobs once they're due
-  async scheduled(_controller, env, ctx) {
-    await makeRegistry(env, ctx).jobs.sweep();
+  // runs your crons, then sends what never reached the queue and delayed jobs once they're due
+  async scheduled(controller, env, ctx) {
+    await handleScheduled(makeRegistry(env, ctx), controller);
   },
 } satisfies ExportedHandler<Env, Job>;
 ```

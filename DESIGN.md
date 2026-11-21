@@ -228,11 +228,14 @@ export const expireCarts = cron({
 ```
 
 - **One unit per export,** exported through the module's `index.ts` and found by `createRegistry({ modules })` like listeners, so a new cron can't be forgotten. No central file and no `define` prefix: it reads like `query`, `event` and `listener`.
-- **The library declares; the platform triggers:**
-  - Node with pg-boss: the adapter calls `boss.schedule`, which dedupes across instances.
-  - Cloudflare: `scheduled: (c) => registry.crons.handle(c.cron)`, with the expressions listed in wrangler `triggers.crons`.
-  - Vercel: one route, `/api/logic/cron/[name]`, listed under `schedules` in `vercel.json` (Cron Jobs are now legacy there).
-- **Open:** a CLI drift check (a wrangler deploy replaces all triggers, so a missing one is a silently dead cron). Maybe later, maybe too much.
+- **`run` is an existing function, `scope` is required.** Convex (`crons.cron(name, expr, internal.fn, args)`), Laravel's `Schedule::job`, Solid Queue's `class` + `args` and Oban's worker all point at an existing unit, so it keeps its policy, validation and tracing and is tested on its own. `input` is typed by the function and checked as JSON at `createRegistry`. Convex doesn't pass auth to scheduled functions either; a required scope says who acts.
+- **One entry point, `registry.jobs.tick(at)`:** it runs every cron due in `at`'s minute, as a job with the id `<cron id>@<minute>` through the `jobs` adapter. The platform only says when to tick, so one trigger per cron and one `* * * * *` trigger both work: Node uses a timer, Cloudflare `handleScheduled(registry, controller)`, Vercel a Schedules route (Cron Jobs are legacy there, verified), pg-boss its own schedules (planned). Laravel's official setup is the every-minute one (`* * * * * php artisan schedule:run`). The first sketch here mapped `controller.cron` to crons and had a route per cron on Vercel; that ties correctness to strings matching "character-for-character" (Cloudflare's docs) and to config drift.
+- **Once per minute across servers, with the outbox:** `logic_cron_runs`, one row per `<cron id>@<minute>`, written in the tick's transaction `on conflict do nothing`, pruned after a day. Solid Queue's recurring executions (unique on task key and run time) do the same; Laravel's `onOneServer()` takes a cache lock per task and minute; Oban elects a leader. The outbox's own rows can't do it: they're deleted once done. `inProcess()` runs a tick wherever it's ticked, like Laravel without `onOneServer()`.
+- **Five fields, our own matcher, croner as the test oracle.** It only answers "is this minute due in this time zone", about 80 lines on `Intl`, so the core keeps one dependency. Tests compare it with croner minute by minute over a week, a month end and a leap day. No seconds (Oban: "one-minute resolution at minimum"; Cloudflare and Vercel are minute-only), no `@daily` aliases (one way to write it), no `L`/`W`/`#`, and `5/15` is refused: crons disagree on it, and croner refuses it too.
+- **Time zones on the wall clock, Laravel's DST semantics:** a time skipped when clocks go forward doesn't run, one that happens twice runs twice. Croner shifts skipped runs instead; we follow Laravel, which documents it and suggests avoiding time zones.
+- **Missed minutes are skipped and runs may overlap:** pg-boss's `missed: 'skip'` default, and Laravel, Oban and Vercel all allow overlap by default.
+- **Tests run crons inline:** `t.jobs.tick(at)` runs what's due at that minute and throws a failure, in both modes, so `t.jobs.queued` stays listener jobs.
+- **Not now:** helpers (`daily()`), seconds, `withoutOverlapping`, catch-up, schedules created at runtime, and a check that reads `wrangler.jsonc` or `vercel.json` for missing triggers.
 
 ### Options: correctness in code, tuning in infra
 

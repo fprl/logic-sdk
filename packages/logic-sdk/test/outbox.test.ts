@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, test } from "bun:test";
 import { z } from "zod";
-import { drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
+import { cronRunsTable, drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
 import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
 
 // The real Postgres engine, in process. The DDL is what drizzle-kit generates from outboxTable.
@@ -16,13 +16,14 @@ await pg.exec(`
     last_error text, created_at timestamptz DEFAULT now() NOT NULL
   );
   CREATE INDEX logic_outbox_due ON logic_outbox (available_at) WHERE status = 'pending';
+  CREATE TABLE logic_cron_runs (id text PRIMARY KEY, ran_at timestamptz DEFAULT now() NOT NULL);
   CREATE TABLE items (name text PRIMARY KEY);
 `);
 const db = drizzle({ client: pg });
 const items = pgTable("items", { name: text("name").primaryKey() });
 
 type Scope = { actor: string };
-const { mutation, event, listener, createRegistry } = init<{ scope: Scope; db: DrizzleTx<typeof db> }>();
+const { mutation, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleTx<typeof db> }>();
 
 const added = event({ payload: z.object({ name: z.string() }) });
 const add = mutation({
@@ -55,7 +56,7 @@ function setup(jobs: Dispatcher = outbox(db)) {
 }
 
 beforeEach(async () => {
-  await pg.exec("TRUNCATE logic_outbox, items");
+  await pg.exec("TRUNCATE logic_outbox, logic_cron_runs, items");
   next = "ok";
   ran.length = 0;
 });
@@ -284,4 +285,18 @@ test("sweep({ limit }) claims at most that many", async () => {
   await makeDue();
   expect(await registry.jobs.sweep({ limit: 1 })).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(await rows()).toHaveLength(1);
+});
+
+test("crons: several servers ticking the same minute run each cron once, and old runs are pruned", async () => {
+  const tidy = mutation({ async handler(ctx) { await ctx.db.insert(items).values({ name: `tidied ${ran.length}` }); ran.push("tidy"); } });
+  const nightly = cron({ schedule: "0 3 * * *", run: tidy, scope: { actor: "system" } });
+  const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
+  await db.insert(cronRunsTable).values({ id: "x.nightly@old", ranAt: new Date("2026-01-01T00:00:00Z") });
+
+  const at = new Date("2026-11-23T03:00:00Z");
+  await Promise.all([make().jobs.tick(at), make().jobs.tick(at), make().jobs.tick(at)]);
+  await make().jobs.tick(at); // a trigger delivered again, later
+  expect(ran).toEqual(["tidy"]);
+  expect(await db.select({ id: cronRunsTable.id }).from(cronRunsTable)).toEqual([{ id: "x.nightly@20261123T0300Z" }]);
+  expect(await rows()).toEqual([]); // ran and deleted
 });

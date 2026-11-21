@@ -1,13 +1,15 @@
 import { z } from "zod";
 import {
-  createRegistry, init, isDomainError, type Call, type Delivery, type Dispatcher, type DomainError, type Envelope, type FailureInfo,
+  createRegistry, init, isDomainError, type Call, type Delivery, type Dispatcher, type Job, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
+const deliveriesIn = (jobs: Job[]) => jobs.filter((j): j is Delivery => j.kind === "delivery");
+
 type Scope = { actor: string | null; locale: string };
-const { query, mutation, action, event, listener } = init<{ scope: Scope; db: Store; services: { log: string[] } }>();
+const { query, mutation, action, event, listener, cron } = init<{ scope: Scope; db: Store; services: { log: string[] } }>();
 const anyone = () => true;
 const signedIn = (s: Scope): s is Scope & { actor: string } => s.actor !== null;
 
@@ -254,7 +256,7 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
   const seen: string[] = [];
   const { app } = setup({
     jobs: { adapter: {
-      async enqueue(tx, deliveries) { seen.push(`enqueue ${deliveries.map((d) => `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
+      async enqueue(tx, jobs) { seen.push(`enqueue ${jobs.map((d) => d.kind === "delivery" && `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
       async deliver(deliveries, { run }) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
     } },
   });
@@ -263,7 +265,7 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
 });
 
 test("deliveries are JSON: what a queue carries comes back and runs", async () => {
-  const deliveries: Delivery[] = [];
+  const deliveries: Job[] = [];
   const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } } } });
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
@@ -307,7 +309,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: memoryDatabase(),
     services: { log: [] },
-    jobs: { adapter: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) } },
+    jobs: { adapter: { deliver: async (jobs) => void seen.push(...jobs.flatMap((d) => (d.kind === "delivery" ? [d.envelope] : []))) } },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -599,7 +601,7 @@ test("delay: the job says when it may run; in-process runs it right away, like L
   const jobs: Delivery[] = [];
   const make = (adapter?: Dispatcher) =>
     createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
-  await make({ async deliver(d) { jobs.push(...d); } }).as({ actor: "a", locale: "es" }).run(doIt);
+  await make({ async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   await make().as({ actor: "a", locale: "es" }).run(doIt);
   expect(ran).toEqual(["later", "now"]);
@@ -791,7 +793,7 @@ test("ids: an explicit id is local to its module, and jobs store it", async () =
   const r = createRegistry<Scope>({
     modules: { notifications: { renamedEvent: happened, renamedFn: doIt, renamedListener: send } },
     database: memoryDatabase(),
-    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...d); for (const j of d) await run(j); } } },
+    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...deliveriesIn(d)); for (const j of d) await run(j); } } },
   });
   expect(r.idOf(doIt)).toBe("notifications.do");
   expect(r.definitions.listeners.map((l) => [l.id, l.name])).toEqual([["notifications.send", "renamedListener"]]);
@@ -822,7 +824,7 @@ test("jobs.scope: store picks what's saved, load rebuilds it at run time, null d
     database: memoryDatabase(),
     onError: (e) => reported.push((e as Error).message),
     jobs: {
-      adapter: { async deliver(d, { run }) { for (const j of d) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
+      adapter: { async deliver(d, { run }) { for (const j of deliveriesIn(d)) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
       scope: {
         store: (s) => ({ actor: s.actor }), // the locale isn't saved
         load: async (saved) => (saved.actor === "gone" ? null : { actor: saved.actor, locale: "fresh" }),
@@ -871,4 +873,73 @@ test("jobs.scope: store without load throws; load returning undefined retries in
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: (() => undefined) as never } } });
   const job = { kind: "delivery" as const, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   await expect(r.jobs.run(job)).rejects.toThrow(/load returned undefined for x\.react@e\. Return the scope, or null to discard/);
+});
+
+// ── crons ────────────────────────────────────────────────────────────────────
+const system: Scope = { actor: "system", locale: "en" };
+
+function cronSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
+  const ran: string[] = [];
+  const report = action({
+    input: z.object({ kind: z.string() }),
+    authorize: signedIn,
+    async handler(ctx, { kind }) {
+      if (kind === "broken") throw new Error("smtp down");
+      ran.push(`${kind} as ${ctx.scope.actor}`);
+    },
+  });
+  const weekly = cron({ schedule: "0 9 * * 1", run: report, input: { kind: "weekly" }, scope: system });
+  const friday = cron({ schedule: "0 18 * * 5", timezone: "Europe/Madrid", run: report, input: { kind: "friday" }, scope: system });
+  const broken = cron({ schedule: "0 9 * * 1", run: report, input: { kind: "broken" }, scope: system, attempts: 2 });
+  const registry = createRegistry<Scope>({ modules: { reports: { report, weekly, friday, broken } }, database: memoryDatabase(), ...extra });
+  return { registry, ran };
+}
+
+test("crons: tick runs what's due that minute, as the cron's scope, with its input", async () => {
+  const { registry, ran } = cronSetup({ onError: () => {} });
+  expect(registry.definitions.crons.map((c) => c.id)).toEqual(["reports.weekly", "reports.friday", "reports.broken"]);
+  expect(await registry.jobs.tick(new Date("2026-11-23T09:00:42Z"))).toEqual(["reports.weekly", "reports.broken"]); // a Monday, any second of 9:00
+  expect(ran).toEqual(["weekly as system"]);
+  expect(await registry.jobs.tick(new Date("2026-11-23T09:01:00Z"))).toEqual([]);
+  expect(await registry.jobs.tick(new Date("2026-11-27T17:00:00Z"))).toEqual(["reports.friday"]); // 18:00 in Madrid
+  expect(ran).toEqual(["weekly as system", "friday as system"]);
+});
+
+test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, with the cron's attempts", async () => {
+  const sent: Job[] = [];
+  const reported: FailureInfo[] = [];
+  const { registry, ran } = cronSetup({ jobs: { adapter: { async deliver(jobs) { sent.push(...jobs); } } }, onError: (_e, info) => reported.push(info) });
+  await registry.jobs.tick(new Date("2026-11-23T09:00:00Z"));
+  expect(sent).toEqual([
+    { kind: "cron", id: "reports.weekly@20261123T0900Z", cron: "reports.weekly", scheduledAt: "2026-11-23T09:00:00.000Z" },
+    { kind: "cron", id: "reports.broken@20261123T0900Z", cron: "reports.broken", scheduledAt: "2026-11-23T09:00:00.000Z" },
+  ]);
+  expect(ran).toEqual([]); // the adapter runs them, not tick
+  const [, broken] = sent;
+  await expect(registry.jobs.run(broken!, { attempt: 1 })).rejects.toThrow("smtp down"); // a try left
+  expect(await registry.jobs.run(broken!, { attempt: 2 })).toBe("failed");
+  expect(reported.at(-1)).toMatchObject({ listener: "reports.broken", delivery: "reports.broken@20261123T0900Z", outcome: "failed" });
+  expect(await registry.jobs.run({ kind: "cron", id: "reports.gone@x", cron: "reports.gone", scheduledAt: "" })).toBe("failed"); // renamed or removed
+});
+
+test("crons: a schedule, time zone, function or input it can't use fails at startup", () => {
+  const ping = query({ handler: async () => 1 });
+  expect(() => cron({ schedule: "@daily", run: ping, scope: system })).toThrow(/needs five fields/);
+  expect(() => cron({ schedule: "0 9 * * *", timezone: "Europe/Madird", run: ping, scope: system })).toThrow(RangeError);
+  expect(() => cron({ schedule: "0 9 * * *", run: ping, scope: system, attempts: 0 })).toThrow(/cron attempts must be a whole number/);
+  const orphan = cron({ schedule: "0 9 * * *", run: ping, scope: system });
+  expect(() => createRegistry<Scope>({ modules: { x: { orphan } } })).toThrow(/Cron x\.orphan runs a function that isn't registered/);
+  const dated = query({ input: z.object({ at: z.any() }), handler: async () => 1 });
+  const withDate = cron({ schedule: "0 9 * * *", run: dated, input: { at: new Date() }, scope: system });
+  expect(() => createRegistry<Scope>({ modules: { x: { dated, withDate } } })).toThrow(/x\.withDate input isn't plain data at at: a Date/);
+});
+
+test("testing: t.jobs.tick runs the crons due at a minute (default: the frozen now), and throws a failure", async () => {
+  const { registry, ran } = cronSetup();
+  const t = createTestRegistry(registry, { now: "2026-11-23T09:00:00Z" });
+  await t.begin();
+  await expect(t.jobs.tick()).rejects.toThrow("smtp down"); // reports.broken
+  expect(ran).toEqual(["weekly as system"]);
+  expect(await t.jobs.tick("2026-11-27T17:00:00Z")).toEqual(["reports.friday"]);
+  await t.rollback();
 });

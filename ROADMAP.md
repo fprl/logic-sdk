@@ -48,7 +48,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - **Later:** a SQLite outbox (libsql: Drizzle's synchronous SQLite drivers can't run async mutations).
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `attempts`, `delay` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
-   - **Crons:** `cron({ schedule, run, scope })` exported from a module and discovered like listeners. pg-boss schedules on Node; `registry.crons.handle(c.cron)` on Cloudflare; one route on Vercel Schedules.
+   - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with the outbox (`logic_cron_runs`). pg-boss will schedule them itself.
 
    Until per-listener options exist, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
 3. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
@@ -67,8 +67,8 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 ## Later
 
-- **Scheduled calls** (Convex `runAfter`, Active Job `wait:`): `ctx.schedule(fn, input, { at })` from mutations, written in the transaction through the dispatcher. Crons are in Next.
-- **A CLI drift check** for crons against wrangler and `vercel.json` (a deploy replaces all triggers). Maybe; maybe too much.
+- **Scheduled calls** (Convex `runAfter`, Active Job `wait:`): `ctx.schedule(fn, input, { at })` from mutations, written in the transaction through the dispatcher, as delayed rows like a listener's `delay`.
+- **A CLI check** that crons have a trigger in `wrangler.jsonc` or `vercel.json`, for apps with one trigger per cron. Only if missing triggers bite.
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.
 - **Opt-in savepoint `run`** for "try, and continue on failure" (e.g. coupons). `nest` already exists in the Drizzle adapter.
 - **A second database adapter** (Kysely or Prisma) before 1.0.

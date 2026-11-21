@@ -1,6 +1,6 @@
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, Runner, SweepResult } from "./index.ts";
+import type { DatabaseAdapter, DeliveryOutcome, Dispatcher, Job, Runner, SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -53,9 +53,9 @@ export function sqlState(error: unknown): string | undefined {
 export const outboxTable = pgTable(
   "logic_outbox",
   {
-    /** The job id, `<listener id>@<event id>`. */
+    /** The job id: `<listener id>@<event id>`, or `<cron id>@<minute>`. */
     id: text("id").primaryKey(),
-    delivery: jsonb("delivery").$type<Delivery>().notNull(),
+    delivery: jsonb("delivery").$type<Job>().notNull(),
     /** `failed`: out of attempts, or a rule said no. Retrying is your call (`registry.jobs.retry(id)`). */
     status: text("status").$type<"pending" | "failed">().notNull().default("pending"),
     /** Incremented when a runner claims it, so a crash still uses an attempt. */
@@ -67,6 +67,16 @@ export const outboxTable = pgTable(
   },
   (t) => [index("logic_outbox_due").on(t.availableAt).where(sql`${t.status} = 'pending'`)],
 );
+
+/**
+ * The cron runs already ticked, so a minute ticked twice (several servers, a redelivered trigger) runs once, like
+ * Solid Queue's recurring executions. Re-export it next to `outboxTable` when you have crons. Rows older than a day go.
+ */
+export const cronRunsTable = pgTable("logic_cron_runs", {
+  /** The cron job's id, `<cron id>@<minute>`. */
+  id: text("id").primaryKey(),
+  ranAt: timestamp("ran_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export interface OutboxOptions {
   /**
@@ -133,7 +143,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
    * Run one claimed job here and record how it went. The core decides: `failed` (its `fail` wrote the row), a throw
    * (tries left: back off), or done and discarded (delete the row).
    */
-  async function run(job: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
+  async function run(job: Job, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
       outcome = await runner.run(job, {
@@ -151,7 +161,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   }
 
   /** Hand claimed jobs to `via` in one send. Done once the queue has them; a failed send keeps them all for a retry. */
-  async function handOff(queue: Dispatcher, jobs: Delivery[], attempt: number, runner: Runner): Promise<keyof SweepResult> {
+  async function handOff(queue: Dispatcher, jobs: Job[], attempt: number, runner: Runner): Promise<keyof SweepResult> {
     const ids = jobs.map((j) => j.id);
     try {
       await queue.deliver(jobs, runner);
@@ -168,7 +178,19 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     return "done";
   }
 
-  const settle = (job: Delivery, attempt: number, runner: Runner) => (via ? handOff(via, [job], attempt, runner) : run(job, attempt, runner));
+  /** A cron's minute runs once: records the ticks no one recorded yet and returns their ids. Prunes old ones. */
+  async function recordTicks(client: PgClient, ticks: Job[]): Promise<Set<string>> {
+    if (!ticks.length) return new Set();
+    const first = await client
+      .insert(cronRunsTable)
+      .values(ticks.map((j) => ({ id: j.id })))
+      .onConflictDoNothing()
+      .returning({ id: cronRunsTable.id });
+    await client.delete(cronRunsTable).where(lt(cronRunsTable.ranAt, sql`now() - interval '1 day'`));
+    return new Set(first.map((row) => row.id));
+  }
+
+  const settle = (job: Job, attempt: number, runner: Runner) => (via ? handOff(via, [job], attempt, runner) : run(job, attempt, runner));
 
   return {
     /** Holds `delay`s itself, so `via`'s limits on them don't apply. Must share the transaction it writes in. */
@@ -183,10 +205,12 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
      * Inside the mutation's transaction: one unclaimed row per job. Due now: leased, so a sweep leaves it to this request.
      * Delayed: available from `runAt`, for a sweep.
      */
-    async enqueue(tx: unknown, deliveries: Delivery[]) {
-      await (tx as PgClient)
-        .insert(t)
-        .values(deliveries.map((d) => ({ id: d.id, delivery: d, attempts: 0, availableAt: d.runAt ? new Date(d.runAt) : inSeconds(lease) })));
+    async enqueue(tx: unknown, jobs: Job[]) {
+      const client = tx as PgClient;
+      const firstTicks = await recordTicks(client, jobs.filter((j) => j.kind === "cron"));
+      const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id));
+      if (!rows.length) return;
+      await client.insert(t).values(rows.map((j) => ({ id: j.id, delivery: j, attempts: 0, availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease) })));
     },
     /**
      * After commit, in this request: claim the jobs that are due (one update), then run them or hand them over. A crash

@@ -101,3 +101,12 @@ const stock = async (sku: string) => {
   const products = await t.as(guest).run(catalog.list);
   return products.find((p) => p.sku === sku)!.stock;
 };
+
+test("weekday mornings, staff get a digest of what's waiting to ship", async () => {
+  await t.as(ana).run(orders.place, mug());
+  mailer.sent.length = 0;
+
+  expect(await t.jobs.tick("2026-12-01T07:00:00Z")).toEqual(["orders.morningDigest"]); // a Tuesday, 8:00 in Madrid
+  expect(mailer.sent).toEqual([{ to: "staff", subject: "1 orders to ship", text: "https://shop.test/orders" }]);
+  expect(await t.jobs.tick("2026-12-05T07:00:00Z")).toEqual([]); // Saturday
+});

@@ -276,3 +276,12 @@ test("a module that reads the Worker's env fails to load, and the hint says why"
   expect(r.err).toContain('src/links/index.ts:1 reads the environment (env from "cloudflare:workers")');
   expect(r.err).toContain("ctx.config");
 });
+
+test("crons: list shows the schedule and what it runs; show too; the function lists the cron as its caller", () => {
+  const shop = fileURLToPath(new URL("../../../examples/shop", import.meta.url));
+  expect(cli(shop, "list", "--kind", "cron", "--json").json()).toEqual([
+    expect.objectContaining({ id: "orders.morningDigest", kind: "cron", schedule: "0 8 * * 1-5", timezone: "Europe/Madrid", runs: "orders.sendDigest" }),
+  ]);
+  expect(cli(shop, "show", "orders.morningDigest").out).toContain("0 8 * * 1-5");
+  expect(cli(shop, "show", "orders.sendDigest", "--json").json().calledBy).toEqual(["orders.morningDigest"]);
+});

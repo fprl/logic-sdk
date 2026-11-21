@@ -41,32 +41,33 @@ const plainFn = (f: FnInfo) => ({ ...f, runs: f.runs.map((e) => e.to), scopeChan
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
-  docs: { brief: "List every function and listener, like a route list" },
+  docs: { brief: "List every function, listener and cron, like a route list" },
   parameters: {
     flags: {
       module: { kind: "parsed", parse: String, brief: "Only this module", optional: true },
-      kind: { kind: "enum", values: ["query", "mutation", "action", "listener"], brief: "Only this kind", optional: true },
+      kind: { kind: "enum", values: ["query", "mutation", "action", "listener", "cron"], brief: "Only this kind", optional: true },
       exposed: { kind: "boolean", brief: "Only functions with expose: true", optional: true },
       json,
     },
   },
-  func: guarded(async function (this: Context, flags: { module?: string; kind?: FnInfo["kind"] | "listener"; exposed?: boolean; json?: boolean }) {
+  func: guarded(async function (this: Context, flags: { module?: string; kind?: FnInfo["kind"] | "listener" | "cron"; exposed?: boolean; json?: boolean }) {
     const p = await loadProject(this.cwd);
     const rows = [
-      ...p.functions.map((f) => ({ ...plainFn(f), kind: f.kind as FnInfo["kind"] | "listener" })),
+      ...p.functions.map((f) => ({ ...plainFn(f), kind: f.kind as FnInfo["kind"] | "listener" | "cron" })),
       ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, authorize: null, exposed: false, description: l.description ?? `on ${l.event}`, event: l.event })),
+      ...p.crons.map((c) => ({ ...c, kind: "cron" as const, authorize: null, exposed: false, description: `${c.schedule} ${c.timezone} → ${c.runs}` })),
     ].filter(
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind) && (!flags.exposed || r.exposed),
     );
     if (flags.json) return print(this, rows);
-    out(this, table(["NAME", "KIND", "ACCESS", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" ? dim("-") : access(r), r.description ?? ""])));
-    out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length} · logic-sdk show <name> for details`));
+    out(this, table(["NAME", "KIND", "ACCESS", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" || r.kind === "cron" ? dim("-") : access(r), r.description ?? ""])));
+    out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length + p.crons.length} · logic-sdk show <name> for details`));
   }),
 });
 
 // ── show ─────────────────────────────────────────────────────────────────────
 const show = buildCommand<{ json?: boolean }, [string], Context>({
-  docs: { brief: "Everything about one function, listener or event" },
+  docs: { brief: "Everything about one function, listener, cron or event" },
   parameters: {
     positional: { kind: "tuple", parameters: [{ brief: "e.g. bookings.confirm", parse: String, placeholder: "name" }] },
     flags: { json },
@@ -75,10 +76,11 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const p = await loadProject(this.cwd);
     const fn = p.functions.find((f) => f.id === name);
     const listener = p.listeners.find((l) => l.id === name);
+    const cron = p.crons.find((c) => c.id === name);
     const event = p.events.find((e) => e.id === name);
-    if (!fn && !listener && !event) throw unknownName(p, name);
+    if (!fn && !listener && !cron && !event) throw unknownName(p, name);
 
-    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? { ...listener, runs: listener.runs.map((e) => e.to), scopeChanges: scopeChanges(listener.runs) } : event);
+    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? { ...listener, runs: listener.runs.map((e) => e.to), scopeChanges: scopeChanges(listener.runs) } : (cron ?? event));
 
     const lines: string[] = [];
     const row = (label: string, value: string) => lines.push(`${dim(label.padEnd(12))}${value}`);
@@ -101,6 +103,10 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       lines.push(`${bold(listener.id)}  ${kind("listener")}`, dim(where(listener.at)), "");
       row("on", listener.event);
       if (listener.runs.length) row("runs", listener.runs.map(runLabel).join(", "));
+    } else if (cron) {
+      lines.push(`${bold(cron.id)}  ${kind("cron")}`, ...(cron.description ? [cron.description] : []), dim(where(cron.at)), "");
+      row("schedule", `${cron.schedule} ${dim(cron.timezone)}`);
+      row("runs", cron.runs);
     } else if (event) {
       lines.push(`${bold(event.id)}  ${dim("event")}`, "");
       row("emitted by", event.emittedBy.join(", ") || dim("nothing"));
@@ -193,14 +199,14 @@ const checkCommand = buildCommand({
     if (flags.json) return print(this, { errors, warnings: problems.length - errors, problems });
     const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
     if (!problems.length)
-      return out(this, `${paint("green", "✓")} ${count(p.functions.length, "function")}, ${count(p.listeners.length, "listener")} in ${count(p.modules.length, "module")}: no problems`);
+      return out(this, `${paint("green", "✓")} ${count(p.functions.length, "function")}, ${count(p.listeners.length, "listener")}${p.crons.length ? `, ${count(p.crons.length, "cron")}` : ""} in ${count(p.modules.length, "module")}: no problems`);
     out(this, problems.map(diagnostic).join("\n\n"));
     out(this, `\n${errors ? paint("red", `${errors} error${errors > 1 ? "s" : ""}`) : "0 errors"}, ${problems.length - errors} warning${problems.length - errors === 1 ? "" : "s"}`);
   }),
 });
 
 function unknownName(p: Project, name: string) {
-  const names = [...p.functions.map((f) => f.id), ...p.listeners.map((l) => l.id), ...p.events.map((e) => e.id)];
+  const names = [...p.functions.map((f) => f.id), ...p.listeners.map((l) => l.id), ...p.crons.map((c) => c.id), ...p.events.map((e) => e.id)];
   const close = names.filter((n) => n.includes(name) || name.includes(n.split(".")[1] ?? "")).slice(0, 3);
   return new CliError(
     "unknown-name",

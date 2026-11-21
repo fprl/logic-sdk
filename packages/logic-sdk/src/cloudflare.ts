@@ -92,3 +92,22 @@ export async function handleQueue(registry: { jobs: Pick<Jobs, "run"> }, batch: 
     }
   }
 }
+
+/**
+ * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (the outbox's retries,
+ * delayed jobs, and sends a crash left behind). Use one trigger per cron (the same strings as in your code), or one
+ * `"* * * * *"` for all of them.
+ *
+ * ```ts
+ * async scheduled(controller, env, ctx) {
+ *   await handleScheduled(makeRegistry(env, ctx), controller);
+ * },
+ * ```
+ */
+export async function handleScheduled(
+  registry: { jobs: Pick<Jobs, "tick" | "sweep"> },
+  controller: { readonly scheduledTime: number },
+): Promise<void> {
+  await registry.jobs.tick(new Date(controller.scheduledTime));
+  await registry.jobs.sweep();
+}

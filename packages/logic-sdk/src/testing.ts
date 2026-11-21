@@ -3,7 +3,9 @@ import {
   internal,
   type Caller,
   type DeepPartial,
+  type Delivery,
   type DeliveryOutcome,
+  type Dispatcher,
   type Envelope,
   type Fn,
   type FnIn,
@@ -30,12 +32,14 @@ export interface TestOptions<Cf = unknown> {
 
 /** The jobs of the current test, like `registry.jobs` in production. */
 export interface TestJobs<S> {
-  /** What committed mutations queued and nothing ran yet (`jobs: "manual"`). */
-  readonly queued: readonly Job[];
+  /** Listener jobs committed mutations queued, and nothing ran yet (`jobs: "manual"`). */
+  readonly queued: readonly Delivery[];
   /** Run the queued jobs, and the ones they queue, until none are left. Throws a listener's failure. */
   drain(): Promise<void>;
   /** Run one listener by hand, as if its event had been emitted as `scope`. Throws its failure, like `drain()`. */
   perform<O>(listener: Listener<O>, payload: O, options: { scope: S; attempt?: number }): Promise<DeliveryOutcome>;
+  /** Run the crons due in `at`'s minute (default: the test's now), here and now. Resolves their ids; throws a failure. */
+  tick(at?: Date | string): Promise<string[]>;
 }
 
 export interface TestRegistry<S extends object, Mods extends Record<string, object>, Cf> {
@@ -62,13 +66,23 @@ interface Open<S extends object, Mods extends Record<string, object>, Cf> {
   db: unknown;
   events: Envelope[];
   stubs: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
-  queued: Job[];
+  queued: Delivery[];
   /** Listener failures during the current call. */
   failures: unknown[];
   close(): Promise<void>;
 }
 
 class Rollback extends Error {}
+
+/** `jobs: "manual"`: listener jobs wait in `queued`; a cron's run (from `registry.jobs.tick`) runs, as it was asked for. */
+const manual = (queued: Delivery[]): Dispatcher => ({
+  async deliver(jobs, runner) {
+    for (const job of jobs) {
+      if (job.kind === "delivery") queued.push(job);
+      else await runner.run(job).catch(() => {}); // reported, so the test sees it
+    }
+  },
+});
 
 /**
  * Run each test inside a transaction that's rolled back, set up once with hooks:
@@ -100,7 +114,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     const database = registryOptions.database;
     const events: Envelope[] = [];
     const stubs: Open<S, Mods, Cf>["stubs"] = new Map();
-    const queued: Job[] = [];
+    const queued: Delivery[] = [];
     const failures: unknown[] = [];
     const derived = internal(registry).derive({
       database: db !== undefined && database?.nest ? database.nest(db) : database,
@@ -109,7 +123,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       now,
       stubs,
       record: (e) => events.push(e),
-      adapter: options.jobs === "manual" ? { deliver: async (jobs) => void queued.push(...jobs) } : inProcess(),
+      adapter: options.jobs === "manual" ? manual(queued) : inProcess(),
       waitUntil: undefined, // listeners finish before a call returns, inside the test
       onError(error, info) {
         if (info.outcome !== "discarded") failures.push(error);
@@ -121,7 +135,13 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
 
   /** Run `work`, then throw the first listener failure since the last one thrown (calls through `t.registry` included). */
   async function settle<T>(state: Open<S, Mods, Cf>, work: () => Promise<T>): Promise<T> {
-    const out = await work();
+    let out: T;
+    try {
+      out = await work();
+    } catch (e) {
+      state.failures.length = 0; // what it threw is the failure: don't report it again on the next call
+      throw e;
+    }
     throwFailures(state);
     return out;
   }
@@ -201,6 +221,13 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const envelope = internal(state.registry).envelope(registered.event, payload, scope);
         const job: Job = { kind: "delivery", id: `${registered.id}@${envelope.id}`, listener: registered.id, envelope };
         return settle(state, () => state.registry.jobs.run(job, { attempt }));
+      },
+      async tick(at) {
+        const state = current();
+        const clock = now ?? registryOptions.now ?? (() => new Date());
+        const jobs = internal(state.registry).due(at === undefined ? clock() : new Date(at));
+        for (const job of jobs) await settle(state, () => state.registry.jobs.run(job));
+        return jobs.map((job) => job.cron);
       },
     },
   };

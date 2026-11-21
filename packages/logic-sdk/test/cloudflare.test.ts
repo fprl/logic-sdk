@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { expect, test } from "bun:test";
-import { cloudflareQueue, handleQueue, type QueueBatch } from "../src/cloudflare.ts";
+import { cloudflareQueue, handleQueue, handleScheduled, type QueueBatch } from "../src/cloudflare.ts";
 import { init, type Job } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string };
-const { mutation, event, listener, createRegistry } = init<{ scope: Scope; db: Store }>();
+const { mutation, event, listener, cron, createRegistry } = init<{ scope: Scope; db: Store }>();
 
 const happened = event({ payload: z.object({ what: z.string() }) });
 const emit = mutation({ input: z.object({ what: z.array(z.string()) }), async handler(ctx, { what }) {
@@ -48,7 +48,7 @@ test("cloudflareQueue sends after commit; handleQueue runs each job: ack, or ret
   await registry.as({ actor: "ana" }).run(emit, { what: ["ok", "throw", "deny"] });
   expect(ran).toEqual([]); // nothing runs in the request
   const jobs = queue.sent.flat().map((m) => m.body);
-  expect(jobs.map((j) => j.envelope.payload)).toEqual([{ what: "ok" }, { what: "throw" }, { what: "deny" }]);
+  expect(jobs.map((j) => j.kind === "delivery" && j.envelope.payload)).toEqual([{ what: "ok" }, { what: "throw" }, { what: "deny" }]);
 
   const { batch, acked, retried } = batchOf(jobs, 2);
   await handleQueue(registry, batch);
@@ -93,4 +93,19 @@ test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry 
   expect(() => createRegistry({ modules: { x: { happened, emit, tooLate } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue) } })).toThrow(
     /x\.tooLate has a delay of 90000 seconds; Cloudflare Queues delay at most 86400.*outbox/,
   );
+});
+
+test("handleScheduled ticks at the trigger's time and sweeps; a cron's run goes through the queue like any job", async () => {
+  ran.length = 0;
+  const queue = fakeQueue();
+  const nightly = cron({ schedule: "0 3 * * *", run: emit, input: { what: ["nightly"] }, scope: { actor: "system" } });
+  const registry = createRegistry({ modules: { x: { ...modules.x, nightly } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue) } });
+  await handleScheduled(registry, { scheduledTime: Date.parse("2026-11-23T03:00:00Z") });
+  const [message] = queue.sent.flat();
+  expect(message!.body).toMatchObject({ kind: "cron", id: "x.nightly@20261123T0300Z" });
+
+  const { batch, acked } = batchOf([message!.body]);
+  await handleQueue(registry, batch); // the consumer runs the cron, whose mutation emits, which sends again
+  expect(acked).toEqual(["x.nightly@20261123T0300Z"]);
+  expect(queue.sent.flat().map((m) => m.body.kind)).toEqual(["cron", "delivery"]);
 });

@@ -75,6 +75,7 @@ test("the receipt email", async () => {
 
 - **Inline** runs listeners right after each mutation, inside the test. `attempts` and `delay` don't apply: one try, right away, like Laravel's sync queue.
 - **Manual** keeps jobs in `t.jobs.queued` until `drain()`, to test one module without the others reacting.
+- **`tick(at)`** runs the [crons](/docs/concepts/crons) due at that minute, inline in both modes.
 - **`perform`** runs one listener by hand, as if its event had been emitted as `scope`: Oban's `perform_job`, Rails' `perform_now`.
 - **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it; one that ran through `t.registry` (an adapter's call) makes `rollback` throw. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw.
 
