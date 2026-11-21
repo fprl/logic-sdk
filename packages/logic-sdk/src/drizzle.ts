@@ -136,7 +136,12 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   async function run(job: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
-      outcome = await runner.run(job, { attempt, fail: async (error) => void (await markFailed([job.id], attempt, error)) });
+      outcome = await runner.run(job, {
+        attempt,
+        fail: async (error) => {
+          await markFailed([job.id], attempt, error);
+        },
+      });
     } catch (e) {
       await backOff([job.id], attempt, e);
       return "retrying";
@@ -194,8 +199,9 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
         .update(t)
         .set({ attempts: 1, availableAt: inSeconds(lease) }) // the lease starts now: enqueue's now() was the transaction's start
         .where(and(inArray(t.id, ids), eq(t.attempts, 0), eq(t.status, "pending")))
-        .returning({ delivery: t.delivery });
-      const due = claimed.map((row) => row.delivery);
+        .returning({ id: t.id });
+      const mineNow = new Set(claimed.map((row) => row.id));
+      const due = deliveries.filter((d) => mineNow.has(d.id)); // in emit order: RETURNING has none
       if (!due.length) return;
       if (via) await handOff(via, due, 1, runner);
       // one job's bookkeeping error (a lost connection) mustn't stop the others: the sweep sorts it out
