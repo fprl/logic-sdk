@@ -461,7 +461,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
         checkAttempts(`ctx.schedule(${fnId})`, attempts);
         if (replace !== undefined) {
-          if (typeof replace !== "string" || !replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty string key.`);
+          if (!replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty key.`);
           if (!dispatcher.replaces)
             throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use outbox(db).`);
         }

@@ -1174,7 +1174,7 @@ test("ctx.schedule replace: refused where nothing can replace (in-process), and 
   const go = mutation({ input: z.object({ key: z.string() }), async handler(ctx, { key }) { ctx.schedule(ping, undefined, { delay: 0, replace: key }); } });
   const app = createRegistry<Scope>({ modules: { x: { ping, go } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" });
   await expect(app.run(go, { key: "b1" })).rejects.toThrow(/your jobs adapter can't replace one it already has\. Use outbox\(db\)/);
-  await expect(app.run(go, { key: "" })).rejects.toThrow(/replace must be a non-empty string key/);
+  await expect(app.run(go, { key: "" })).rejects.toThrow(/replace must be a non-empty key/);
 });
 
 test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {
