@@ -24,4 +24,5 @@ bun run --filter web dev   # docs site
 - **Every change to a published package gets a changeset** (see CONTRIBUTING.md). No hand edits to `CHANGELOG.md` or versions.
 - **Decisions go in DESIGN.md with the reason and what would change it.** Claims about other libraries cite a source; inference is labelled.
 - **Reference stacks, in order:** Vercel, TanStack, Convex, then Rails, Laravel, Phoenix.
+- **Before designing a mechanism, check what the stacks do.** Retries, claims, scheduling, failure handling, test helpers: read how Rails, Laravel and Phoenix (Oban) do it, and the TS stacks where they have one, from their source or docs, not memory. Then say what we take from them: all of it, some, or nothing, and why. Designing first and checking after is how fixes kept needing fixes (see DESIGN.md, "Jobs").
 - **Keep the core small.** Adapter concerns live in adapters and their own `meta` namespace, never as core fields.
