@@ -1,0 +1,11 @@
+name: Idea
+description: A feature, an API change, or a question about the design
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The problem, and the code you'd like to write
+      description: How Rails, Laravel or Phoenix handle it helps, if you know.
+    validations:
+      required: true
