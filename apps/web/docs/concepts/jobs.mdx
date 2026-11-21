@@ -83,7 +83,7 @@ export const sendReceipt = listener({
 - **`attempts` defaults to 1,** like Rails (no `retry_on`), Laravel (`--tries=1`) and Solid Queue. A retry repeats side effects, so you opt in per listener, like Laravel's `$tries`. Oban defaults to 20 and pg-boss to 3.
 - **Out of attempts, the job is `failed`:** kept by the outbox, retried with `registry.jobs.retry(id)`.
 - **A last try that never finished** (the process crashed, or the listener outlived the outbox's lease) is `failed` without running again, as Laravel's worker does.
-- **Read from your code when the job runs,** like Rails' `retry_on`: a deploy that changes `attempts` applies to jobs already queued.
+- **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
 - **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then; Cloudflare gets it as `delaySeconds`.
 - **`inProcess()` tries once and can't hold a job:** `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `outbox(db)`. Cloudflare alone holds up to 24 hours.
 
@@ -95,6 +95,7 @@ export const confirm = mutation({
     // ...confirm it
     ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn) });
     ctx.schedule(holds.expire, { bookingId }, { delay: 15 * 60 }); // seconds
+    ctx.schedule(payments.capture, { bookingId }, { delay: 60, attempts: 3 }); // an API call: give it tries
   },
 });
 ```
@@ -103,7 +104,9 @@ export const confirm = mutation({
 - **Only from mutations:** it's committed with the transaction, so a booking that rolls back never leaves a reminder behind, as in Convex. An action or listener that wants to schedule runs a mutation that does.
 - **`{ at }` or `{ delay }`, not both:** a `Date` (from `ctx.now()`), or seconds like a listener's `delay`. It returns the job id. Due now (`delay: 0`, an `at` already past) runs right after commit, like a listener.
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
-- **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit). One try.
+- **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
+- **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
+- **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
 - **It needs an adapter that holds jobs:** `outbox(db)`. `ctx.schedule` throws on `inProcess()`.
 - **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 

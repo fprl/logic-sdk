@@ -44,8 +44,8 @@ import type {
 export type {
   ActionCtx,
   Call,
-  CallJob,
   Caller,
+  CallJob,
   Config,
   Cron,
   CronJob,
@@ -65,8 +65,8 @@ export type {
   FnOut,
   Frozen,
   Job,
-  JobScope,
   Jobs,
+  JobScope,
   JobsOptions,
   Kind,
   Listener,
@@ -86,8 +86,9 @@ export type {
   RunArgs,
   RunJob,
   RunJobOptions,
-  RunOptions,
   Runner,
+  RunOptions,
+  ScheduleOptions,
   SweepResult,
 } from "./types.ts";
 export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
@@ -445,13 +446,15 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         check.catch(() => {}); // surfaced at commit; never an unhandled rejection
         tx.pending.push(check);
       },
-      schedule: (fn, input, when) => {
+      schedule: (fn, input, { at, delay, attempts = 1 }) => {
         const fnId = idOf(fn);
-        const seconds = when.at ? (when.at.getTime() - now().getTime()) / 1000 : (when.delay ?? NaN);
-        if (!Number.isFinite(seconds) || (!when.at && seconds < 0))
+        const seconds = at ? (at.getTime() - now().getTime()) / 1000 : (delay ?? NaN);
+        if (!Number.isFinite(seconds) || (!at && seconds < 0))
           throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
+        checkAttempts(`ctx.schedule(${fnId})`, attempts);
         // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
-        if (seconds > 0) checkHold(`ctx.schedule(${fnId})`, seconds);
+        const waits = seconds > 0;
+        if (waits) checkHold(`ctx.schedule(${fnId})`, seconds);
         assertPlain(input, `${fnId} input`, "Scheduled calls wait as JSON: send an ISO string and let the schema turn it into a Date");
         const job: CallJob = {
           kind: "call",
@@ -459,8 +462,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           fn: fnId,
           input: structuredClone(input),
           scope: storedScope(frame.scope, `the scope scheduling ${fnId}`),
+          attempts,
+          depth: waits ? 0 : (frame.eventDepth ?? 0) + 1, // due now, it's the next hop of this chain; a real wait starts a new one
         };
-        if (seconds > 0) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
+        if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
         tx.calls.push(job);
         // our own code passed it: a bad input is a bug, surfaced at commit like an event's payload
         if (fn.input) {
@@ -492,7 +497,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toDeliveries, runner, jobs, due, checkHold } = makeJobs({
+  const { toJobs, runner, jobs, due, checkHold } = makeJobs({
     listeners,
     events,
     crons,
@@ -505,7 +510,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     now,
     wrap,
     report,
-    runAs: (fn, input, scope) => invoke(fn, input, enter({ scope, depth: -1 }, undefined), ["query", "mutation", "action"]),
+    runAs: (fn, input, scope, eventDepth) => invoke(fn, input, enter({ scope, depth: -1, eventDepth }, undefined), ["query", "mutation", "action"]),
     listenerCtx: (scope, eventDepth, id) => actionCtx({ scope, depth: 0, eventDepth }, id),
   });
 
@@ -566,7 +571,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
             const out = await execute(input, mutationCtx({ ...frame, tx }, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
-            const jobs = [...toDeliveries(tx.outbox), ...tx.calls];
+            const jobs = toJobs(tx.outbox, tx.calls);
             if (jobs.length) await enqueue?.(txDb, jobs);
             return { out, outbox: tx.outbox, jobs };
           });

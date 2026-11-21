@@ -118,6 +118,8 @@ export interface Delivery<P = unknown, S = object> {
   /** The listener's id, `"<module>.<id or export>"`. */
   listener: string;
   envelope: Envelope<P, S>;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
   /** When it may run (ISO), for a listener with a `delay`. Absent: right away. */
   runAt?: string;
 }
@@ -130,6 +132,8 @@ export interface CronJob {
   cron: string;
   /** The minute it was due (ISO). */
   scheduledAt: string;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
   /** When it may run (ISO), like a delivery's. Absent for crons: they run when ticked. */
   runAt?: string;
 }
@@ -143,6 +147,13 @@ export interface CallJob {
   input: unknown;
   /** Who it runs as, as `jobs.scope.store` saved it (`load` rebuilds it when it runs). */
   scope: object;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
+  /**
+   * Hops in the chain, counted with events' (`maxEventDepth`): a call due now continues the chain that scheduled it, so a
+   * function that schedules itself with no delay stops like a listener loop. A delayed one starts a new chain (0).
+   */
+  depth: number;
   /** When it may run (ISO). */
   runAt?: string;
 }
@@ -259,9 +270,12 @@ export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C
    * Run a mutation or action once, later, as this scope: `ctx.schedule(guests.remind, { bookingId }, { at })` or
    * `{ delay: 3600 }` (seconds). Committed with this transaction, so a rollback never leaves one behind. Returns its job
    * id. It runs whatever happens meanwhile, so it should check that its reason still holds ("still confirmed?").
+   * `attempts`: tries in total, default 1; give an action that calls an API a few.
    */
-  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, when: { at: Date; delay?: never } | { delay: number; at?: never }): string;
+  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, options: ScheduleOptions): string;
 }
+/** When a scheduled call runs (`at` or `delay` in seconds), and how many tries it gets. */
+export type ScheduleOptions = ({ at: Date; delay?: never } | { delay: number; at?: never }) & { attempts?: number };
 export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
   /** Call any function: `await ctx.run(bookings.confirmPaid, { bookingId })`. Each mutation you run commits on its own. */
@@ -464,7 +478,11 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   /** Failures after commit land here (listeners, dispatcher). They never fail the caller. */
   onError?: (error: unknown, info: FailureInfo) => void;
   now?: () => Date;
-  /** Max chain of listener → mutation → event → listener… before delivery stops. Default 8 (real chains are 2 or 3). */
+  /**
+   * Max chain of listener → mutation → event → listener… before queueing stops, reported. Calls `ctx.schedule` runs
+   * right away count too, so a function that schedules itself with no delay stops the same way. Default 8 (real chains
+   * are 2 or 3).
+   */
   maxEventDepth?: number;
   /**
    * Re-run a top-level mutation in a fresh transaction when the database says it lost a race (deadlock,
