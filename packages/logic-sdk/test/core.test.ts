@@ -1123,7 +1123,16 @@ test("a cron starts a chain: what its function emits is the first hop", async ()
   const r = createRegistry<Scope>({
     modules: { x: { pinged, ping, pong, nightly } },
     database: memoryDatabase(),
-    jobs: { adapter: { async deliver(jobs, runner) { for (const job of jobs) job.kind === "delivery" ? depths.push(job.envelope.depth) : await runner.run(job); } } },
+    jobs: {
+      adapter: {
+        async deliver(jobs, runner) {
+          for (const job of jobs) {
+            if (job.kind === "delivery") depths.push(job.envelope.depth);
+            else await runner.run(job);
+          }
+        },
+      },
+    },
   });
   await r.jobs.tick(new Date("2026-11-23T03:00:00Z"));
   expect(depths).toEqual([1]);
