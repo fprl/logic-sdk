@@ -545,7 +545,7 @@ test("a caught nested failure of any kind dooms the transaction: `throw undefine
 test("in-process stores nothing: sweep resolves zeros (one cron works with any adapter), retry throws", async () => {
   const { registry } = setup();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
-  await expect(registry.jobs.retry("log.onAdded@e1")).rejects.toThrow(/stores no jobs, so there's nothing to retry \(log\.onAdded@e1\)/);
+  await expect(registry.jobs.retry("log.onAdded@e1")).rejects.toThrow(/keeps no jobs, so there's nothing to retry \(log\.onAdded@e1\)/);
 });
 
 test("registry.jobs.run: a throw retries while the job has tries left; rules and stale payloads fail at once", async () => {

@@ -1,6 +1,6 @@
 import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, DeliveryOutcome, Dispatcher, Job, Runner, SweepResult } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type DeliveryOutcome, type Dispatcher, type Job, type Runner, type SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -56,7 +56,7 @@ const waiting = sql`status = 'pending' and attempts = 0`;
 export const outboxTable = pgTable(
   "logic_outbox",
   {
-    /** The job id: `<listener id>@<event id>`, or `<cron id>@<minute>`. */
+    /** The job id: `<listener id>@<event id>`, `<cron id>@<minute>`, or `<function id>@<uuid>`. */
     id: text("id").primaryKey(),
     delivery: jsonb("delivery").$type<Job>().notNull(),
     /** `failed`: out of attempts, or a rule said no. Retrying is your call (`registry.jobs.retry(id)`). */
@@ -109,7 +109,7 @@ export interface OutboxOptions {
   backoff?: (attempt: number) => number;
 }
 
-/** The outbox transport. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
+/** The outbox adapter. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
 export interface Outbox extends Dispatcher {
   /** Retries whose backoff is over and deliveries whose runner crashed (lease expired), claimed one at a time. */
   sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
@@ -217,14 +217,14 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
      * Delayed: available from `runAt`, for a sweep.
      */
     async enqueue(tx: unknown, jobs: Job[]) {
-      const client = tx as PgClient;
+      const client = tx as PgClient; // SAFETY: check() refuses a database that isn't this db, so tx is its transaction
       const firstTicks = await recordTicks(client, jobs.filter((j) => j.kind === "cron"));
       const row = (j: Job) => ({
         id: j.id,
         delivery: j,
         attempts: 0,
         availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease),
-        replaceKey: j.kind === "call" && j.replace !== undefined ? `${j.fn}@${j.replace}` : null,
+        replaceKey: replaceKeyOf(j) ?? null,
       });
       const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id)).map(row);
       const plain = rows.filter((r) => r.replaceKey === null);

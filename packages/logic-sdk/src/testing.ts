@@ -1,5 +1,6 @@
 import {
   internal,
+  replaceKeyOf,
   type Caller,
   type DeepPartial,
   type CallJob,
@@ -14,6 +15,7 @@ import {
   type Listener,
   type Registry,
 } from "./index.ts";
+import { deliveryOf } from "./jobs.ts";
 
 export interface TestOptions<Cf = unknown> {
   /** Replace services (e.g. `{ mailer: memoryMailer() }`). */
@@ -74,7 +76,7 @@ interface Open<S extends object, Mods extends Record<string, object>, Cf> {
   stubs: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   queued: Delivery[];
   scheduled: CallJob[];
-  /** Listener failures during the current call. */
+  /** Job failures (listeners, crons, scheduled calls) during the current call. */
   failures: unknown[];
   close(): Promise<void>;
 }
@@ -91,8 +93,9 @@ const testJobs = (mode: TestOptions["jobs"], app: Dispatcher | undefined, queued
   replaces: app?.replaces,
   async deliver(jobs, runner) {
     for (const job of jobs) {
-      if (job.kind === "call" && job.replace !== undefined) {
-        const waiting = scheduled.findIndex((c) => c.fn === job.fn && c.replace === job.replace);
+      const key = replaceKeyOf(job);
+      if (key) {
+        const waiting = scheduled.findIndex((c) => replaceKeyOf(c) === key);
         if (waiting >= 0) scheduled.splice(waiting, 1);
       }
       const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
@@ -271,8 +274,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const registered = state.registry.definitions.listeners.find((l) => l.listener === listener);
         if (!registered) throw new Error("[logic-sdk] t.jobs.perform got a listener that isn't registered: export it from its module.");
         const envelope = internal(state.registry).envelope(registered.event, payload, scope);
-        const job: Job = { kind: "delivery", id: `${registered.id}@${envelope.id}`, listener: registered.id, envelope, attempts: registered.listener.attempts ?? 1 };
-        return settle(state, () => state.registry.jobs.run(job, { attempt }));
+        return settle(state, () => state.registry.jobs.run(deliveryOf(registered, envelope), { attempt }));
       },
       async tick(at) {
         const state = current();
