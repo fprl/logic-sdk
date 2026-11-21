@@ -1,6 +1,6 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, Delivery, DeliveryOutcome, Dispatcher, Runner, SweepResult } from "./index.ts";
+import { UnknownJob, type DatabaseAdapter, type Delivery, type DeliveryOutcome, type Dispatcher, type Runner, type SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -123,8 +123,6 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
    */
   const mine = (ids: string[], attempt: number) => and(inArray(t.id, ids), eq(t.attempts, attempt), eq(t.status, "pending"));
   const via = options.via;
-  /** Run here, a listener's own `attempts` end its tries first; this only stops jobs the code can't run. Set in `check`. */
-  let runLimit = maxAttempts;
 
   /** A try that threw: back off, or mark failed once out of tries. */
   async function retryLater(ids: string[], attempt: number, limit: number, error: unknown): Promise<"failed" | "retrying"> {
@@ -137,13 +135,16 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     return "retrying";
   }
 
-  /** Run one claimed job here and record how it went. The listener's `attempts` decide when a throw becomes `failed`. */
+  /**
+   * Run one claimed job here and record how it went. A listener's `attempts` decide when it's `failed` (the core resolves
+   * it); `maxAttempts` only stops jobs this code can't run.
+   */
   async function run(job: Delivery, attempt: number, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
       outcome = await runner.run(job, { attempt });
     } catch (e) {
-      return retryLater([job.id], attempt, runLimit, e);
+      return retryLater([job.id], attempt, e instanceof UnknownJob ? maxAttempts : Infinity, e);
     }
     if (outcome === "failed") {
       await db.update(t).set({ status: "failed", lastError: "failed for good (reported to onError)" }).where(mine([job.id], attempt));
@@ -170,8 +171,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
 
   return {
     /** Holds `delay`s itself, so `via`'s limits on them don't apply. Must share the transaction it writes in. */
-    check({ listeners, database }) {
-      runLimit = Math.max(maxAttempts, ...listeners.map((l) => l.listener.attempts ?? 1));
+    check({ database }) {
       if (database && database.db !== db)
         throw new Error(
           "[logic-sdk] outbox(db) must use the same database as `database`: jobs are written in your mutation's transaction. " +
@@ -193,7 +193,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       const due = deliveries.filter((d) => !d.runAt);
       if (!due.length) return;
       if (via) await handOff(via, due, 1, runner);
-      else for (const d of due) await run(d, 1, runner);
+      // one job's bookkeeping error (a lost connection) mustn't stop the others: the sweep sorts it out
+      else for (const d of due) await run(d, 1, runner).catch((e) => runner.report(e, d, 1));
     },
     /** One at a time, so a job the queue rejects (too big) can't hold back the others. */
     async sweep(runner, { limit = 100 } = {}) {

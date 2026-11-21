@@ -387,6 +387,14 @@ test("testing: a failing listener makes run throw, so a test can't pass over it"
   await t.rollback();
 });
 
+test("testing: a listener failure from a call through t.registry fails the test at rollback", async () => {
+  const { registry } = setup();
+  const t = createTestRegistry(registry);
+  await t.begin();
+  await t.registry.as({ actor: "a", locale: "es" }).run(items.add, { name: "listener-fails" }); // an adapter's call: not thrown here
+  await expect(t.rollback()).rejects.toThrow("listener exploded");
+});
+
 test("testing: perform runs one listener by hand, as a scope; drain and perform throw its failure", async () => {
   const { registry, services } = setup();
   const t = createTestRegistry(registry, { jobs: "manual" });

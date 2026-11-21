@@ -253,6 +253,15 @@ test("Drizzle's synchronous SQLite drivers don't type-check: they commit before 
   drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
 });
 
+test("a job this code can't run (its listener was removed) stops after maxAttempts", async () => {
+  const { registry } = setup(outbox(db, { maxAttempts: 2 }));
+  const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
+  await db.insert(outboxTable).values({ id: "x.removed@e", delivery: { kind: "delivery", id: "x.removed@e", listener: "x.removed", envelope } });
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 1 });
+  await makeDue();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
+});
+
 test("a listener's attempts beyond maxAttempts still get their tries", async () => {
   const stubborn = listener({ event: () => added, attempts: 4, async handler() { ran.push("stubborn"); throw new Error("still down"); } });
   const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { maxAttempts: 2 }) }, onError: () => {} });

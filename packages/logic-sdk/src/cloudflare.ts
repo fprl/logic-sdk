@@ -46,14 +46,17 @@ export function cloudflareQueue(queue: QueueBinding): Dispatcher {
   };
 }
 
-/** Under Cloudflare's limits per send: 100 messages, 256 KB in all, 128 KB each. */
+/** Under Cloudflare's limits per send: 100 messages, 256 KB in all, 128 KB each. Checks every job before sending any. */
 function* batches(jobs: Job[]) {
-  let batch: { body: Job; delaySeconds?: number }[] = [];
-  let bytes = 0;
-  for (const body of jobs) {
+  const sized = jobs.map((body) => {
     const size = encoder.encode(JSON.stringify(body)).length + OVERHEAD_BYTES;
     if (size > MAX_MESSAGE_BYTES)
       throw new Error(`[logic-sdk] job ${body.id} is ${size} bytes; Cloudflare Queues take ${MAX_MESSAGE_BYTES} per message. Keep payloads to ids.`);
+    return { body, size };
+  });
+  let batch: { body: Job; delaySeconds?: number }[] = [];
+  let bytes = 0;
+  for (const { body, size } of sized) {
     if (batch.length && (batch.length === MAX_MESSAGES || bytes + size > MAX_BATCH_BYTES)) {
       yield batch;
       batch = [];

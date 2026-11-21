@@ -75,7 +75,7 @@ await registry.jobs.retry(id);                                        // put a f
 export const sendReceipt = listener({
   event: () => orders.placed,
   attempts: 5, // tries in total, the first included
-  delay: 60,   // seconds after commit before the first try
+  delay: 60,   // seconds after the event before the first try
   async handler(ctx, { orderId }) { ... },
 });
 ```

@@ -147,7 +147,7 @@ export interface Listener<O = unknown> {
   readonly event: () => EventDef<unknown, O>;
   /** Tries in total, the first included. Default 1. */
   readonly attempts?: number;
-  /** Seconds after commit before the first try. Default 0. */
+  /** Seconds after the event before the first try. Default 0. */
   readonly delay?: number;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
@@ -543,7 +543,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
        * Once they're used, the job is `failed` (kept by the outbox, retried with `registry.jobs.retry(id)`).
        */
       attempts?: number;
-      /** Seconds after commit before the first try. `inProcess()` ignores it, like Laravel's sync queue. */
+      /** Seconds after the event before the first try. `inProcess()` ignores it, like Laravel's sync queue. */
       delay?: number;
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
@@ -685,6 +685,9 @@ const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 class StalePayload extends Error {}
+
+/** A job this code can't run: an unknown kind, or a listener that was renamed or removed. A retry after a deploy might help. */
+export class UnknownJob extends Error {}
 
 /**
  * Plain data, what survives JSON: plain objects, arrays, strings, finite numbers, booleans, null (undefined is dropped).
@@ -864,13 +867,13 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       return "failed" as const;
     };
     if (delivery.kind !== "delivery") {
-      const e = new Error(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
+      const e = new UnknownJob(`[logic-sdk] job ${delivery.id} has kind ${JSON.stringify(delivery.kind)}, which this version can't run.`);
       report(e, { ...info, outcome: "retry" });
       throw e;
     }
     const l = listenerById.get(delivery.listener);
     if (!l) {
-      const e = new Error(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
+      const e = new UnknownJob(`[logic-sdk] ${delivery.listener} isn't a registered listener (renamed or removed?), so delivery ${delivery.id} can't run.`);
       report(e, { ...info, outcome: "retry" });
       throw e;
     }

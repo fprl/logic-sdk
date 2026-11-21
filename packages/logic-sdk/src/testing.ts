@@ -119,12 +119,16 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     return { registry: derived, db, events, stubs, queued, failures, close };
   }
 
-  /** Run `work`, then throw the first listener failure it caused. */
+  /** Run `work`, then throw the first listener failure since the last one thrown (calls through `t.registry` included). */
   async function settle<T>(state: Open<S, Mods, Cf>, work: () => Promise<T>): Promise<T> {
-    state.failures.length = 0;
     const out = await work();
-    if (state.failures.length) throw state.failures[0];
+    throwFailures(state);
     return out;
+  }
+  function throwFailures(state: Open<S, Mods, Cf>) {
+    if (!state.failures.length) return;
+    const [first] = state.failures.splice(0);
+    throw first;
   }
 
   return {
@@ -157,10 +161,12 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         await done;
       });
     },
+    /** Also throws a listener failure nothing surfaced yet (a call through `t.registry`), so the test fails. */
     async rollback() {
       const state = open;
       open = undefined;
       await state?.close();
+      if (state) throwFailures(state);
     },
     as: (scope) => ({
       scope,
