@@ -7,6 +7,11 @@ export interface TickingOptions {
   onError?: (error: unknown) => void;
 }
 
+export interface StopOptions {
+  /** Seconds to wait for the running ticks and sweep before giving up on them. Default 30, like pg-boss's `stop()`. */
+  timeout?: number;
+}
+
 const MINUTE = 60_000;
 /**
  * Ticks still running before the next minute is skipped (reported). Overlap is normal, like Laravel and Oban: a slow
@@ -17,18 +22,29 @@ const MAX_RUNNING_TICKS = 10;
 
 /**
  * A long-running process's cron trigger, like Laravel's `schedule:work`: ticks your crons on every minute and sweeps on
- * its own loop, so a slow cron or sweep never skips a minute. A minute the process wasn't running for is skipped, not
- * caught up (Laravel and pg-boss do the same). Returns `stop()`, which resolves once the running tick and sweep finish.
+ * its own loop, so a slow cron or sweep doesn't hold back the next minute. A minute the process wasn't running for is
+ * skipped, not caught up (Laravel and pg-boss do the same). Returns `stop()`, which resolves once the running ticks and
+ * sweep finish, or after `timeout` seconds (30) if they're stuck.
  *
  * ```ts
  * import { startTicking } from "logic-sdk/node";
  * const stop = startTicking(registry);
- * process.on("SIGTERM", async () => { await stop(); process.exit(0); });
+ * process.on("SIGTERM", async () => { await stop(); process.exit(0); }); // waits 30 s at most: stop({ timeout })
  * ```
  */
-export function startTicking(registry: { jobs: Pick<Jobs, "tick" | "sweep"> }, options: TickingOptions = {}): () => Promise<void> {
+export function startTicking(
+  registry: { jobs: Pick<Jobs, "tick" | "sweep"> },
+  options: TickingOptions = {},
+): (options?: StopOptions) => Promise<void> {
   const sweepEvery = options.sweepEvery ?? 60;
-  const onError = options.onError ?? ((error) => console.error("[logic-sdk]", error));
+  const reportTo = options.onError ?? ((error) => console.error("[logic-sdk]", error));
+  const onError = (error: unknown) => {
+    try {
+      reportTo(error);
+    } catch (inner) {
+      console.error("[logic-sdk] onError threw", inner, "while reporting", error); // like the registry's: the loops keep going
+    }
+  };
   let stopped = false;
   let tickTimer: ReturnType<typeof setTimeout> | undefined;
   let sweepTimer: ReturnType<typeof setTimeout> | undefined;
@@ -65,10 +81,13 @@ export function startTicking(registry: { jobs: Pick<Jobs, "tick" | "sweep"> }, o
   armTick(startOfMinute(Date.now()) + MINUTE);
   if (sweepEvery > 0) sweepTimer = setTimeout(sweep, sweepEvery * 1000);
 
-  return async () => {
+  return async ({ timeout = 30 } = {}) => {
     stopped = true;
     clearTimeout(tickTimer);
     clearTimeout(sweepTimer);
-    await Promise.all([...ticks, sweeping]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<void>((resolve) => (timer = setTimeout(resolve, timeout * 1000)));
+    await Promise.race([Promise.all([...ticks, sweeping]), gaveUp]);
+    clearTimeout(timer);
   };
 }
