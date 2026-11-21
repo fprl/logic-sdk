@@ -82,16 +82,17 @@ interface Open<S extends object, Mods extends Record<string, object>, Cf> {
 class Rollback extends Error {}
 
 /**
- * The test's jobs adapter. What waits (a delayed listener, `ctx.schedule`) is held for `drain()`; other listener jobs
- * run now (`"inline"`) or wait in `queued` (`"manual"`); a cron's run (from `registry.jobs.tick`) runs, as asked for.
+ * The test's jobs adapter. What waits (a delayed listener, `ctx.schedule`) is held for `drain()`, and in `"manual"` so
+ * is everything else; the rest runs now. It holds what your app's adapter holds, so a test fails where production would.
  */
-const testJobs = (mode: TestOptions["jobs"], queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
-  holds: {},
+const testJobs = (mode: TestOptions["jobs"], holds: Dispatcher["holds"], queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
+  holds,
   async deliver(jobs, runner) {
     for (const job of jobs) {
-      if (job.kind === "call") scheduled.push(job);
-      else if (job.kind === "delivery" && (mode === "manual" || job.runAt)) queued.push(job);
-      else await runner.run(job).catch(() => {}); // reported, so the test sees it
+      const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
+      if (!waits) await runner.run(job).catch(() => {}); // reported, so the test sees it
+      else if (job.kind === "call") scheduled.push(job);
+      else if (job.kind === "delivery") queued.push(job);
     }
   },
 });
@@ -123,7 +124,12 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
   const { options: registryOptions } = internal(registry);
   const fixed = options.now;
   const now = typeof fixed === "function" ? fixed : fixed === undefined ? undefined : () => new Date(fixed);
-  const clock = now ?? registryOptions.now ?? (() => new Date());
+  /** While `drain()` runs a job that waited, the time it was due: what `ctx.now()` reads then. */
+  let travelled: number | undefined;
+  const clock = () => {
+    const base = (now ?? registryOptions.now ?? (() => new Date()))();
+    return travelled !== undefined && travelled > base.getTime() ? new Date(travelled) : base;
+  };
   let open: Open<S, Mods, Cf> | undefined;
 
   const current = () => {
@@ -142,10 +148,10 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       database: db !== undefined && database?.nest ? database.nest(db) : database,
       services: options.services,
       config: options.config as object | undefined,
-      now,
+      now: clock,
       stubs,
       record: (e) => events.push(e),
-      adapter: testJobs(options.jobs, queued, scheduled),
+      adapter: testJobs(options.jobs, registryOptions.jobs?.adapter?.holds, queued, scheduled),
       waitUntil: undefined, // listeners finish before a call returns, inside the test
       onError(error, info) {
         if (info.outcome !== "discarded") failures.push(error);
@@ -236,11 +242,22 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
       },
       async drain({ until } = {}) {
         const state = current();
-        const cutoff = (until === undefined ? clock() : new Date(until)).getTime();
-        for (let ready = due(); ready.length; ready = due())
-          for (const job of ready) await settle(state, () => state.registry.jobs.run(job));
-        function due(): Job[] {
-          return [...takeDue(state.queued, cutoff), ...takeDue(state.scheduled, cutoff)];
+        const end = until === undefined ? clock() : new Date(until);
+        if (Number.isNaN(end.getTime())) throw new Error(`[logic-sdk] drain({ until }) needs a valid date (got ${String(until)}).`);
+        try {
+          for (let round = 1; ; round++) {
+            const ready = [...takeDue(state.queued, end.getTime()), ...takeDue(state.scheduled, end.getTime())];
+            if (!ready.length) return;
+            if (round > 100) throw new Error("[logic-sdk] drain() ran 100 rounds and jobs are still due: does one schedule itself with no delay?");
+            ready.sort((a, b) => (a.runAt ?? "").localeCompare(b.runAt ?? ""));
+            for (const job of ready) {
+              // the job runs at the time it was due, so a self-rescheduling one moves forward and its checks see that time
+              if (job.runAt) travelled = Math.max(travelled ?? 0, Date.parse(job.runAt));
+              await settle(state, () => state.registry.jobs.run(job));
+            }
+          }
+        } finally {
+          travelled = undefined;
         }
       },
       perform(listener, payload, { scope, attempt }) {

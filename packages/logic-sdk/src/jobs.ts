@@ -81,11 +81,11 @@ export function makeJobs(deps: JobsDeps) {
    * kept in memory it'd be lost on restart. Laravel's sync queue drops the delay; we refuse instead.
    */
   function checkHold(what: string, seconds: number) {
-    if (!dispatcher.holds)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter runs jobs right away (inProcess()). Use outbox(db) to hold them.`);
-    const { max } = dispatcher.holds;
-    if (max !== undefined && seconds > max)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${max}s. Put outbox(db) in front: it holds them as long as needed.`);
+    const { holds } = dispatcher;
+    if (!holds)
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use outbox(db).`);
+    if (holds !== true && seconds > holds.max)
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${holds.max}s. Put outbox(db) in front: it holds them as long as needed.`);
   }
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
@@ -113,11 +113,11 @@ export function makeJobs(deps: JobsDeps) {
       : { listener: job.kind === "cron" ? job.cron : job.fn, envelope: undefined, delivery: job.id, attempt };
 
   /** Who a stored job runs as: `jobs.scope.load` rebuilds it; null means discard it (reported). */
-  async function scopeOf(job: Job, stored: object): Promise<object | null> {
+  async function scopeOf(job: Job, stored: object, attempt: number): Promise<object | null> {
     if (!jobScope?.load) return stored;
     const loaded = await jobScope.load(stored);
     if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${job.id}. Return the scope, or null to discard the job.`);
-    if (loaded === null) report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...infoOf(job), outcome: "discarded" });
+    if (loaded === null) report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...infoOf(job, attempt), outcome: "discarded" });
     return loaded;
   }
 
@@ -164,7 +164,7 @@ export function makeJobs(deps: JobsDeps) {
       const f = fnById.get(job.fn);
       if (!f) return failed(new Error(`[logic-sdk] ${job.fn} isn't a registered function (renamed or removed?), so job ${job.id} can't run.`));
       return attemptOnce(1, async () => {
-        const scope = await scopeOf(job, job.scope);
+        const scope = await scopeOf(job, job.scope, attempt);
         if (!scope) return "discarded";
         await runAs(f.fn, job.input, scope);
         return "done";
@@ -176,7 +176,7 @@ export function makeJobs(deps: JobsDeps) {
     const { envelope } = job;
     const event = eventByName.get(envelope.name);
     return attemptOnce(l.listener.attempts ?? 1, async () => {
-      const scope = await scopeOf(job, envelope.scope);
+      const scope = await scopeOf(job, envelope.scope, attempt);
       if (!scope) return "discarded";
       await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
         let payload = envelope.payload;

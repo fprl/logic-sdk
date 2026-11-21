@@ -260,7 +260,7 @@ export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C
    * `{ delay: 3600 }` (seconds). Committed with this transaction, so a rollback never leaves one behind. Returns its job
    * id. It runs whatever happens meanwhile, so it should check that its reason still holds ("still confirmed?").
    */
-  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, when: { at: Date } | { delay: number }): string;
+  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, when: { at: Date; delay?: never } | { delay: number; at?: never }): string;
 }
 export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
   services: ServicesOf<C>;
@@ -378,10 +378,11 @@ export interface Runner {
 
 export interface Dispatcher {
   /**
-   * It can hold a job until its `runAt` (a listener's `delay`, `ctx.schedule`), for at most `max` seconds. Without it
-   * (`inProcess()`), `createRegistry` refuses delayed listeners and `ctx.schedule` throws, rather than run them early.
+   * It can hold a job until its `runAt` (a listener's `delay`, `ctx.schedule`): `true`, or for at most `max` seconds.
+   * Without it (`inProcess()`), `createRegistry` refuses delayed listeners and `ctx.schedule` throws, rather than run
+   * them early or lose them.
    */
-  holds?: { max?: number };
+  holds?: true | { max: number };
   /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */

@@ -601,10 +601,10 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   const jobs: Delivery[] = [];
   const make = (adapter?: Dispatcher) =>
     createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
-  await make({ holds: {}, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
+  await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
-  expect(() => make()).toThrow(/x\.later waits 90s, but your jobs adapter runs jobs right away \(inProcess\(\)\)\. Use outbox\(db\)/);
+  expect(() => make()).toThrow(/x\.later waits 90s, but your jobs adapter can't hold jobs \(inProcess\(\) can't\)\. Use outbox\(db\)/);
   expect(() => make({ holds: { max: 60 }, async deliver() {} })).toThrow(/holds jobs for at most 60s\. Put outbox\(db\) in front/);
   expect(ran).toEqual([]);
 });
@@ -970,7 +970,7 @@ function scheduleSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}
     modules: { bookings: { remind, book } },
     database: memoryDatabase(),
     now: () => new Date("2026-07-01T10:00:00Z"),
-    jobs: { adapter: { holds: {}, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
     ...extra,
   });
   return { registry, book, reminded, sent, app: registry.as({ actor: "ana", locale: "es" }) };
@@ -990,17 +990,17 @@ test("ctx.schedule: a job committed with the mutation, as the caller's scope, fo
 
 test("ctx.schedule: refused where nothing can hold it (in-process), or for longer than the adapter can", async () => {
   const { app, book } = scheduleSetup({ jobs: {} });
-  await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter runs jobs right away/);
+  await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter can't hold jobs/);
   const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} } } });
   await expect(short.app.run(short.book, { who: "guest" })).rejects.toThrow(/holds jobs for at most 60s/);
-  await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs a valid `at` date/);
+  await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs an `at` date or a `delay`/);
 });
 
 test("ctx.schedule: the job runs its function as the stored scope, loaded fresh; a rule saying no fails it", async () => {
   const { app, book, reminded, registry } = scheduleSetup({
     onError: () => {},
     jobs: {
-      adapter: { holds: {}, async deliver() {} },
+      adapter: { holds: true, async deliver() {} },
       scope: { load: (saved: { actor: string | null }) => ({ actor: saved.actor, locale: "en" }) }, // today's settings
     },
   });
@@ -1024,5 +1024,47 @@ test("testing: scheduled calls wait in t.jobs.scheduled; drain runs what's due a
   await t.jobs.drain({ until: "2026-07-01T11:00:00Z" });
   expect(reminded).toEqual(["guest as ana in es"]);
   expect(t.jobs.scheduled).toEqual([]);
+  await t.rollback();
+});
+
+test("ctx.schedule: due now runs after commit like a listener; a negative delay or a bad input is a bug", async () => {
+  const ran: string[] = [];
+  const ping = action({ input: z.object({ n: z.number() }), async handler(_ctx, { n }) { ran.push(`ping ${n}`); } });
+  const go = mutation({
+    input: z.object({ delay: z.number(), n: z.any() }),
+    async handler(ctx, { delay, n }) { ctx.schedule(ping, { n }, { delay }); },
+  });
+  const app = createRegistry<Scope>({ modules: { x: { ping, go } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" });
+  await app.run(go, { delay: 0, n: 1 }); // in-process can't hold, but nothing waits
+  expect(ran).toEqual(["ping 1"]);
+  await expect(app.run(go, { delay: -5, n: 1 })).rejects.toThrow(/needs an `at` date or a `delay` in seconds, 0 or more/);
+  await expect(app.run(go, { delay: 0, n: "one" })).rejects.toThrow(/x\.ping input is invalid/);
+});
+
+test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {
+  const { registry: onInProcess, book } = scheduleSetup({ jobs: {} });
+  const t = createTestRegistry(onInProcess);
+  await t.begin();
+  await expect(t.as({ actor: "ana", locale: "es" }).run(book, { who: "guest" })).rejects.toThrow(/can't hold jobs/);
+  await t.rollback();
+});
+
+test("testing: drain runs each waiting job at the time it was due, so one that reschedules itself moves on and stops", async () => {
+  const seen: string[] = [];
+  const pulse = action({
+    async handler(ctx) {
+      seen.push(ctx.now().toISOString().slice(11, 16));
+      await ctx.run(rearm);
+    },
+  });
+  const rearm = mutation({ async handler(ctx) { ctx.schedule(pulse, undefined, { delay: 3600 }); } });
+  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: memoryDatabase(), jobs: { adapter: { holds: true, async deliver() {} } } });
+  const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
+  await t.begin();
+  await t.as({ actor: "a", locale: "es" }).run(rearm);
+  await t.jobs.drain({ until: "2026-07-01T13:30:00Z" });
+  expect(seen).toEqual(["11:00", "12:00", "13:00"]);
+  expect(t.jobs.scheduled.map((j) => j.runAt)).toEqual(["2026-07-01T14:00:00.000Z"]);
+  await expect(t.jobs.drain({ until: "garbage" })).rejects.toThrow(/needs a valid date/);
   await t.rollback();
 });

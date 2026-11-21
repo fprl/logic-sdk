@@ -447,9 +447,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       },
       schedule: (fn, input, when) => {
         const fnId = idOf(fn);
-        const seconds = "at" in when ? (when.at.getTime() - now().getTime()) / 1000 : when.delay;
-        if (!Number.isFinite(seconds)) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs a valid \`at\` date or \`delay\` in seconds.`);
-        checkHold(`ctx.schedule(${fnId})`, seconds);
+        const seconds = when.at ? (when.at.getTime() - now().getTime()) / 1000 : (when.delay ?? NaN);
+        if (!Number.isFinite(seconds) || (!when.at && seconds < 0))
+          throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
+        // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
+        if (seconds > 0) checkHold(`ctx.schedule(${fnId})`, seconds);
         assertPlain(input, `${fnId} input`, "Scheduled calls wait as JSON: send an ISO string and let the schema turn it into a Date");
         const job: CallJob = {
           kind: "call",
@@ -457,9 +459,15 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           fn: fnId,
           input: structuredClone(input),
           scope: storedScope(frame.scope, `the scope scheduling ${fnId}`),
-          runAt: new Date(now().getTime() + Math.max(0, seconds) * 1000).toISOString(),
         };
+        if (seconds > 0) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
         tx.calls.push(job);
+        // our own code passed it: a bad input is a bug, surfaced at commit like an event's payload
+        if (fn.input) {
+          const check = parseOwn(fn.input, job.input, `${fnId} input`).then(() => {});
+          check.catch(() => {});
+          tx.pending.push(check);
+        }
         return job.id;
       },
     };
