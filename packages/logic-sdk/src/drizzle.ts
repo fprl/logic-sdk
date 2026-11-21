@@ -193,7 +193,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   const settle = (job: Job, attempt: number, runner: Runner) => (via ? handOff(via, [job], attempt, runner) : run(job, attempt, runner));
 
   return {
-    /** Holds `delay`s itself, so `via`'s limits on them don't apply. Must share the transaction it writes in. */
+    holds: {}, // rows wait until they're due, however long, so `via`'s limits on delays don't apply
+    /** Must share the transaction it writes in. */
     check({ database }) {
       if (database && database.db !== db)
         throw new Error(

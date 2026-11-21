@@ -17,6 +17,7 @@ import type {
   ListenerEvent,
   RegisteredCron,
   RegisteredEvent,
+  RegisteredFn,
   RegisteredListener,
   RunJobOptions,
   Runner,
@@ -37,6 +38,7 @@ export interface JobsDeps {
   listeners: readonly RegisteredListener[];
   events: readonly RegisteredEvent[];
   crons: readonly RegisteredCron[];
+  functions: readonly RegisteredFn[];
   idOf(x: object): string;
   dispatcher: Dispatcher;
   database: DatabaseAdapter<unknown, unknown> | undefined;
@@ -56,7 +58,7 @@ export interface JobsDeps {
  * tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, events, crons, idOf, dispatcher, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
+  const { listeners, events, crons, functions, idOf, dispatcher, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
   const keepFailed = dispatcher.fail?.bind(dispatcher);
   const enqueue = dispatcher.enqueue?.bind(dispatcher);
 
@@ -72,6 +74,20 @@ export function makeJobs(deps: JobsDeps) {
 
   const scheduled = crons.map((c) => ({ ...c, schedule: parseSchedule(c.cron.schedule) }));
   const cronById = new Map(crons.map((c) => [c.id, c]));
+  const fnById = new Map(functions.map((f) => [f.id, f]));
+
+  /**
+   * A job that waits (a listener's `delay`, `ctx.schedule`) needs an adapter that holds it: run early it'd be wrong,
+   * kept in memory it'd be lost on restart. Laravel's sync queue drops the delay; we refuse instead.
+   */
+  function checkHold(what: string, seconds: number) {
+    if (!dispatcher.holds)
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter runs jobs right away (inProcess()). Use outbox(db) to hold them.`);
+    const { max } = dispatcher.holds;
+    if (max !== undefined && seconds > max)
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${max}s. Put outbox(db) in front: it holds them as long as needed.`);
+  }
+  for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
   /** One delivery per listener of each event, unless the chain is too deep (a listener loop). */
   function toDeliveries(envelopes: Envelope[]): Delivery[] {
@@ -92,12 +108,21 @@ export function makeJobs(deps: JobsDeps) {
 
   /** What `onError` hears about a job. */
   const infoOf = (job: Job, attempt?: number): FailureInfo =>
-    job.kind === "cron"
-      ? { listener: job.cron, envelope: undefined, delivery: job.id, attempt }
-      : { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt };
+    job.kind === "delivery"
+      ? { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt }
+      : { listener: job.kind === "cron" ? job.cron : job.fn, envelope: undefined, delivery: job.id, attempt };
+
+  /** Who a stored job runs as: `jobs.scope.load` rebuilds it; null means discard it (reported). */
+  async function scopeOf(job: Job, stored: object): Promise<object | null> {
+    if (!jobScope?.load) return stored;
+    const loaded = await jobScope.load(stored);
+    if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${job.id}. Return the scope, or null to discard the job.`);
+    if (loaded === null) report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...infoOf(job), outcome: "discarded" });
+    return loaded;
+  }
 
   /**
-   * Run one job: a listener's share of an event, or a cron's run. Reports every failure; throws only when a retry might
+   * Run one job: a listener's share of an event, a cron's run, or a scheduled call. Reports every failure; throws only when a retry might
    * help and there are tries left. `fail` keeps a job that failed for good.
    */
   async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
@@ -135,22 +160,24 @@ export function makeJobs(deps: JobsDeps) {
         return "done";
       });
     }
+    if (job.kind === "call") {
+      const f = fnById.get(job.fn);
+      if (!f) return failed(new Error(`[logic-sdk] ${job.fn} isn't a registered function (renamed or removed?), so job ${job.id} can't run.`));
+      return attemptOnce(1, async () => {
+        const scope = await scopeOf(job, job.scope);
+        if (!scope) return "discarded";
+        await runAs(f.fn, job.input, scope);
+        return "done";
+      });
+    }
     if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${info.delivery} has kind ${JSON.stringify(kind)}, which this version can't run.`));
     const l = listenerById.get(job.listener);
     if (!l) return failed(new Error(`[logic-sdk] ${job.listener} isn't a registered listener (renamed or removed?), so job ${job.id} can't run.`));
     const { envelope } = job;
     const event = eventByName.get(envelope.name);
     return attemptOnce(l.listener.attempts ?? 1, async () => {
-      let scope = envelope.scope;
-      if (jobScope?.load) {
-        const loaded = await jobScope.load(scope);
-        if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${job.id}. Return the scope, or null to discard the job.`);
-        if (loaded === null) {
-          report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...info, outcome: "discarded" });
-          return "discarded";
-        }
-        scope = loaded;
-      }
+      const scope = await scopeOf(job, envelope.scope);
+      if (!scope) return "discarded";
       await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
         let payload = envelope.payload;
         if (event) {
@@ -199,5 +226,5 @@ export function makeJobs(deps: JobsDeps) {
     },
   };
 
-  return { toDeliveries, runner, jobs, due };
+  return { toDeliveries, runner, jobs, due, checkHold };
 }

@@ -32,14 +32,7 @@ const encoder = new TextEncoder();
  */
 export function cloudflareQueue(queue: QueueBinding): Dispatcher {
   return {
-    check({ listeners }) {
-      for (const { id, listener } of listeners)
-        if ((listener.delay ?? 0) > MAX_DELAY)
-          throw new Error(
-            `[logic-sdk] ${id} has a delay of ${listener.delay} seconds; Cloudflare Queues delay at most ${MAX_DELAY} (24 hours). ` +
-              "Put the outbox in front, outbox(db, { via: cloudflareQueue(env.JOBS) }): it holds longer delays itself.",
-          );
-    },
+    holds: { max: MAX_DELAY }, // delaySeconds, up to 24 hours
     async deliver(jobs) {
       for (const batch of batches(jobs)) await queue.sendBatch(batch);
     },

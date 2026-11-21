@@ -592,7 +592,7 @@ test("listener: attempts is a whole number of tries, delay is seconds", () => {
   expect(() => listener({ event: () => happened, delay: -1, async handler() {} })).toThrow(/delay must be seconds, 0 or more \(got -1\)/);
 });
 
-test("delay: the job says when it may run; in-process runs it right away, like Laravel's sync queue", async () => {
+test("delay: the job says when it may run; an adapter that can't hold it (in-process) is refused at startup", async () => {
   const happened = event({ payload: z.object({}) });
   const doIt = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
   const ran: string[] = [];
@@ -601,10 +601,12 @@ test("delay: the job says when it may run; in-process runs it right away, like L
   const jobs: Delivery[] = [];
   const make = (adapter?: Dispatcher) =>
     createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
-  await make({ async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
+  await make({ holds: {}, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
-  await make().as({ actor: "a", locale: "es" }).run(doIt);
-  expect(ran).toEqual(["later", "now"]);
+  // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
+  expect(() => make()).toThrow(/x\.later waits 90s, but your jobs adapter runs jobs right away \(inProcess\(\)\)\. Use outbox\(db\)/);
+  expect(() => make({ holds: { max: 60 }, async deliver() {} })).toThrow(/holds jobs for at most 60s\. Put outbox\(db\) in front/);
+  expect(ran).toEqual([]);
 });
 
 test("adapter hooks: check sees the listeners and database at createRegistry; fail keeps what a consumer failed", async () => {
@@ -853,9 +855,9 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
 test("a job of a kind this version doesn't know fails at once, and the adapter keeps it", async () => {
   const kept: string[] = [];
   const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {}, fail: async (_job, e) => void kept.push((e as Error).message) } } });
-  const job = { kind: "call", id: "x", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
+  const job = { kind: "nope", id: "x", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job as never)).toEqual("failed");
-  expect(kept).toEqual([expect.stringMatching(/job x has kind "call", which this version can't run/)]);
+  expect(kept).toEqual([expect.stringMatching(/job x has kind "nope", which this version can't run/)]);
 });
 
 test("jobs.scope.load failing counts as a try: at the default of one, the job fails", async () => {
@@ -942,5 +944,85 @@ test("testing: t.jobs.tick runs the crons due at a minute (default: the frozen n
   await expect(t.jobs.tick()).rejects.toThrow("smtp down"); // reports.broken
   expect(ran).toEqual(["weekly as system"]);
   expect(await t.jobs.tick("2026-11-27T17:00:00Z")).toEqual(["reports.friday"]);
+  await t.rollback();
+});
+
+// ── ctx.schedule ─────────────────────────────────────────────────────────────
+function scheduleSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
+  const reminded: string[] = [];
+  const remind = action({
+    input: z.object({ who: z.string() }),
+    async handler(ctx, { who }) {
+      if (who === "nobody") throw ctx.errors.notFound();
+      reminded.push(`${who} as ${ctx.scope.actor} in ${ctx.scope.locale}`);
+    },
+  });
+  const book = mutation({
+    input: z.object({ who: z.string(), fail: z.boolean().optional(), at: z.string().optional() }),
+    async handler(ctx, { who, fail, at }) {
+      const id = ctx.schedule(remind, { who }, at ? { at: new Date(at) } : { delay: 3600 });
+      if (fail) throw ctx.errors.reject("nope");
+      return id;
+    },
+  });
+  const sent: Job[] = [];
+  const registry = createRegistry<Scope>({
+    modules: { bookings: { remind, book } },
+    database: memoryDatabase(),
+    now: () => new Date("2026-07-01T10:00:00Z"),
+    jobs: { adapter: { holds: {}, async deliver(jobs) { sent.push(...jobs); } } },
+    ...extra,
+  });
+  return { registry, book, reminded, sent, app: registry.as({ actor: "ana", locale: "es" }) };
+}
+
+test("ctx.schedule: a job committed with the mutation, as the caller's scope, for the adapter to hold", async () => {
+  const { app, book, sent } = scheduleSetup();
+  const id = await app.run(book, { who: "guest" });
+  expect(sent).toEqual([
+    { kind: "call", id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana", locale: "es" }, runAt: "2026-07-01T11:00:00.000Z" },
+  ]);
+  await expect(app.run(book, { who: "x", fail: true })).rejects.toMatchObject({ kind: "rejected" });
+  expect(sent).toHaveLength(1); // rolled back: nothing scheduled
+  await app.run(book, { who: "y", at: "2026-07-02T09:00:00Z" });
+  expect(sent[1]).toMatchObject({ runAt: "2026-07-02T09:00:00.000Z" });
+});
+
+test("ctx.schedule: refused where nothing can hold it (in-process), or for longer than the adapter can", async () => {
+  const { app, book } = scheduleSetup({ jobs: {} });
+  await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter runs jobs right away/);
+  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} } } });
+  await expect(short.app.run(short.book, { who: "guest" })).rejects.toThrow(/holds jobs for at most 60s/);
+  await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs a valid `at` date/);
+});
+
+test("ctx.schedule: the job runs its function as the stored scope, loaded fresh; a rule saying no fails it", async () => {
+  const { app, book, reminded, registry } = scheduleSetup({
+    onError: () => {},
+    jobs: {
+      adapter: { holds: {}, async deliver() {} },
+      scope: { load: (saved: { actor: string | null }) => ({ actor: saved.actor, locale: "en" }) }, // today's settings
+    },
+  });
+  const run = (job: Job) => registry.jobs.run(job);
+  const id = await app.run(book, { who: "guest" });
+  const job = { kind: "call" as const, id, fn: "bookings.remind", input: { who: "guest" }, scope: { actor: "ana" } };
+  expect(await run(job)).toBe("done");
+  expect(reminded).toEqual(["guest as ana in en"]); // load rebuilt the locale
+  expect(await run({ ...job, input: { who: "nobody" } })).toBe("failed"); // not_found: no retry
+  expect(await run({ ...job, fn: "bookings.gone" })).toBe("failed"); // renamed or removed: kept for retry
+});
+
+test("testing: scheduled calls wait in t.jobs.scheduled; drain runs what's due at the test's now, or until a time", async () => {
+  const { registry, book, reminded } = scheduleSetup();
+  const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
+  await t.begin();
+  await t.as({ actor: "ana", locale: "es" }).run(book, { who: "guest" });
+  expect(t.jobs.scheduled.map((j) => [j.fn, j.runAt])).toEqual([["bookings.remind", "2026-07-01T11:00:00.000Z"]]);
+  await t.jobs.drain(); // not due yet
+  expect(reminded).toEqual([]);
+  await t.jobs.drain({ until: "2026-07-01T11:00:00Z" });
+  expect(reminded).toEqual(["guest as ana in es"]);
+  expect(t.jobs.scheduled).toEqual([]);
   await t.rollback();
 });

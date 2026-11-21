@@ -91,7 +91,7 @@ test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry 
 
   const tooLate = listener({ event: () => happened, delay: 90_000, async handler() {} });
   expect(() => createRegistry({ modules: { x: { happened, emit, tooLate } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue) } })).toThrow(
-    /x\.tooLate has a delay of 90000 seconds; Cloudflare Queues delay at most 86400.*outbox/,
+    /x\.tooLate waits 90000s; your jobs adapter holds jobs for at most 86400s\. Put outbox\(db\) in front/,
   );
 });
 

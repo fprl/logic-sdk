@@ -22,7 +22,7 @@ A **job** is one piece of work that runs after your transaction commits. It come
 | Kind | Where it comes from | |
 |---|---|---|
 | A listener's share of an event | `ctx.emit(event, payload)` in a mutation: one job per listener | today |
-| A scheduled call | `ctx.schedule(fn, input, { at })`: run this function later | planned |
+| A scheduled call | `ctx.schedule(fn, input, { at })` in a mutation: run this function once, later | today |
 | A cron's run | `cron({ schedule, run, scope })`: run this function on a schedule ([Crons](/docs/concepts/crons)) | today |
 
 If you've used Rails, Laravel or Oban, a listener is what you'd write as a job class, and the `jobs` slot is their queue adapter.
@@ -85,7 +85,27 @@ export const sendReceipt = listener({
 - **A last try that never finished** (the process crashed, or the listener outlived the outbox's lease) is `failed` without running again, as Laravel's worker does.
 - **Read from your code when the job runs,** like Rails' `retry_on`: a deploy that changes `attempts` applies to jobs already queued.
 - **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then; Cloudflare gets it as `delaySeconds`.
-- **`inProcess()` and inline tests ignore both:** one try, right away, like Laravel's sync queue.
+- **`inProcess()` tries once and can't hold a job:** `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `outbox(db)`. Cloudflare alone holds up to 24 hours.
+
+## Scheduled calls
+
+```ts
+export const confirm = mutation({
+  async handler(ctx, { bookingId }) {
+    // ...confirm it
+    ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn) });
+    ctx.schedule(holds.expire, { bookingId }, { delay: 15 * 60 }); // seconds
+  },
+});
+```
+
+- **Run a mutation or action once, later,** at a time this mutation decides. A listener's `delay` is the same for every event; this one is yours per call.
+- **Only from mutations:** it's committed with the transaction, so a booking that rolls back never leaves a reminder behind, as in Convex. An action or listener that wants to schedule runs a mutation that does.
+- **`{ at }` or `{ delay }`, not both:** a `Date` (from `ctx.now()`), or seconds like a listener's `delay`. It returns the job id.
+- **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
+- **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener, and the function's `authorize` checks it again when it runs. One try.
+- **It needs an adapter that holds jobs:** `outbox(db)`. `ctx.schedule` throws on `inProcess()`.
+- **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 
 ## Ids
 
@@ -126,7 +146,7 @@ For writing an adapter:
 
 - **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, runAt? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
 - **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
-- **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour (Cloudflare refuses a delay over 24 hours). **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
+- **`holds: { max? }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour. **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the listener is out of tries. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.
 - **Listeners get `ctx.event`** (`id`, `name`, `payload`, `occurredAt`, `attempt`), without the stored scope: `ctx.scope` is the one they run as.

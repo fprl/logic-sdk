@@ -73,7 +73,18 @@ test("the receipt email", async () => {
 });
 ```
 
-- **Inline** runs listeners right after each mutation, inside the test. `attempts` and `delay` don't apply: one try, right away, like Laravel's sync queue.
+- **Inline** runs listeners right after each mutation, inside the test, one try.
+- **What waits, waits for `drain()`,** in both modes: a listener's `delay` (in `t.jobs.queued`) and `ctx.schedule` (in `t.jobs.scheduled`). `drain()` runs what's due at the test's `now`, and `drain({ until: "2026-07-02T09:00:00Z" })` what's due by then, like Rails' `perform_enqueued_jobs(at:)` and Oban's `with_scheduled`.
+
+```ts
+test("confirming schedules a reminder the day before", async () => {
+  await t.as(agent).run(bookings.confirm, { bookingId });
+
+  expect(t.jobs.scheduled.map((j) => [j.fn, j.runAt])).toEqual([["guests.remind", "2026-07-09T09:00:00.000Z"]]);
+  await t.jobs.drain({ until: "2026-07-09T09:00:00Z" });
+  expect(mailer.sent).toHaveLength(1);
+});
+```
 - **Manual** keeps jobs in `t.jobs.queued` until `drain()`, to test one module without the others reacting.
 - **`tick(at)`** runs the [crons](/docs/concepts/crons) due at that minute, inline in both modes.
 - **`perform`** runs one listener by hand, as if its event had been emitted as `scope`: Oban's `perform_job`, Rails' `perform_now`.

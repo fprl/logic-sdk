@@ -67,7 +67,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 ## Later
 
-- **Scheduled calls** (Convex `runAfter`, Active Job `wait:`): `ctx.schedule(fn, input, { at })` from mutations, written in the transaction through the dispatcher, as delayed rows like a listener's `delay`.
+- **Scheduled calls: done.** `ctx.schedule(fn, input, { at } | { delay })` from mutations, through the jobs adapter. Later: `cancel(id)` if re-checking proves not enough, and the CLI showing who schedules whom.
 - **A CLI check** that crons have a trigger in `wrangler.jsonc` or `vercel.json`, for apps with one trigger per cron. Only if missing triggers bite.
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.
 - **Opt-in savepoint `run`** for "try, and continue on failure" (e.g. coupons). `nest` already exists in the Drizzle adapter.

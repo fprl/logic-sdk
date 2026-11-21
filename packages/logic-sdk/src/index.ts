@@ -5,13 +5,13 @@ import { BRAND, INTERNAL } from "./types.ts";
 import type {
   ActionCtx,
   Call,
+  CallJob,
   Config,
   ConfigOf,
   Constructor,
   Cron,
   DatabaseAdapter,
   DbOf,
-  Delivery,
   Envelope,
   EventDef,
   FailureInfo,
@@ -19,6 +19,7 @@ import type {
   FnIn,
   Frozen,
   In,
+  Job,
   JobsOptions,
   Kind,
   Listener,
@@ -43,6 +44,7 @@ import type {
 export type {
   ActionCtx,
   Call,
+  CallJob,
   Caller,
   Config,
   Cron,
@@ -217,6 +219,8 @@ interface TxState {
   doomed: boolean;
   reason: unknown;
   outbox: Envelope[];
+  /** What `ctx.schedule` asked for, enqueued with the events at commit. */
+  calls: CallJob[];
   pending: Promise<void>[];
 }
 interface Frame {
@@ -441,6 +445,23 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         check.catch(() => {}); // surfaced at commit; never an unhandled rejection
         tx.pending.push(check);
       },
+      schedule: (fn, input, when) => {
+        const fnId = idOf(fn);
+        const seconds = "at" in when ? (when.at.getTime() - now().getTime()) / 1000 : when.delay;
+        if (!Number.isFinite(seconds)) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs a valid \`at\` date or \`delay\` in seconds.`);
+        checkHold(`ctx.schedule(${fnId})`, seconds);
+        assertPlain(input, `${fnId} input`, "Scheduled calls wait as JSON: send an ISO string and let the schema turn it into a Date");
+        const job: CallJob = {
+          kind: "call",
+          id: `${fnId}@${crypto.randomUUID()}`,
+          fn: fnId,
+          input: structuredClone(input),
+          scope: storedScope(frame.scope, `the scope scheduling ${fnId}`),
+          runAt: new Date(now().getTime() + Math.max(0, seconds) * 1000).toISOString(),
+        };
+        tx.calls.push(job);
+        return job.id;
+      },
     };
   }
   /** An emitted event as jobs carry it: plain JSON, and copied, so what was emitted is what gets delivered. */
@@ -448,9 +469,13 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const name = idOf(event);
     // a queue carries JSON: a Date or a class instance would work in-process and break only in production
     assertPlain(payload, `${name} payload`, "Events travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
+    return { id: crypto.randomUUID(), name, payload: structuredClone(payload), scope: storedScope(scope, `the scope emitting ${name}`), occurredAt: now().toISOString(), depth };
+  }
+  /** What a job keeps of the scope it runs as: `jobs.scope.store`'s pick, as a JSON copy. */
+  function storedScope(scope: object, what: string): object {
     const stored = jobScope?.store ? jobScope.store(scope) : scope;
-    assertPlain(stored, `the scope emitting ${name}`, "Events carry the scope through queues as JSON: keep it to ids (jobs.scope.store picks what's saved)");
-    return { id: crypto.randomUUID(), name, payload: structuredClone(payload), scope: structuredClone(stored), occurredAt: now().toISOString(), depth };
+    assertPlain(stored, what, "Jobs carry the scope through queues as JSON: keep it to ids (jobs.scope.store picks what's saved)");
+    return structuredClone(stored);
   }
 
   const actionCtx = (frame: Frame, id: string): ActionCtx<any> => ({
@@ -459,10 +484,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toDeliveries, runner, jobs, due } = makeJobs({
+  const { toDeliveries, runner, jobs, due, checkHold } = makeJobs({
     listeners,
     events,
     crons,
+    functions,
     idOf,
     dispatcher,
     database,
@@ -522,19 +548,19 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       // top-level mutation: open the transaction, commit, then deliver events.
       // A lost race (deadlock, serialization failure) re-runs it in a fresh transaction.
       const input = await prepare();
-      let committed: { out: unknown; outbox: Envelope[]; deliveries: Delivery[] };
+      let committed: { out: unknown; outbox: Envelope[]; jobs: Job[] };
       for (let attempt = 1; ; attempt++) {
         let state: TxState | undefined;
         try {
           committed = await database!.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
-            const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, outbox: [], pending: [] });
+            const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, outbox: [], calls: [], pending: [] });
             const out = await execute(input, mutationCtx({ ...frame, tx }, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
-            const deliveries = toDeliveries(tx.outbox);
-            if (deliveries.length) await enqueue?.(txDb, deliveries);
-            return { out, outbox: tx.outbox, deliveries };
+            const jobs = [...toDeliveries(tx.outbox), ...tx.calls];
+            if (jobs.length) await enqueue?.(txDb, jobs);
+            return { out, outbox: tx.outbox, jobs };
           });
           break;
         } catch (e) {
@@ -550,16 +576,16 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       }
 
       // committed. Nothing below may fail the caller.
-      if (committed.outbox.length) await afterCommit(committed.outbox, committed.deliveries);
+      if (committed.outbox.length || committed.jobs.length) await afterCommit(committed.outbox, committed.jobs);
       return committed.out;
     });
   }
 
-  async function afterCommit(outbox: Envelope[], deliveries: Delivery[]) {
+  async function afterCommit(outbox: Envelope[], jobs: Job[]) {
     try {
       for (const e of outbox) o.record?.(e);
-      if (!deliveries.length) return;
-      const delivery = (async () => dispatcher.deliver(deliveries, runner))().catch((e) =>
+      if (!jobs.length) return;
+      const delivery = (async () => dispatcher.deliver(jobs, runner))().catch((e) =>
         report(e, { listener: "(dispatcher)", envelope: outbox[0] }),
       );
       if (waitUntil) {
