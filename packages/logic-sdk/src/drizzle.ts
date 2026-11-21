@@ -118,7 +118,7 @@ type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "d
  *
  * ```ts
  * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
- * setInterval(() => registry.jobs.sweep(), 60_000); // or a cron
+ * startTicking(registry); // from logic-sdk/node, or registry.jobs.sweep() from a platform's cron trigger
  * ```
  */
 export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {

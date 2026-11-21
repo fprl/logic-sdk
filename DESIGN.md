@@ -236,6 +236,7 @@ export const expireCarts = cron({
 - **Time zones on the wall clock, Laravel's DST semantics:** a time skipped when clocks go forward doesn't run, one that happens twice runs twice. Croner shifts skipped runs instead; we follow Laravel, which documents it and suggests avoiding time zones.
 - **Missed minutes are skipped and runs may overlap:** pg-boss's `missed: 'skip'` default, and Laravel, Oban and Vercel all allow overlap by default.
 - **Tests run crons inline:** `t.jobs.tick(at)` runs what's due at that minute and throws a failure, in both modes, so `t.jobs.queued` stays listener jobs.
+- **`startTicking(registry)` in `logic-sdk/node`, not a snippet.** Laravel ships `schedule:work` and Solid Queue a scheduler process: the framework owns the loop, not the app. Our first docs snippet awaited `tick` then `sweep` before arming the next timer, so a slow sweep (or, with `inProcess()`, a slow cron) skipped minutes silently (an outside reviewer's catch; Fable widened it). The helper arms the next minute before ticking and sweeps on its own single-flight loop. A late timer ticks the current minute, not a backlog: a laptop waking from sleep would otherwise replay hours of crons. A subpath because it's meaningless on Workers, and the core stays runtime-neutral.
 - **Not now:** helpers (`daily()`), seconds, `withoutOverlapping`, catch-up, schedules created at runtime, and a check that reads `wrangler.jsonc` or `vercel.json` for missing triggers.
 
 ### Options: correctness in code, tuning in infra

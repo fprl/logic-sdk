@@ -22,25 +22,15 @@ export const morningDigest = cron({
 
 Your crons live in code. Something calls `registry.jobs.tick()`, which runs every cron due in that minute:
 
-**Node:**
+**Node:** a long-running process is its own trigger, like Laravel's `schedule:work`:
 
 ```ts
-// each minute, on the minute: no minute skipped or ticked twice, and a failed tick doesn't stop the next
-const tickEveryMinute = () => {
-  const minute = Math.ceil((Date.now() + 1) / 60_000) * 60_000;
-  setTimeout(async () => {
-    try {
-      await registry.jobs.tick(new Date(minute));
-      await registry.jobs.sweep(); // with the outbox
-    } catch (error) {
-      console.error(error);
-    } finally {
-      tickEveryMinute();
-    }
-  }, minute - Date.now());
-};
-tickEveryMinute();
+import { startTicking } from "logic-sdk/node";
+
+const stop = startTicking(registry); // ticks every minute, sweeps every 60 s: { sweepEvery }
 ```
+
+It ticks on the minute without waiting for the last tick, and sweeps on its own loop, so a slow cron or sweep never skips a minute.
 
 **Cloudflare:** `"* * * * *"` for all of them, or one trigger per cron. Cloudflare numbers weekdays 1 = Sunday (we use classic cron's 1 = Monday), so write weekdays as names, in your code and in the trigger:
 
@@ -80,6 +70,7 @@ export async function POST(request: Request) {
 ```
 
 - **A trigger only says when to tick;** `tick` matches the time, not which trigger fired. So one trigger per cron and one every minute both work.
+- **With the outbox, you need a regular trigger anyway:** the request runs a commit's jobs itself, but retries, delayed jobs and what a crash left behind wait for a sweep, and the trigger's interval is how long they wait. That trigger ticks your crons too, so per-cron triggers only make sense without the outbox, where a trigger delivered twice runs the cron twice.
 - **Every minute never needs touching,** and it's Laravel's setup: one system cron entry, `* * * * * php artisan schedule:run`. It costs about 43,000 calls a month: nothing on Cloudflare's paid plan, cents on Vercel Pro.
 - **One trigger per cron calls less,** but keep the lists in step: a cron with no trigger never runs, and nothing can tell you, since logic-sdk doesn't read `wrangler.jsonc` or `vercel.json`.
 - **The platform's own limits apply:**
@@ -88,6 +79,8 @@ export async function POST(request: Request) {
 - **pg-boss** (planned) needs no triggers: the adapter schedules each cron in pg-boss from your code.
 
 ## Once, on several servers
+
+**Only the outbox runs a cron once when several servers tick it.** With `inProcess()`, each server runs it.
 
 Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter](/docs/concepts/jobs):
 
@@ -107,7 +100,7 @@ Five fields, `minute hour day-of-month month day-of-week`: lists, ranges and ste
 
 - **Not supported:** seconds, `@daily`-style aliases, and `L`, `W`, `#`. `createRegistry` fails with what to write instead.
 - **Time zones:** an IANA name, matched on the clock there. Like Laravel, a time skipped when clocks go forward doesn't run that day, and one that happens twice when they go back runs twice. Avoid 1:00 to 3:00 in a time zone with DST, or use UTC.
-- **A tick runs what's due now.** A minute nobody ticked (the server was down) is skipped, not caught up, like pg-boss's default. Runs may overlap, like Laravel, Oban and Vercel.
+- **A tick runs what's due now.** A minute nobody ticked (the server was down, a deploy) is skipped, not caught up, like Laravel and pg-boss's default (`missed: 'skip'`). Runs may overlap, like Laravel, Oban and Vercel.
 
 ## Testing
 
