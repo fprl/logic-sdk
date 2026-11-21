@@ -242,6 +242,8 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
     // @ts-expect-error: load must return the app's scope (or null)
     jobs: { scope: { load: () => ({ nope: 1 }) } },
   });
+  // keeping the scope as it was, the documented escape hatch: `saved` is the app's scope, unannotated
+  m.createRegistry({ modules: {}, jobs: { adapter: { async deliver() {} }, scope: { load: (saved) => saved } } });
 }
 
 // Drizzle's synchronous SQLite drivers commit before an async mutation finishes, and Drizzle's types reject them

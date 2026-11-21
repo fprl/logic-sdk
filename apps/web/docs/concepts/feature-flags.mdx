@@ -35,7 +35,7 @@ export const betaCheckout = (s: Scope): s is MemberScope =>
 ```
 
 - **Cheap.** One lookup per request, then plain property reads.
-- **Frozen into events.** The scope is copied into every event envelope, so a listener sees the flag as it was when the event was emitted, not as it is when the listener runs. Usually that's what you want (finish what was started); if it isn't, read the flag from a service or the database in the listener.
+- **Carried into jobs by `jobs.scope`.** The scope is copied into every job, and what a listener sees is what `load` rebuilds. To finish what was started with the flag as it was, keep it in `store` and pass it through `load`; to see today's, resolve it again in `load`, or read it from a service in the listener.
 - **Keep it JSON**, like the rest of the scope.
 
 ## Behind a service, from an action

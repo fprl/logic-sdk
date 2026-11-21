@@ -5,8 +5,8 @@
 `logic-sdk/cloudflare`: jobs through Cloudflare Queues.
 
 ```ts
-jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }) }   // durable: a row in your transaction, sent after commit
-jobs: { adapter: cloudflareQueue(env.JOBS) }                        // sent after commit, lost if the Worker dies in between
+jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }), scope: { store, load } } // durable: a row in your transaction, sent after commit
+jobs: { adapter: cloudflareQueue(env.JOBS), scope: { store, load } }                      // sent after commit, lost if the Worker dies in between
 
 export default {
   async queue(batch, env, ctx) {

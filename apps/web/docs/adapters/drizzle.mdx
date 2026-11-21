@@ -45,7 +45,11 @@ export { outboxTable } from "logic-sdk/drizzle";
 // registry.ts
 import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
 
-export const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
+export const registry = createRegistry({
+  modules,
+  database: drizzleAdapter(db),
+  jobs: { adapter: outbox(db), scope: { store, load } }, // who a job runs as: see Jobs
+});
 
 // what a crash or a failure left behind: a platform trigger, or on Node
 startTicking(registry); // from logic-sdk/node: ticks crons, sweeps every minute

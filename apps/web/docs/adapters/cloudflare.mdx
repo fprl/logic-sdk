@@ -15,7 +15,7 @@ const makeRegistry = (env: Env, ctx: ExecutionContext) => {
     modules,
     database: drizzleAdapter(db),
     waitUntil: (p) => ctx.waitUntil(p),
-    jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }) },
+    jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }), scope: { store, load } }, // see Jobs: who a job runs as
   });
 };
 

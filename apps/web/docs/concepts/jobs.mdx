@@ -132,11 +132,14 @@ export const sendAll = listener({
 
 ## Who a job runs as
 
-By default a job stores the scope it was emitted with, so a retry two days later still runs with that day's roles. `jobs.scope` fixes that:
+A job runs as the scope that emitted or scheduled it, so policies check it again and tenant-scoped helpers keep working. A job that waits in an outbox or a queue would run with the roles of the day it was queued, so every adapter but `inProcess()` needs `jobs.scope.load`, and `createRegistry` throws without it:
 
+- **`inProcess()` needs nothing:** it runs each job right after commit, so no scope waits.
+- **Keeping the scope as it was is a choice you write down:** `load: (saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
 - **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
-- **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same.
+- **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same. Check membership here too: a user who left the account gets `null`.
+- **Keep the system:** a [system scope](/docs/concepts/scope#the-system) (a cron's) is stored like any other, so `store` keeps its `system` field and `load` rebuilds it.
 - **`load` throwing counts as a try,** like the listener throwing: with tries left it's retried, at the default of one it's `failed`. So does returning `undefined`, which is almost always a missing `return`.
 - **`store` needs `load`:** listeners run as a scope, not as what was saved. `createRegistry` throws otherwise.
 - **`load` runs once per job,** before the listener and outside `wrap`: an event with five listeners loads five times. Write `store` first in the object so TypeScript infers what `load` gets, or annotate its parameter.
@@ -150,6 +153,7 @@ For writing an adapter:
 - **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
 - **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`** and **`retry(id)`** for adapters that store jobs.
 - **Three job kinds:** a delivery `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, a cron run `{ kind: "cron", id, cron, scheduledAt, attempts }` and a scheduled call `{ kind: "call", id, fn, input, scope, attempts, depth, runAt? }`. All are JSON; an adapter stores and sends them without looking inside, except `attempts` and `runAt` if its backend needs them at send time.
+- **Every adapter but `inProcess()` needs `jobs.scope.load`:** the registry assumes yours keeps jobs, so `createRegistry` asks the app to rebuild the scope they run as.
 - **`holds: true | { max }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour. **`fail(job, error)`** keeps a job that failed for good in a queue consumer (the outbox writes a `failed` row).
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the job is out of its `attempts`. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.

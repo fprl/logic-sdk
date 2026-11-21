@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  createRegistry, init, isDomainError, type Call, type Delivery, type Dispatcher, type Job, type DomainError, type Envelope, type FailureInfo,
+  createRegistry, init, inProcess, isDomainError, type Call, type Delivery, type Dispatcher, type Job, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
@@ -258,7 +258,7 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
     jobs: { adapter: {
       async enqueue(tx, jobs) { seen.push(`enqueue ${jobs.map((d) => d.kind === "delivery" && `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
       async deliver(deliveries, { run }) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
-    } },
+    }, scope: { load: (saved) => saved } },
   });
   await app.run(items.add, { name: "q" });
   expect(seen).toEqual(["enqueue items.added→log.onAdded in tx=true", "deliver", "done"]);
@@ -266,7 +266,7 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
 
 test("deliveries are JSON: what a queue carries comes back and runs", async () => {
   const deliveries: Job[] = [];
-  const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } } } });
+  const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } }, scope: { load: (saved) => saved } } });
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
@@ -309,7 +309,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: memoryDatabase(),
     services: { log: [] },
-    jobs: { adapter: { deliver: async (jobs) => void seen.push(...jobs.flatMap((d) => (d.kind === "delivery" ? [d.envelope] : []))) } },
+    jobs: { adapter: { deliver: async (jobs) => void seen.push(...jobs.flatMap((d) => (d.kind === "delivery" ? [d.envelope] : []))) }, scope: { load: (saved) => saved } },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -458,7 +458,6 @@ test("long-lived process: concurrent requests never see each other's scope", asy
   results.forEach((r, i) => expect(r).toEqual([`u${i}`, `l${i}`]));
 });
 
-
 // ── regressions from the code review ────────────────────────────────────────
 const unhandled: unknown[] = [];
 const g = globalThis as any;
@@ -601,7 +600,7 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   const now = listener({ event: () => happened, async handler() { ran.push("now"); } });
   const jobs: Delivery[] = [];
   const make = (adapter?: Dispatcher) =>
-    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
+    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter, scope: { load: (saved) => saved } } });
   await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
@@ -618,7 +617,7 @@ test("adapter hooks: check sees the listeners and database at createRegistry; fa
     deliver: async () => {},
     fail: async (job, error) => void failed.push(`${job.id}: ${(error as Error).message}`),
   };
-  const { registry } = setup({ jobs: { adapter }, onError: () => {} });
+  const { registry } = setup({ jobs: { adapter, scope: { load: (saved) => saved } }, onError: () => {} });
   expect(seen).toEqual(["log.onAdded", "db"]);
   const job = { kind: "delivery" as const, attempts: 1, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job)).toEqual("failed");
@@ -700,7 +699,6 @@ test("an adapter that retries the transaction delivers each event once", async (
   expect(attempts).toEqual(2);
   expect(services.log).toEqual(["added once (items.added, es)"]);
 });
-
 
 test("a mutation that loses a race (deadlock) is re-run in a fresh transaction; events go out once", async () => {
   const db = memoryDatabase();
@@ -796,7 +794,7 @@ test("ids: an explicit id is local to its module, and jobs store it", async () =
   const r = createRegistry<Scope>({
     modules: { notifications: { renamedEvent: happened, renamedFn: doIt, renamedListener: send } },
     database: memoryDatabase(),
-    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...deliveriesIn(d)); for (const j of d) await run(j); } } },
+    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...deliveriesIn(d)); for (const j of d) await run(j); } }, scope: { load: (saved) => saved } },
   });
   expect(r.idOf(doIt)).toBe("notifications.do");
   expect(r.definitions.listeners.map((l) => [l.id, l.name])).toEqual([["notifications.send", "renamedListener"]]);
@@ -855,7 +853,7 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
 
 test("a job of a kind this version doesn't know fails at once, and the adapter keeps it", async () => {
   const kept: string[] = [];
-  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {}, fail: async (_job, e) => void kept.push((e as Error).message) } } });
+  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {}, fail: async (_job, e) => void kept.push((e as Error).message) }, scope: { load: (saved) => saved } } });
   const job = { kind: "nope", id: "x", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job as never)).toEqual("failed");
   expect(kept).toEqual([expect.stringMatching(/job x has kind "nope", which this version can't run/)]);
@@ -867,6 +865,15 @@ test("jobs.scope.load failing counts as a try: at the default of one, the job fa
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, onError: () => {}, jobs: { scope: { load: async () => { throw new Error("db down"); } } } });
   const job = { kind: "delivery" as const, attempts: 1, id: "x.react@e", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: {}, scope: {}, occurredAt: "", depth: 1 } };
   expect(await r.jobs.run(job)).toEqual("failed");
+});
+
+test("jobs.scope: any adapter but inProcess() keeps jobs to run later, so it needs load: a job runs with today's roles", () => {
+  const later = { holds: true as const, async deliver() {} };
+  const forwards = { async deliver() {} }; // sends to a queue: it keeps them too
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later } })).toThrow(/keeps jobs to run later, so set jobs\.scope\.load/);
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: forwards } })).toThrow(/jobs\.scope\.load/);
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later, scope: { load: (saved) => saved } } })).not.toThrow(); // keeping it as it was is a choice you write down
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: inProcess() } })).not.toThrow(); // runs now, in this process: nothing waits
 });
 
 test("jobs.scope: store without load throws; load returning undefined retries instead of discarding", async () => {
@@ -912,7 +919,7 @@ test("crons: tick runs what's due that minute, as the cron's scope, with its inp
 test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, with the cron's attempts", async () => {
   const sent: Job[] = [];
   const reported: FailureInfo[] = [];
-  const { registry, ran } = cronSetup({ jobs: { adapter: { async deliver(jobs) { sent.push(...jobs); } } }, onError: (_e, info) => reported.push(info) });
+  const { registry, ran } = cronSetup({ jobs: { adapter: { async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } }, onError: (_e, info) => reported.push(info) });
   await registry.jobs.tick(new Date("2026-11-23T09:00:00Z"));
   expect(sent).toEqual([
     { kind: "cron", id: "reports.weekly@20261123T0900Z", cron: "reports.weekly", scheduledAt: "2026-11-23T09:00:00.000Z", attempts: 1 },
@@ -971,7 +978,7 @@ function scheduleSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}
     modules: { bookings: { remind, book } },
     database: memoryDatabase(),
     now: () => new Date("2026-07-01T10:00:00Z"),
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
     ...extra,
   });
   return { registry, book, reminded, sent, app: registry.as({ actor: "ana", locale: "es" }) };
@@ -992,7 +999,7 @@ test("ctx.schedule: a job committed with the mutation, as the caller's scope, fo
 test("ctx.schedule: refused where nothing can hold it (in-process), or for longer than the adapter can", async () => {
   const { app, book } = scheduleSetup({ jobs: {} });
   await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter can't hold jobs/);
-  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} } } });
+  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} }, scope: { load: (saved) => saved } } });
   await expect(short.app.run(short.book, { who: "guest" })).rejects.toThrow(/holds jobs for at most 60s/);
   await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs an `at` date or a `delay`/);
 });
@@ -1054,7 +1061,7 @@ test("ctx.schedule: attempts are stamped on the job; an action that fails retrie
     modules: { x: { charge, go } },
     database: memoryDatabase(),
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
   });
   const app = registry.as({ actor: "a", locale: "es" });
   await app.run(go, { attempts: 3 });
@@ -1098,7 +1105,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
     database: memoryDatabase(),
     maxEventDepth: 0,
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: { load: (saved) => saved } },
   });
   await r2.as({ actor: "a", locale: "es" }).run(deep);
   expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
@@ -1108,7 +1115,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   const waits = createRegistry<Scope>({
     modules: { x: { pinged, ping, later } },
     database: memoryDatabase(),
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
   });
   await waits.as({ actor: "a", locale: "es" }).run(later);
   expect(sent).toMatchObject([{ kind: "call", depth: 0 }]); // waiting a minute is a new chain, not a loop
@@ -1132,6 +1139,7 @@ test("a cron starts a chain: what its function emits is the first hop", async ()
           }
         },
       },
+      scope: { load: (saved) => saved },
     },
   });
   await r.jobs.tick(new Date("2026-11-23T03:00:00Z"));
@@ -1155,7 +1163,7 @@ test("testing: drain runs each waiting job at the time it was due, so one that r
     },
   });
   const rearm = mutation({ async handler(ctx) { ctx.schedule(pulse, undefined, { delay: 3600 }); } });
-  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: memoryDatabase(), jobs: { adapter: { holds: true, async deliver() {} } } });
+  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: memoryDatabase(), jobs: { adapter: { holds: true, async deliver() {} }, scope: { load: (saved) => saved } } });
   const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
   await t.begin();
   await t.as({ actor: "a", locale: "es" }).run(rearm);

@@ -22,7 +22,7 @@ Make it a union of signed in and signed out, so [policies](/docs/concepts/author
 - **Change it for one call** with run options: `ctx.run(fn, input, { scope: { locale: "es" } })`. It's merged over the current scope, for that call and everything it runs.
 - **Listeners get the scope** of the call that emitted the event, so a confirmation email goes out in the guest's locale.
 - **Keep it JSON.** It travels with events, so it must be serializable. Policies are plain functions in `policies.ts`, like `member(scope)`, not methods.
-- **It's a snapshot.** A listener sees the scope as it was at emit time, flags and roles included. See [Feature flags](/docs/concepts/feature-flags).
+- **Jobs rebuild it.** With an adapter that keeps jobs (the outbox, a queue), `jobs.scope.load` rebuilds the scope when each one runs, with today's roles: see [Jobs](/docs/concepts/jobs#who-a-job-runs-as). On `inProcess()` a listener sees the scope as it was at emit, flags included. See [Feature flags](/docs/concepts/feature-flags).
 
 ## The system
 

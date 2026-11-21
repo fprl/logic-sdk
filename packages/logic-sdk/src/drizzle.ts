@@ -117,7 +117,7 @@ type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "d
  * left behind. At least once: a crash between a listener finishing and its row being deleted runs it again.
  *
  * ```ts
- * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
+ * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { store, load } } });
  * startTicking(registry); // from logic-sdk/node, or registry.jobs.sweep() from a platform's cron trigger
  * ```
  */
