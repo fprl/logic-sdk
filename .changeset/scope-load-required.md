@@ -2,7 +2,7 @@
 "logic-sdk": minor
 ---
 
-**An adapter that keeps jobs to run later needs `jobs.scope.load`.** A job that waits in an outbox or a queue would otherwise run with the roles of the day it was queued. `createRegistry` now throws without it when the adapter `holds` jobs (`outbox`, `cloudflareQueue`), like AshOban's `actor_persister` and Laravel's `SerializesModels`, which store ids and load them again when the job runs.
+**An adapter that keeps jobs to run later needs `jobs.scope.load`.** A job that waits in an outbox or a queue would otherwise run with the roles of the day it was queued. `createRegistry` now throws without it for every adapter but `inProcess()` (`outbox`, `cloudflareQueue`, your own), like AshOban's `actor_persister` and Laravel's `SerializesModels`, which store ids and load them again when the job runs.
 
 ```ts
 jobs: {

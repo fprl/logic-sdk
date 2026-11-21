@@ -28,11 +28,18 @@ import type {
  * Default dispatcher: delivers right after commit, in this process, once, ignoring `attempts` and `delay` (like Laravel's
  * sync queue). Lost on crash: use an outbox when that matters.
  */
-export const inProcess = (): Dispatcher => ({
-  async deliver(deliveries, { run }) {
-    for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
-  },
-});
+export const inProcess = (): Dispatcher => {
+  const adapter: Dispatcher = {
+    async deliver(deliveries, { run }) {
+      for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
+    },
+  };
+  immediate.add(adapter);
+  return adapter;
+};
+const immediate = new WeakSet<Dispatcher>();
+/** `inProcess()`: runs each job right after commit, in this process, so no scope waits at rest. */
+export const runsNow = (adapter: Dispatcher) => immediate.has(adapter);
 
 /** What running jobs needs from the registry: its definitions, and how it runs a function or a listener's handler. */
 export interface JobsDeps {
