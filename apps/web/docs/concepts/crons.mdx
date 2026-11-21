@@ -29,9 +29,14 @@ Your crons live in code. Something calls `registry.jobs.tick()`, which runs ever
 import { startTicking } from "logic-sdk/node";
 
 const stop = startTicking(registry); // ticks every minute, sweeps every 60 s: { sweepEvery }
+process.on("SIGTERM", async () => {
+  await stop(); // waits for the running tick and sweep
+  process.exit(0);
+});
 ```
 
-It ticks on the minute without waiting for the last tick, and sweeps on its own loop, so a slow cron or sweep never skips a minute.
+- **It ticks on the minute without waiting for the last tick,** and sweeps on its own loop, so a slow cron or sweep never skips a minute.
+- **Ticks stuck on an unreachable database don't pile up:** with ten still running, the next minute is skipped and reported to `onError`, so a backlog of stale minutes doesn't all run when the database comes back.
 
 **Cloudflare:** `"* * * * *"` for all of them, or one trigger per cron. Cloudflare numbers weekdays 1 = Sunday (we use classic cron's 1 = Monday), so write weekdays as names, in your code and in the trigger:
 

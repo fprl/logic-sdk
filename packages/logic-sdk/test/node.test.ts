@@ -54,11 +54,57 @@ test("after the machine slept, it ticks the current minute, not a backlog", () =
   stop();
 });
 
-test("stop() stops both loops", () => {
+test("stop() stops both loops", async () => {
   jest.useFakeTimers({ now: new Date("2026-11-23T09:00:00Z") });
   const { registry, ticked, sweeps } = fake();
   const stop = startTicking(registry, { sweepEvery: 30 });
-  stop();
+  await stop();
   jest.advanceTimersByTime(5 * 60_000);
   expect([ticked, sweeps()]).toEqual([[], 0]);
+});
+
+test("stop() resolves once the running tick and sweep finish, for a graceful shutdown", async () => {
+  const tick = Promise.withResolvers<void>();
+  const sweep = Promise.withResolvers<void>();
+  const finished: string[] = [];
+  const registry = {
+    jobs: {
+      tick: () => tick.promise.then(() => void finished.push("tick")).then(() => []),
+      sweep: () => sweep.promise.then(() => void finished.push("sweep")).then(() => ({ done: 0, failed: 0, discarded: 0, retrying: 0 })),
+    },
+  };
+  jest.useFakeTimers({ now: new Date("2026-11-23T09:00:00Z") });
+  const stop = startTicking(registry, { sweepEvery: 60 });
+  jest.advanceTimersByTime(60_000); // both start
+  let stopped = false;
+  const stopping = stop().then(() => void (stopped = true));
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  tick.resolve();
+  sweep.resolve();
+  await stopping;
+  expect(finished.sort()).toEqual(["sweep", "tick"]);
+});
+
+test("ticks stuck on an unreachable database don't pile up: past ten, a minute is skipped and reported", () => {
+  jest.useFakeTimers({ now: new Date("2026-11-23T09:00:00Z") });
+  const ticked: string[] = [];
+  const errors: string[] = [];
+  const registry = {
+    jobs: {
+      tick: (at = new Date()) => {
+        ticked.push(at.toISOString().slice(11, 16));
+        return new Promise<string[]>(() => {}); // waiting for a connection that never comes
+      },
+      sweep: async () => ({ done: 0, failed: 0, discarded: 0, retrying: 0 }),
+    },
+  };
+  const stop = startTicking(registry, { sweepEvery: 0, onError: (e) => errors.push((e as Error).message) });
+  jest.advanceTimersByTime(12 * 60_000);
+  expect(ticked).toHaveLength(10);
+  expect(errors).toEqual([
+    expect.stringMatching(/skipped the 2026-11-23T09:11:00\.000Z tick: 10 earlier ticks are still running/),
+    expect.stringMatching(/09:12/),
+  ]);
+  void stop();
 });
