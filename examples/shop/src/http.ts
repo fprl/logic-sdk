@@ -60,8 +60,9 @@ export function createApi<Bindings extends object = object>(shopFor: (c: Context
   return app;
 }
 
-/** Demo auth: `x-user: ana` is a customer, `x-user: sam:staff` works here. Put your real session lookup here. */
+/** Demo auth: `x-user: ana` is a customer, `x-user: sam:staff` works here. Put your real session lookup here. Never the system. */
 function scopeOf(request: Request): Scope {
   const [id, role] = request.headers.get("x-user")?.split(":") ?? [];
-  return { user: id ? { id, role: role === "staff" ? "staff" : "customer" } : null };
+  if (!id) return { user: null };
+  return { user: { id, role: role === "staff" ? "staff" : "customer" } };
 }

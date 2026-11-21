@@ -15,7 +15,7 @@ export const morningDigest = cron({
 
 - **One cron per export,** found through your modules like listeners, so a new one can't be forgotten.
 - **`run` is a normal function:** it keeps its `authorize`, validation and tracing, and you call it from anywhere else too. `input` is what it gets, typed by it and required when it needs one: `input: { kind: "weekly" }`.
-- **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from.
+- **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from. Use a [system scope](/docs/concepts/scope#the-system), `asSystem("orders.morningDigest")`, not a fake user, and grant it in policies (`staffOrSystem`).
 - **`attempts`** works like a listener's: default 1.
 
 ## Ticking
