@@ -82,11 +82,11 @@ function setup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
 // ── tests ────────────────────────────────────────────────────────────────────
 test("registry: ids come from module keys", () => {
   const { registry } = setup();
-  expect(registry.functions.map((f) => f.id).sort()).toEqual([
+  expect(registry.definitions.functions.map((f) => f.id).sort()).toEqual([
     "items.add", "items.addTwo", "items.greet", "items.list", "items.locale", "items.typed", "items.whoami",
   ]);
-  expect(registry.listeners.map((l) => l.id)).toEqual(["log.onAdded"]);
-  expect(registry.functions.filter((f) => f.exposed).map((f) => f.id).sort()).toEqual(["items.add", "items.list"]);
+  expect(registry.definitions.listeners.map((l) => l.id)).toEqual(["log.onAdded"]);
+  expect(registry.definitions.functions.filter((f) => f.exposed).map((f) => f.id).sort()).toEqual(["items.add", "items.list"]);
 });
 
 test("mutation commits, then listeners run with the emitter's scope", async () => {
@@ -161,7 +161,7 @@ test("an internal function with authorize is checked too, even when your own cod
   const purge = mutation({ input: z.object({}), authorize: signedIn, handler: async () => "purged" });
   const job = action({ input: z.object({}), handler: async ({ run }) => run(purge, {}) });
   const r = createRegistry<Scope>({ modules: { j: { purge, job } }, database: memoryDatabase(), services: { log: [] } });
-  expect(r.functions.find((f) => f.id === "j.purge")!.exposed).toBe(false);
+  expect(r.definitions.functions.find((f) => f.id === "j.purge")!.exposed).toBe(false);
   await expect(r.as({ actor: null, locale: "es" }).run(job, {})).rejects.toMatchObject({ kind: "forbidden", code: "j.purge.forbidden" });
   expect(await r.as({ actor: "a", locale: "es" }).run(job, {})).toEqual("purged");
 });
@@ -235,7 +235,7 @@ test("wrap sees every call with depth", async () => {
 test("custom dispatcher: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
   const seen: string[] = [];
   const { app } = setup({
-    events: {
+    jobs: {
       async enqueue(tx, deliveries) { seen.push(`enqueue ${deliveries.map((d) => `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
       async deliver(deliveries, run) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
     },
@@ -246,12 +246,12 @@ test("custom dispatcher: one delivery per listener, enqueued inside the transact
 
 test("deliveries are JSON: what a queue carries comes back and runs", async () => {
   const deliveries: Delivery[] = [];
-  const { app, registry } = setup({ events: { async deliver(d) { deliveries.push(...d); } } });
+  const { app, registry } = setup({ jobs: { async deliver(d) { deliveries.push(...d); } } });
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
   expect(d.id).toEqual(`${d.envelope.id}:log.onAdded`);
-  expect(await registry.deliver(d, { attempt: 2 })).toEqual("done");
+  expect(await registry.jobs.run(d, { attempt: 2 })).toEqual("done");
 });
 
 test("abort signal: checked before the call starts, never between its steps", async () => {
@@ -289,7 +289,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: memoryDatabase(),
     services: { log: [] },
-    events: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) },
+    jobs: { deliver: async (deliveries) => void seen.push(...deliveries.map((d) => d.envelope)) },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -478,19 +478,38 @@ test("review #6: a caught nested invalid-input failure dooms the transaction too
   expect(db.store.rows.t).toEqual(undefined);
 });
 
-test("registry.deliver: done, failed for good, or throws to retry", async () => {
+test("registry.jobs.sweep runs the transport's sweep with jobs.run; in-process has nothing to sweep", async () => {
+  const { registry } = setup();
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 });
+  let got: { limit?: number } | undefined;
+  const { registry: swept } = setup({ jobs: { deliver: async () => {}, sweep: async (run, options) => { got = options; expect(run).toBe(swept.jobs.run); return { done: 2, failed: 0, retrying: 1 }; } } });
+  expect(await swept.jobs.sweep({ limit: 5 })).toEqual({ done: 2, failed: 0, retrying: 1 });
+  expect(got).toEqual({ limit: 5 });
+});
+
+test("registry.jobs.retry: the transport's answer, or a throw when it stores no jobs", async () => {
+  const { registry } = setup();
+  await expect(registry.jobs.retry("e1:log.onAdded")).rejects.toThrow(/stores no jobs, so there's nothing to retry \(e1:log\.onAdded\)/);
+  const asked: string[] = [];
+  const { registry: stored } = setup({ jobs: { deliver: async () => {}, retry: async (id) => (asked.push(id), id === "known") } });
+  expect(await stored.jobs.retry("known")).toBe(true);
+  expect(await stored.jobs.retry("other")).toBe(false);
+  expect(asked).toEqual(["known", "other"]);
+});
+
+test("registry.jobs.run: done, failed for good, or throws to retry", async () => {
   const reported: FailureInfo[] = [];
   const { d } = regSetup({ onError: (_e, info) => reported.push(info) });
   const envelope = { id: "e1", name: "items.added", payload: { name: "fine" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 };
   const delivery = (payload: object, listener = "log.onAdded") => ({ id: `e1:${listener}`, listener, envelope: { ...envelope, payload } });
-  expect(await d.deliver(delivery({ name: "fine" }))).toEqual("done");
+  expect(await d.jobs.run(delivery({ name: "fine" }))).toEqual("done");
   // an unexpected error: a retry might help, so it throws (the queue redelivers)
-  await expect(d.deliver(delivery({ name: "listener-fails" }), { attempt: 3 })).rejects.toThrow(/listener exploded/);
+  await expect(d.jobs.run(delivery({ name: "listener-fails" }), { attempt: 3 })).rejects.toThrow(/listener exploded/);
   expect(reported.at(-1)).toMatchObject({ listener: "log.onAdded", delivery: "e1:log.onAdded", attempt: 3 });
   // a payload that no longer matches its schema: retrying can't help
-  expect(await d.deliver(delivery({ nope: 1 }))).toEqual("failed");
+  expect(await d.jobs.run(delivery({ nope: 1 }))).toEqual("failed");
   // a renamed or removed listener throws, so the message ends in the dead-letter queue
-  await expect(d.deliver(delivery({ name: "fine" }, "log.gone"))).rejects.toThrow(/log\.gone isn't a registered listener/);
+  await expect(d.jobs.run(delivery({ name: "fine" }, "log.gone"))).rejects.toThrow(/log\.gone isn't a registered listener/);
 });
 
 test("a listener's domain error is final (failed, reported); a conflict throws to retry", async () => {
@@ -505,8 +524,8 @@ test("a listener's domain error is final (failed, reported); a conflict throws t
   const errors: string[] = [];
   const r = createRegistry<Scope>({ modules: { x: { happened, react } }, database: memoryDatabase(), onError: (e) => errors.push((e as Error).message) });
   const delivery = (kind: string) => ({ id: "e:x.react", listener: "x.react", envelope: { id: "e", name: "x.happened", payload: { kind }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } });
-  expect(await r.deliver(delivery("gone"))).toEqual("failed");
-  await expect(r.deliver(delivery("taken"))).rejects.toMatchObject({ kind: "conflict" });
+  expect(await r.jobs.run(delivery("gone"))).toEqual("failed");
+  await expect(r.jobs.run(delivery("taken"))).rejects.toMatchObject({ kind: "conflict" });
   expect(errors).toHaveLength(2);
 });
 
@@ -648,7 +667,7 @@ test("meta is set per function and visible in wrap and the registry", async () =
   const r = m.createRegistry({ modules: { billing: { tagged } }, wrap: async (call, next) => { seen.push(call.meta?.tags); return next(); } });
   await r.as({ actor: "a", locale: "es" }).run(tagged);
   expect(seen).toEqual([["billing"]]);
-  expect(r.functions.find((f) => f.id === "billing.tagged")?.fn.meta).toEqual({ tags: ["billing"] });
+  expect(r.definitions.functions.find((f) => f.id === "billing.tagged")?.fn.meta).toEqual({ tags: ["billing"] });
 });
 
 test("listeners carry meta into wrap, like functions", async () => {

@@ -54,7 +54,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           now,
           stubs,
           record: (e) => events.push(e),
-          events: options.listeners === false ? { deliver: async () => {} } : undefined,
+          jobs: options.listeners === false ? { deliver: async () => {} } : undefined,
         });
         result = await fn({
           as: (scope) => derived.as(scope),

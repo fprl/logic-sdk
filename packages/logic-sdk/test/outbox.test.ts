@@ -48,8 +48,8 @@ const react = listener({
 
 const rows = () => db.select().from(outboxTable);
 const makeDue = () => db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` });
-function setup(events: Dispatcher & Partial<ReturnType<typeof outbox>> = outbox(db, { maxAttempts: 2 })) {
-  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), events, onError: () => {} });
+function setup(jobs: Dispatcher = outbox(db, { maxAttempts: 2 })) {
+  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }
 
@@ -69,33 +69,35 @@ test("a committed event is delivered and its row deleted; a rolled-back one neve
 });
 
 test("a failure keeps the row with a backoff and the error; a sweep after the backoff delivers it", async () => {
-  const events = outbox(db, { maxAttempts: 3 });
-  const { app, registry } = setup(events);
+  const { app, registry } = setup(outbox(db, { maxAttempts: 3 }));
   next = "throw";
   await app.run(add, { name: "lamp" });
   const [row] = await rows();
   expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "smtp down" });
   expect(row!.availableAt.getTime()).toBeGreaterThan(Date.now()); // e^1 seconds from now
-  expect(await events.sweep(registry)).toEqual({ done: 0, failed: 0, retrying: 0 }); // not due yet
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 }); // not due yet
   next = "ok";
   await makeDue();
-  expect(await events.sweep(registry)).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
   expect(ran).toEqual(["lamp#1", "lamp#2"]);
   expect(await rows()).toEqual([]);
 });
 
-test("out of attempts it's failed; retry puts it back in line", async () => {
-  const events = outbox(db, { maxAttempts: 2 });
-  const { app, registry } = setup(events);
+test("out of attempts it's failed; retry puts it back in line, and only failed rows", async () => {
+  const { app, registry } = setup();
   next = "throw";
   await app.run(add, { name: "chair" });
+  const [pending] = await rows();
+  expect(await registry.jobs.retry(pending!.id)).toBe(false); // pending: its runner or a sweep owns it, so retry leaves it alone
+  expect(await rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
   await makeDue();
-  expect(await events.sweep(registry)).toEqual({ done: 0, failed: 1, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, retrying: 0 });
   const [row] = await rows();
   expect(row).toMatchObject({ status: "failed", attempts: 2 });
   next = "ok";
-  await events.retry(row!.id);
-  expect(await events.sweep(registry)).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.retry(row!.id)).toBe(true);
+  expect(await registry.jobs.retry("nope:x.react")).toBe(false);
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
   expect(ran).toEqual(["chair#1", "chair#2", "chair#1"]);
 });
 
@@ -107,12 +109,11 @@ test("a rule saying no is failed at once, no retries", async () => {
 });
 
 test("a runner that crashed after commit: its lease expires and a sweep takes over", async () => {
-  const events = outbox(db);
-  const { app, registry } = setup({ ...events, deliver: async () => {} }); // committed, then the process died
+  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
-  expect(await events.sweep(registry)).toEqual({ done: 0, failed: 0, retrying: 0 }); // still leased
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, retrying: 0 }); // still leased
   await makeDue(); // the lease ran out
-  expect(await events.sweep(registry)).toEqual({ done: 1, failed: 0, retrying: 0 });
+  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, retrying: 0 });
   expect(ran).toEqual(["rug#2"]);
 });
 

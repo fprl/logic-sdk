@@ -36,7 +36,7 @@ const json = (body: unknown, status = 200) =>
  */
 export function toFetchHandler<S extends object>(registry: Registry<S>, options: FetchOptions<S>) {
   const base = (options.basePath ?? "/").replace(/\/?$/, "/");
-  const exposed = new Map(registry.functions.filter((f) => f.exposed).map((f) => [f.id, f]));
+  const exposed = new Map(registry.definitions.functions.filter((f) => f.exposed).map((f) => [f.id, f]));
   const onError = options.onError ?? ((e) => console.error("[logic-sdk] unexpected error", e));
 
   return async (request: Request, ...rest: any[]): Promise<Response> => {

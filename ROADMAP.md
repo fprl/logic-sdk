@@ -38,9 +38,9 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
 2. **Durable events, then crons.** The plan is in DESIGN.md ("Next: listeners, plugins, durable events, crons").
-   - **Done: the delivery contract.** One `Delivery` per (event, listener) with a dedupe id; `registry.deliver(delivery, { attempt })` resolves `done`/`failed` or throws to retry; `depth` on the envelope; payload and scope checked as plain JSON at emit; `ctx.event` without the stored scope.
-   - **Done: `outbox(db)` in `logic-sdk/drizzle`** (Postgres, Drizzle 1.0): rows in the transaction, leased first try after commit, fenced completion, Graphile-style backoff, `sweep(registry)`, `retry(id)`, failed rows you query yourself.
-   - **Next:** stable listener ids (`listener({ id })`) and scope at rest (`outbox(db, { scope: { store, load } })`, with a `discarded` outcome), then `logic-sdk/cloudflare` (`outbox(db, { via: cloudflareQueue(env.EVENTS) })`), then pg-boss. Drizzle 0.45 support for the outbox is unverified.
+   - **Done: the delivery contract.** One `Delivery` per (event, listener) with a dedupe id; `registry.jobs.run(delivery, { attempt })` resolves `done`/`failed` or throws to retry; `depth` on the envelope; payload and scope checked as plain JSON at emit; `ctx.event` without the stored scope.
+   - **Done: `outbox(db)` in `logic-sdk/drizzle`** (Postgres, Drizzle 1.0): rows in the transaction, leased first try after commit, fenced completion, Graphile-style backoff, `registry.jobs.sweep()` and `registry.jobs.retry(id)` (optional `sweep` and `retry` on the transport contract), failed rows you query yourself. The slot is `jobs` and the lists are `registry.definitions` (DESIGN.md, "Naming the slot").
+   - **Next:** stable listener ids (`listener({ id })`) and scope at rest (`outbox(db, { scope: { store, load } })`, with a `discarded` outcome), then `logic-sdk/cloudflare` (`outbox(db, { via: cloudflareQueue(env.EVENTS) })`, the first argument one binding or a record of lanes), then pg-boss (`pgBoss(boss, { route })`). Drizzle 1.0 (RC) only, like the rest of the library.
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `retries`, `delay`, `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. Transports declare capabilities; an option they can't honour fails at startup, never silently.
    - **Crons:** `cron({ schedule, run, scope })` exported from a module and discovered like listeners. pg-boss schedules on Node; `registry.crons.handle(c.cron)` on Cloudflare; one route on Vercel Schedules.
@@ -69,7 +69,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **A second database adapter** (Kysely or Prisma) before 1.0.
 - **Skills** in the package via TanStack Intent.
 - **A module registry,** shadcn-style: `logic-sdk add auth` copies a module (tables, functions, tests) into your app, as code you own.
-- **An admin panel** as a package (`@logic-sdk/admin`): a form per function from its JSON Schema, run as a chosen scope, filtered by `meta`. Built on `registry.functions` and run options.
+- **An admin panel** as a package (`@logic-sdk/admin`): a form per function from its JSON Schema, run as a chosen scope, filtered by `meta`. Built on `registry.definitions.functions` and run options.
 - **Seeds:** a docs recipe, not a feature. A seed script calls real mutations through `registry.as(scope)`.
 - Turbo if build caching starts to matter, tsdown only if CJS is needed, oxfmt, deploying apps/web.
 
@@ -77,7 +77,7 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 
 ## Dispatcher contract
 
-- `enqueue(tx, deliveries)` inside the transaction, `deliver(deliveries, run)` after commit, `registry.deliver(delivery, { attempt })` from any consumer: resolves `done` or `failed` (ack both), throws to retry.
+- `enqueue(tx, deliveries)` inside the transaction, `deliver(deliveries, run)` after commit, `registry.jobs.run(delivery, { attempt })` from any consumer: resolves `done` or `failed` (ack both), throws to retry.
 - **Transactional queues** (pg-boss, Graphile Worker): enqueue in the same transaction. **External queues** (Cloudflare Queues, Vercel Queues, Inngest, SQS): after commit (lossy), or an outbox table plus a relay (durable).
 - Tests use the in-memory dispatcher, so they're the same whatever production uses.
 - Every adapter (database and dispatcher) runs a shipped conformance suite.
