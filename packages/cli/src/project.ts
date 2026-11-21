@@ -41,7 +41,7 @@ export interface CronInfo {
   schedule: string;
   timezone: string;
   /** The function it runs. */
-  runs: string;
+  run: string;
   description: string | null;
   at: Loc | null;
 }
@@ -188,11 +188,11 @@ export async function loadProject(root: string): Promise<Project> {
     name: c.name,
     schedule: c.cron.schedule,
     timezone: c.cron.timezone ?? "UTC",
-    runs: described.ids.get(c.cron.run) ?? "(unknown)",
+    run: described.ids.get(c.cron.run) ?? "(unknown)",
     description: src(c)?.doc ?? null,
     at: src(c)?.at ?? null,
   }));
-  for (const c of crons) byId.get(c.runs)?.calledBy.push(c.id);
+  for (const c of crons) byId.get(c.run)?.calledBy.push(c.id);
 
   const events: EventInfo[] = described.events.map((e: any) => ({
     id: e.id,
