@@ -430,7 +430,7 @@ export interface FailureInfo {
  * Who a job runs as, at rest. `store` picks what's saved with the job (ids, not whole objects); `load` rebuilds the
  * scope when it runs, so policies see today's roles. `load` returning null discards the job (reported to `onError`),
  * a throw retries it. By default the scope is stored as it was at emit. `store` needs `load`: listeners run as a scope,
- * not as what was saved.
+ * not as what was saved. An adapter that keeps jobs to run later (`holds`) needs `load`: `createRegistry` checks.
  */
 export interface JobScope<S = object, T = any> {
   store?: (scope: S) => T;
@@ -464,7 +464,7 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
-  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is. */
+  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;

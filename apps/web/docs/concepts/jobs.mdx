@@ -132,11 +132,15 @@ export const sendAll = listener({
 
 ## Who a job runs as
 
-By default a job stores the scope it was emitted with, so a retry two days later still runs with that day's roles. `jobs.scope` fixes that:
+A job runs as the scope that emitted or scheduled it, so policies check it again and tenant-scoped helpers keep working. A job that waits (in an outbox, a queue) would run with the roles of the day it was queued, so an adapter that keeps jobs needs `jobs.scope`, and `createRegistry` says so:
+
+- **Required with an adapter that keeps jobs** (`outbox`, `cloudflareQueue`). `inProcess()` runs them right away, so it stores nothing and needs nothing.
+- **Keeping the scope as it was is a choice you write down:** `load: (saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
 
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
 - **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
-- **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same.
+- **`load` returning `null` discards the job** (reported to `onError`, deleted from the outbox). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same. Check membership here too: a user who left the account gets `null`.
+- **Keep the system:** a [system scope](/docs/concepts/scope#the-system) (a cron's) is stored like any other, so `store` keeps its `system` field and `load` rebuilds it.
 - **`load` throwing counts as a try,** like the listener throwing: with tries left it's retried, at the default of one it's `failed`. So does returning `undefined`, which is almost always a missing `return`.
 - **`store` needs `load`:** listeners run as a scope, not as what was saved. `createRegistry` throws otherwise.
 - **`load` runs once per job,** before the listener and outside `wrap`: an event with five listeners loads five times. Write `store` first in the object so TypeScript infers what `load` gets, or annotate its parameter.

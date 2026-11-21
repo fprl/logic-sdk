@@ -6,6 +6,8 @@ import { z } from "zod";
 import { drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
 import { init } from "../src/index.ts";
 
+const asSaved = { load: (saved: object) => saved };
+
 // PGlite runs one connection at a time, so only real Postgres can show two sweepers racing (CI sets DATABASE_URL).
 const url = process.env.DATABASE_URL ?? "";
 
@@ -34,7 +36,7 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
         await new Promise((r) => setTimeout(r, 5)); // hold the row a little, so sweepers overlap
       },
     });
-    const registry = createRegistry({ modules: { x: { happened, count } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
+    const registry = createRegistry({ modules: { x: { happened, count } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: asSaved } });
 
     const jobs = Array.from({ length: 60 }, (_, n) => {
       const envelope = { id: `e${n}`, name: "x.happened", payload: { n }, scope: {}, occurredAt: new Date().toISOString(), depth: 1 };

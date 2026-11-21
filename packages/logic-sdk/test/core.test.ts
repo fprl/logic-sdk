@@ -6,6 +6,9 @@ import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
+/** For adapters that hold jobs: keep the scope as it was saved. */
+const asSaved = { load: (saved: Scope) => saved };
+
 const deliveriesIn = (jobs: Job[]) => jobs.filter((j): j is Delivery => j.kind === "delivery");
 
 type Scope = { actor: string | null; locale: string };
@@ -601,7 +604,7 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   const now = listener({ event: () => happened, async handler() { ran.push("now"); } });
   const jobs: Delivery[] = [];
   const make = (adapter?: Dispatcher) =>
-    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter } });
+    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter, scope: asSaved } });
   await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
@@ -869,6 +872,13 @@ test("jobs.scope.load failing counts as a try: at the default of one, the job fa
   expect(await r.jobs.run(job)).toEqual("failed");
 });
 
+test("jobs.scope: an adapter that keeps jobs to run later needs load, so a job runs with today's roles", () => {
+  const later = { holds: true as const, async deliver() {} };
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later } })).toThrow(/keeps jobs to run later, so set jobs\.scope: \{ store, load \}/);
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later, scope: asSaved } })).not.toThrow(); // keeping it as it was is a choice you write down
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: { async deliver() {} } } })).not.toThrow(); // runs now, in this process: nothing waits
+});
+
 test("jobs.scope: store without load throws; load returning undefined retries instead of discarding", async () => {
   expect(() => createRegistry({ modules: {}, jobs: { scope: { store: (s: object) => s } as never } })).toThrow("jobs.scope has store but no load");
   const happened = event({ payload: z.object({}) });
@@ -971,7 +981,7 @@ function scheduleSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}
     modules: { bookings: { remind, book } },
     database: memoryDatabase(),
     now: () => new Date("2026-07-01T10:00:00Z"),
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: asSaved },
     ...extra,
   });
   return { registry, book, reminded, sent, app: registry.as({ actor: "ana", locale: "es" }) };
@@ -992,7 +1002,7 @@ test("ctx.schedule: a job committed with the mutation, as the caller's scope, fo
 test("ctx.schedule: refused where nothing can hold it (in-process), or for longer than the adapter can", async () => {
   const { app, book } = scheduleSetup({ jobs: {} });
   await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter can't hold jobs/);
-  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} } } });
+  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} }, scope: asSaved } });
   await expect(short.app.run(short.book, { who: "guest" })).rejects.toThrow(/holds jobs for at most 60s/);
   await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs an `at` date or a `delay`/);
 });
@@ -1054,7 +1064,7 @@ test("ctx.schedule: attempts are stamped on the job; an action that fails retrie
     modules: { x: { charge, go } },
     database: memoryDatabase(),
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: asSaved },
   });
   const app = registry.as({ actor: "a", locale: "es" });
   await app.run(go, { attempts: 3 });
@@ -1098,7 +1108,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
     database: memoryDatabase(),
     maxEventDepth: 0,
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: asSaved },
   });
   await r2.as({ actor: "a", locale: "es" }).run(deep);
   expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
@@ -1108,7 +1118,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   const waits = createRegistry<Scope>({
     modules: { x: { pinged, ping, later } },
     database: memoryDatabase(),
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: asSaved },
   });
   await waits.as({ actor: "a", locale: "es" }).run(later);
   expect(sent).toMatchObject([{ kind: "call", depth: 0 }]); // waiting a minute is a new chain, not a loop
@@ -1155,7 +1165,7 @@ test("testing: drain runs each waiting job at the time it was due, so one that r
     },
   });
   const rearm = mutation({ async handler(ctx) { ctx.schedule(pulse, undefined, { delay: 3600 }); } });
-  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: memoryDatabase(), jobs: { adapter: { holds: true, async deliver() {} } } });
+  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: memoryDatabase(), jobs: { adapter: { holds: true, async deliver() {} }, scope: asSaved } });
   const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
   await t.begin();
   await t.as({ actor: "a", locale: "es" }).run(rearm);

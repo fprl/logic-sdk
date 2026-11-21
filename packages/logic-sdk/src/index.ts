@@ -99,7 +99,7 @@ export { inProcess } from "./jobs.ts";
  * ──────────────────────────────────────────────────────────────────────────── */
 
 type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Omit<RegistryOptions<Mods>, "wrap" | "jobs"> & {
-  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is. */
+  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions<ScopeOf<C>, T>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call<MetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
@@ -356,6 +356,12 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const enqueue = dispatcher.enqueue?.bind(dispatcher);
   const jobScope = options.jobs?.scope;
   if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Listeners run as a scope, so rebuild it from what store saved.");
+  // a job that waits runs as a scope saved earlier: rebuild it, or its roles are the ones from back then (AshOban's actor_persister)
+  if (dispatcher.holds && !jobScope?.load)
+    throw new Error(
+      "[logic-sdk] Your jobs adapter keeps jobs to run later, so set jobs.scope: { store, load }. `store` saves ids, `load` rebuilds the scope " +
+        "when the job runs, with today's roles (null discards the job). To keep the scope as it was, `load: (saved) => saved`.",
+    );
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;

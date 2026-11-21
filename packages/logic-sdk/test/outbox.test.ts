@@ -7,6 +7,7 @@ import { z } from "zod";
 import { cronRunsTable, drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
 import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
 
+
 // The real Postgres engine, in process. The DDL is what drizzle-kit generates from outboxTable.
 const pg = new PGlite();
 await pg.exec(`
@@ -23,6 +24,8 @@ const db = drizzle({ client: pg });
 const items = pgTable("items", { name: text("name").primaryKey() });
 
 type Scope = { actor: string };
+/** Jobs keep the scope as it was: these tests check delivery, not who it runs as. */
+const asSaved = { load: (saved: Scope) => saved };
 const { mutation, action, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleTx<typeof db> }>();
 
 const added = event({ payload: z.object({ name: z.string() }) });
@@ -51,7 +54,7 @@ const react = listener({
 const rows = () => db.select().from(outboxTable);
 const makeDue = () => db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` });
 function setup(jobs: Dispatcher = outbox(db)) {
-  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs: { adapter: jobs }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs: { adapter: jobs, scope: asSaved }, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }
 
@@ -172,7 +175,7 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
     modules: { x: { added, add, react } },
     database: drizzleAdapter(db),
     onError: (_e, info) => reported.push(info),
-    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }) }, // two failed sends, then failed
+    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }), scope: asSaved }, // two failed sends, then failed
   });
   via.down = true;
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
@@ -200,7 +203,7 @@ test("a last try that never finished is failed on the next sweep, without runnin
 
 test("delay: the row waits unclaimed until it's due, then a sweep runs it", async () => {
   const later = listener({ event: () => added, delay: 60, async handler(_ctx, { name }) { ran.push(`later ${name}`); } });
-  const registry = createRegistry({ modules: { x: { added, add, react, later } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, react, later } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: asSaved }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(ran).toEqual(["desk#1"]); // react ran; later waits
   const [row] = await rows();
@@ -215,7 +218,7 @@ test("delay: the row waits unclaimed until it's due, then a sweep runs it", asyn
 test("via: the jobs of one commit go in one send", async () => {
   const also = listener({ event: () => added, async handler() {} });
   const via = fakeVia();
-  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { via }) } });
+  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { via }), scope: asSaved } });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(via.sends).toBe(1);
   expect(via.got).toHaveLength(2);
@@ -239,7 +242,7 @@ test("via: a job that fails for good in the consumer comes back as a failed row,
 
 test("outbox(db) must share the registry's database: it writes in the mutation's transaction", () => {
   const other = drizzle({ client: pg });
-  expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: outbox(other) } })).toThrow(/must use the same database as `database`/);
+  expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: outbox(other), scope: asSaved } })).toThrow(/must use the same database as `database`/);
 });
 
 test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
@@ -257,7 +260,7 @@ test("a job whose listener was renamed or removed is failed at once with why, an
 
 test("a listener's attempts beyond maxAttempts still get their tries", async () => {
   const stubborn = listener({ event: () => added, attempts: 4, async handler() { ran.push("stubborn"); throw new Error("still down"); } });
-  const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { maxAttempts: 2 }) }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { maxAttempts: 2 }), scope: asSaved }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   for (let i = 0; i < 3; i++) {
     await makeDue();
@@ -270,7 +273,7 @@ test("a listener's attempts beyond maxAttempts still get their tries", async () 
 test("a crash between commit and the first try: the sweep's claim is the first try, so a one-try listener still runs", async () => {
   const once = listener({ event: () => added, async handler(_ctx, { name }) { ran.push(`once ${name}`); } });
   const died = { ...outbox(db), deliver: async () => {} }; // committed, then the process died before delivering
-  const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: died }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: died, scope: asSaved }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(await rows()).toMatchObject([{ status: "pending", attempts: 0 }]);
   await makeDue(); // the lease ran out
@@ -290,7 +293,7 @@ test("sweep({ limit }) claims at most that many", async () => {
 test("crons: several servers ticking the same minute run each cron once, and old runs are pruned", async () => {
   const tidy = mutation({ async handler(ctx) { await ctx.db.insert(items).values({ name: `tidied ${ran.length}` }); ran.push("tidy"); } });
   const nightly = cron({ schedule: "0 3 * * *", run: tidy, scope: { actor: "system" } });
-  const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) } });
+  const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: asSaved } });
   await db.insert(cronRunsTable).values({ id: "x.nightly@old", ranAt: new Date("2026-01-01T00:00:00Z") });
 
   const at = new Date("2026-11-23T03:00:00Z");
@@ -304,7 +307,7 @@ test("crons: several servers ticking the same minute run each cron once, and old
 test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs it", async () => {
   const remind = action({ input: z.object({ who: z.string() }), async handler(_ctx, { who }) { ran.push(`remind ${who}`); } });
   const book = mutation({ async handler(ctx) { ctx.schedule(remind, { who: "guest" }, { delay: 3600 }); } });
-  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db) }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: asSaved }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(book);
   const [row] = await rows();
   expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
