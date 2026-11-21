@@ -82,11 +82,11 @@ export async function POST(request: Request) {
 - **The platform's own limits apply:**
   - Cloudflare's triggers are UTC, so a cron with a `timezone` needs a trigger that covers it: every minute, or every hour when its time falls on the hour in UTC too (Madrid yes, India's half-hour offset no).
   - Vercel refuses names in its schedules, and a day-of-month together with a day-of-week, so copy those crons as numbers or use one every-minute schedule. Vercel Hobby fires at most every 15 minutes.
-- **pg-boss** (planned) needs no triggers: the adapter schedules each cron in pg-boss from your code.
+- **pg-boss** needs no trigger: `work(registry, boss)` ticks your crons every minute in each worker process. See [pg-boss](/docs/adapters/pg-boss).
 
 ## Once, on several servers
 
-**Only the outbox runs a cron once when several servers tick it.** With `inProcess()`, each server runs it.
+**The outbox and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it.
 
 Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter](/docs/concepts/jobs):
 
@@ -97,8 +97,9 @@ Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter]
 export { outboxTable, cronRunsTable } from "logic-sdk/drizzle";
 ```
 
+- **With `pgBoss(boss)`, a minute runs once** too: its pg-boss id is derived from `<cron id>@<minute>`, and pg-boss skips an insert whose id it already has (finished jobs are kept 7 days).
 - **With `inProcess()`, every server that ticks runs it,** like Laravel without `onOneServer()`. Fine for one server, or for a platform trigger; use the outbox for more.
-- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` rows by the outbox, reported to `onError` with the cron's id.
+- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by the outbox and pg-boss, reported to `onError` with the cron's id.
 
 ## Schedules
 

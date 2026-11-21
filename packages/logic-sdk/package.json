@@ -12,6 +12,7 @@
     "drizzle",
     "events",
     "mutations",
+    "pg-boss",
     "queries",
     "tools",
     "transactions",
@@ -54,6 +55,10 @@
       "types": "./dist/cloudflare.d.ts",
       "default": "./dist/cloudflare.js"
     },
+    "./pg-boss": {
+      "types": "./dist/pg-boss.d.ts",
+      "default": "./dist/pg-boss.js"
+    },
     "./node": {
       "types": "./dist/node.d.ts",
       "default": "./dist/node.js"
@@ -94,6 +99,7 @@
   "peerDependencies": {
     "@orpc/server": ">=2.0.0-beta.51 <3",
     "drizzle-orm": ">=1.0.0-rc.5 <2",
+    "pg-boss": ">=12.39.0 <13",
     "ai": ">=7 <8",
     "@logic-sdk/cli": ">=0.4.0 <0.5.0"
   },
@@ -102,6 +108,9 @@
       "optional": true
     },
     "drizzle-orm": {
+      "optional": true
+    },
+    "pg-boss": {
       "optional": true
     },
     "ai": {
@@ -118,6 +127,7 @@
     "ai": "^7.0.177",
     "croner": "11.0.1",
     "drizzle-orm": "1.0.0-rc.6",
+    "pg-boss": "12.39.0",
     "postgres": "^4.1.1",
     "zod": "^4.6.7"
   }

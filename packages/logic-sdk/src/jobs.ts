@@ -222,7 +222,8 @@ export function makeJobs(deps: JobsDeps) {
   }
 
   const jobs: Jobs = {
-    run: (job, options) => runJob(job, { ...options, fail: keepFailed && ((error) => keepFailed(job, error)) }),
+    // a consumer's own `fail` (pg-boss's work(), which records the reason itself) wins over the adapter's
+    run: (job, options) => runJob(job, { ...options, fail: options?.fail ?? (keepFailed && ((error) => keepFailed(job, error))) }),
     async tick(at = now()) {
       const jobs = due(at);
       if (!jobs.length) return [];

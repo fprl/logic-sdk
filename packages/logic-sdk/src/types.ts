@@ -378,7 +378,10 @@ export type RunJob = (job: Job, options?: RunJobOptions) => Promise<DeliveryOutc
 export interface RunJobOptions {
   /** 1 on the first try; the transport counts. */
   attempt?: number;
-  /** Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it (the outbox writes a failed row). */
+  /**
+   * Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it. Default: the adapter's
+   * `fail` (the outbox writes a failed row).
+   */
   fail?: (error: unknown) => Promise<void>;
 }
 
@@ -554,9 +557,9 @@ export interface Jobs {
   /**
    * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
    * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
-   * listener has tries left. A `failed` job goes to your adapter's `fail` (the outbox keeps it).
+   * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (the outbox keeps it).
    */
-  run(job: Job, options?: { attempt?: number }): Promise<DeliveryOutcome>;
+  run(job: Job, options?: RunJobOptions): Promise<DeliveryOutcome>;
   /**
    * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
    * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run
