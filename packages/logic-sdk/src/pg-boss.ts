@@ -58,9 +58,6 @@ const rowOf = (job: Job, replaceKey?: string): JobInsert<Job> => ({
   singletonKey: replaceKey,
 });
 
-/** Why a job failed for good, from the adapter's `fail` to `work()`'s result for it: the same job object passes through both. */
-const reasons = new WeakMap<Job, unknown>();
-
 // SAFETY: `check` requires a database adapter, and its transactions are Drizzle's (`drizzleAdapter`), which `execute` SQL
 const inTx = (tx: unknown): Db => fromDrizzle(tx as DrizzleTransactionLike, sql);
 
@@ -134,10 +131,6 @@ export function pgBoss(boss: PgBoss): Dispatcher {
     },
     /** pg-boss's workers pick jobs up (`work()`), so there's nothing to do after commit. */
     async deliver() {},
-    /** `registry.jobs.run` calls it in `work()` when a job fails for good: the error becomes the job's pg-boss `output`. */
-    async fail(job, error) {
-      reasons.set(job, error);
-    },
     /**
      * A failed job, back in line with a fresh set of attempts (pg-boss's own `retry` gives one more). Its replace key goes:
      * it has run, so it's no longer a call a newer one replaces.
@@ -192,24 +185,26 @@ export async function work(
   options: PgBossWorkOptions = {},
 ): Promise<void> {
   const { listeners, crons } = registry.definitions;
-  const queues: [string, Tuning | undefined][] = [
-    ...listeners.map((l): [string, Tuning | undefined] => [l.id, tuningOf(l.listener.meta)]),
-    ...crons.map((c): [string, Tuning | undefined] => [c.id, undefined]),
-    [CALLS_QUEUE, options.calls],
+  const queues: { name: string; tuning: Tuning | undefined }[] = [
+    ...listeners.map((l) => ({ name: l.id, tuning: tuningOf(l.listener.meta) })),
+    ...crons.map((c) => ({ name: c.id, tuning: undefined })),
+    { name: CALLS_QUEUE, tuning: options.calls },
   ];
 
   /** One job's try. `failed` is over (out of tries, or retrying can't help), so pg-boss mustn't retry it. */
   const settle = async (job: { id: string; data: Job; retryCount: number }): Promise<JobResult> => {
+    let reason: unknown;
+    const fail = async (error: unknown) => void (reason = error); // kept by pg-boss as the failed job's output
     try {
-      const outcome = await registry.jobs.run(job.data, { attempt: job.retryCount + 1 });
-      if (outcome === "failed") return { id: job.id, status: "deadletter", output: reasons.get(job.data) };
+      const outcome = await registry.jobs.run(job.data, { attempt: job.retryCount + 1, fail });
+      if (outcome === "failed") return { id: job.id, status: "deadletter", output: reason };
       return { id: job.id, status: "completed" };
     } catch (error) {
       return { id: job.id, status: "failed", output: error }; // reported already; pg-boss retries it after a backoff
     }
   };
 
-  for (const [name, tuning] of queues) {
+  for (const { name, tuning } of queues) {
     const { partition, ...queue } = queueConfig(tuning?.queue);
     await boss.createQueue(name, { ...queue, partition }); // a no-op when it exists, so its options are updated below
     await boss.updateQueue(name, queue);

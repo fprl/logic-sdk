@@ -19,3 +19,4 @@ await boss.stop();           // stops all of it
 - **`ctx.schedule` with `replace`** deletes the waiting call in your transaction and inserts the new one under its own id; a call that started isn't touched.
 - **Tuning in `meta`:** `init<{ meta: PgBossMeta & AppMeta }>()`, then `meta: { pgBoss: { queue: { expireInSeconds: 120 }, worker: { localConcurrency: 5 } } }`.
 - `pgBossId(id)` turns a job id into pg-boss's (a UUID v5).
+- `registry.jobs.run(job, { attempt, fail })`: a queue consumer can pass its own `fail` (called with the error when the job fails for good), instead of the adapter's. `work()` uses it to keep the reason on the pg-boss job.
