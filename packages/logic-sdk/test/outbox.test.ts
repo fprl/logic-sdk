@@ -329,7 +329,7 @@ test("ctx.schedule replace: the waiting call with the key becomes the new one; o
   await app.run(book, { booking: "b1", checkIn: "July 3", delay: 3600 });
   const moved = await app.run(book, { booking: "b1", checkIn: "July 9", delay: 7200 }); // the dates changed
   await app.run(book, { booking: "b2", checkIn: "July 5", delay: 3600 }); // another booking keeps its own
-  const waiting = await rows();
+  const waiting = (await rows()).sort((a, b) => String(a.replaceKey).localeCompare(String(b.replaceKey)));
   expect(waiting.map((r) => [r.replaceKey, (r.delivery as { input: unknown }).input])).toEqual([
     ["x.remind@b1", { at: "July 9" }],
     ["x.remind@b2", { at: "July 5" }],
@@ -352,4 +352,38 @@ test("ctx.schedule replace: only adapters that can replace take it", async () =>
     jobs: { adapter: { holds: true, async deliver() {} }, scope: { load: (saved) => saved } },
   });
   await expect(sent.as({ actor: "ana" }).run(book)).rejects.toThrow(/replaces a waiting call, but your jobs adapter can't replace one it already has\. Use outbox\(db\)/);
+});
+
+test("ctx.schedule replace: due now, it takes over the waiting row and runs once, under the new id", async () => {
+  const remind = action({ input: z.object({ at: z.string() }), async handler(_ctx, { at }) { ran.push(`remind for ${at}`); } });
+  const book = mutation({
+    input: z.object({ at: z.string(), delay: z.number(), twice: z.boolean().optional() }),
+    async handler(ctx, { at, delay, twice }) {
+      if (twice) ctx.schedule(remind, { at: "draft" }, { delay, replace: "b1" }); // one statement can't upsert a key twice: the core keeps the later
+      return ctx.schedule(remind, { at }, { delay, replace: "b1" });
+    },
+  });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const app = registry.as({ actor: "ana" });
+  await app.run(book, { at: "July 3", delay: 3600, twice: true });
+  expect((await rows()).map((r) => (r.delivery as { input: unknown }).input)).toEqual([{ at: "July 3" }]);
+  await app.run(book, { at: "now", delay: 0 });
+  expect(ran).toEqual(["remind for now"]);
+  expect(await rows()).toEqual([]); // the waiting one was replaced, then ran and was deleted
+});
+
+test("retry of a failed call drops its key, so it doesn't collide with the one waiting in its place", async () => {
+  const remind = action({ input: z.object({ fail: z.boolean() }), async handler(ctx, { fail }) { if (fail) throw ctx.errors.reject("no"); } });
+  const book = mutation({
+    input: z.object({ fail: z.boolean(), delay: z.number() }),
+    async handler(ctx, { fail, delay }) { return ctx.schedule(remind, { fail }, { delay, replace: "b1" }); },
+  });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } }, onError: () => {} });
+  const app = registry.as({ actor: "ana" });
+  const failed = await app.run(book, { fail: true, delay: 0 }); // runs now and fails for good: kept
+  await app.run(book, { fail: false, delay: 3600 }); // the booking moved: a new one waits with the key
+  expect(await registry.jobs.retry(failed)).toBe(true);
+  const byId = Object.fromEntries((await rows()).map((r) => [r.id, [r.status, r.replaceKey]]));
+  expect(byId[failed]).toEqual(["pending", null]); // back in line, no longer replaceable
+  expect(Object.values(byId)).toContainEqual(["pending", "x.remind@b1"]); // the one waiting kept its key
 });

@@ -481,7 +481,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
         if (replace !== undefined) {
           job.replace = replace;
-          // scheduled twice in this transaction: the later one wins here too
+          // scheduled twice in this transaction: the later one wins here too (the dropped one's input is still checked:
+          // a bad input is a bug wherever it is)
           const earlier = tx.calls.findIndex((c) => c.fn === fnId && c.replace === replace);
           if (earlier >= 0) tx.calls.splice(earlier, 1);
         }

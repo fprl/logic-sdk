@@ -228,7 +228,10 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       });
       const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id)).map(row);
       const plain = rows.filter((r) => r.replaceKey === null);
-      const replacing = rows.filter((r) => r.replaceKey !== null);
+      // in key order, so two transactions replacing the same keys lock them in the same order and can't deadlock
+      const replacing = rows
+        .filter((r): r is typeof r & { replaceKey: string } => r.replaceKey !== null)
+        .sort((a, b) => a.replaceKey.localeCompare(b.replaceKey));
       if (plain.length) await client.insert(t).values(plain);
       // the waiting call with this key becomes the new one: its id, job and time (Oban's `replace`)
       if (replacing.length)
@@ -289,7 +292,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async retry(id) {
       const revived = await db
         .update(t)
-        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null })
+        // its key goes: it has run, so it's no longer a call a newer one replaces (and one may be waiting with it)
+        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null, replaceKey: null })
         .where(and(eq(t.id, id), eq(t.status, "failed")))
         .returning({ id: t.id });
       return revived.length > 0;

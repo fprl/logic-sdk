@@ -8,5 +8,5 @@
 ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: bookingId });
 ```
 
-- **The outbox does it** with a new `replace_key` column and a partial unique index on rows still waiting: regenerate your migrations (`outboxTable` is re-exported from your schema).
+- **The outbox does it** with a new `replace_key` column and a partial unique index on rows still waiting: regenerate your migrations (`outboxTable` is re-exported from your schema), and **migrate before you deploy**: every enqueue writes the column.
 - **Adapters opt in with `replaces: true`.** Without it (`inProcess()`, `cloudflareQueue` alone, which can't take back a sent message), `ctx.schedule` with `replace` throws. The test registry replaces when your app's adapter does.
