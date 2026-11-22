@@ -46,7 +46,7 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error.
 7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them.
 8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
-9. **Done ([52](https://github.com/fprl/logic-sdk/pull/52)). Rolling deploys:** a job whose code this process doesn't have uses its attempts, like Laravel.
+9. **Done ([53](https://github.com/fprl/logic-sdk/pull/53)). Rolling deploys:** a job whose code this process doesn't have uses its attempts, like Laravel.
 10. **Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
 11. **`logic-sdk show` lists every error a function can throw,** nested calls included (kind, code, where from), and `check` fails on a code that isn't a literal. Asked for and agreed on 2026-11-19 with the output designed, never built.
 12. **Done ([46](https://github.com/fprl/logic-sdk/pull/46)). Docs that match what ships:** README, installation, WHY, one table of what each adapter guarantees, dedupe wording (the event id, in a record of that listener's own).
