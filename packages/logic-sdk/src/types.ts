@@ -419,7 +419,7 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
    */
   transactionAttempts?: number;
   /**
-   * One SQL statement, `$1` parameters on Postgres, on the database or on a transaction of it. Resolves the rows it
+   * One SQL statement (`$1` parameters on Postgres, `?` on SQLite), on the database or on a transaction of it. Resolves the rows it
    * returns. `databaseQueue` and `outbox` run their table through it, so any ORM that can run SQL has them.
    */
   query?(client: Db | Tx, text: string, params: unknown[]): Promise<Record<string, unknown>[]>;

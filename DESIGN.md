@@ -218,7 +218,7 @@ Configured once, where the registry is created:
 ```ts
 jobs: { adapter: inProcess() }                                  // default: zero infra, lost on a crash
 jobs: { adapter: cloudflareQueue(env.JOBS), scope }             // sent after commit: the Rails/Laravel model, lossy
-jobs: { adapter: databaseQueue(database), scope }                     // durable, Postgres only
+jobs: { adapter: databaseQueue(database), scope }               // durable, Postgres or SQLite
 jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope } // durable handoff, plus queue retries, DLQ, concurrency
 jobs: { adapter: pgBoss(boss), scope }                          // transactional natively, no outbox needed
 ```
@@ -345,7 +345,7 @@ What would change it: long-lived Node becoming the main target (then pg-boss's m
 - **`retry(id)` revives failed rows only** and returns whether it did. A pending row belongs to its runner or a sweep, and resetting its attempts would break the fence and run it twice at once. Oban's `retry_job` ignores available and executing jobs the same way ([Oban](https://oban.hexdocs.pm/Oban.html)). `registry.jobs.retry` throws on `inProcess()`: sweeping nothing is harmless in a cron, but retrying an id on a transport that stores nothing is a bug.
 - **`expose` stays in the core, and adapters only narrow it.** It's the "may leave the process" boundary that makes `authorize` and `output` required, checked once in `createRegistry`. Adapters subtract with a `filter` (and a meta namespace when they have a per-function default, like `meta.ai.tool`), never add: an adapter publishing something not exposed would skip that check. trpc-to-openapi works the same way (a procedure reaches OpenAPI only with `meta.openapi`, on top of the router), and Convex chooses public vs internal in the core (`mutation` vs `internalMutation`). A `filter` for the fetch and oRPC adapters comes when someone needs one.
 
-### SQLite: plain, on two connections (not built yet)
+### SQLite: plain, one connection to read and one per transaction
 
 It's the next database after Postgres (no MySQL for now). What didn't hold up, checked on 2026-11-22:
 
@@ -355,9 +355,22 @@ It's the next database after Postgres (no MySQL for now). What didn't hold up, c
 
 **Found later the same day: plain SQLite works on two connections.** One writes, a transaction at a time, with `BEGIN IMMEDIATE`, and one reads, in WAL, like Rails. On node:sqlite it passed 50 concurrent mutations with rollbacks, 4 processes writing at once, a SIGKILL mid-mutation, and the database queue's scenarios on the SQL seam. "Synchronous drivers can't" was true of one connection. An earlier look (one connection behind a lock, better-drizzle's way) was set aside because an outside query could join the open transaction: the second connection is what closes that. So SQLite is plain SQLite, on a disk. No Turso: it joined Supabase in October 2026 and its new work is a [rewrite before 1.0](https://github.com/tursodatabase/turso#faq).
 
-**The API: one function that opens the database,** `drizzleAdapter(() => drizzle("app.db"))`, called twice by the adapter (the owner, 2026-11-22: "the function looks good"). Laravel, Rails and Phoenix show one path and keep the connections behind it. Considered: `{ reader, writer }`, confusing when both are the same file, and they could differ; a plain handle whose path the adapter opens again, which loses that connection's pragmas (reproduced). `":memory:"` is refused, since each connection gets a database of its own. It will take the same options as Postgres. On SQLite `transactionAttempts` will retry a file another process keeps locked (`SQLITE_BUSY`, as Laravel does with "database is locked"; prototyped), since `BEGIN IMMEDIATE` and one writer leave no deadlock inside the process.
+**The API: one function that opens the database,** `drizzleAdapter(() => drizzle("app.db"))`, called by the adapter (the owner, 2026-11-22: "the function looks good"). Laravel, Rails and Phoenix show one path and keep the connections behind it. Considered: `{ reader, writer }`, confusing when both are the same file, and they could differ; a plain handle whose path the adapter opens again, which loses that connection's pragmas (reproduced). `":memory:"` is refused, since each connection gets a database of its own. It takes the same options as Postgres. On SQLite `transactionAttempts` retries a file another process keeps locked (`SQLITE_BUSY`, as Laravel does with "database is locked"), since `BEGIN IMMEDIATE` and one writer leave no deadlock inside the process.
 
-What would change it: the two connections failing the shared adapter suite.
+**As built** (Fable's cold design on two kept connections, then attacked: five holes, each now a test):
+
+- **A connection per transaction, closed at its end.** On a kept writer, a write that arrived after a rollback was saved, or joined the next caller's transaction; Postgres drivers refuse it ("Transaction is closed"). It's why the function shape pays off. It costs 0.1 ms with a small schema, about 1 ms with 500 tables.
+- **WAL is set where the lock is taken, inside its async retry.** Set at startup, 57 of 96 processes that started together on a new file failed with "database is locked".
+- **The 5 second limit is on the transaction ahead, not on the line.** A limit on the whole wait failed 39 of 100 honest mutations of 80 ms. Without any limit a mutation awaiting `registry.as().run` hangs forever. Its clock restarts while the head waits for another process: counting that wait failed the line behind with the wrong error, which isn't retried (Fable's breaker).
+- **SQLite's own busy timeout is 0 for writers:** on a synchronous driver it stops the event loop, and with it the owner of the lock. Rails' busy handler sleeps outside the lock for the same reason.
+- **The reader is `query_only`,** so a query that writes fails at runtime, not only in the types.
+- **Every statement has `RETURNING`:** better-sqlite3's `all()` refuses one that returns nothing.
+
+Taken: Rails' WAL, `IMMEDIATE` and 5 second timeout; Laravel's match on "database is locked" and no lock clause on SQLite. Not taken: Laravel's `DEFERRED` default (a read that upgrades to a write fails at once as busy), Rails' separate queue database (it can't join the mutation's transaction).
+
+Accepted: when SQLite rolls back by itself and the handler catches that and keeps writing, those writes commit on their own. Rails and Laravel behave the same on SQLite (inference, not run); documented.
+
+What would change it: real apps needing more than one writer (then Postgres), or a connection per transaction showing up in a profile.
 
 ### The jobs table in SQL, one seam for every ORM
 

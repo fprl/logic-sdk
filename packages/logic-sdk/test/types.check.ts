@@ -1,6 +1,7 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
 import type { AIMeta } from "../src/ai.ts";
 import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle/pg.ts";
+import * as sqlite from "../src/drizzle/sqlite.ts";
 import type { PgBossMeta } from "../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
@@ -373,4 +374,16 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   } satisfies DatabaseAdapter<PrismaClient, PrismaTx>;
   const { createRegistry } = init<{ scope: { who: string }; db: ReadWrite<PrismaClient, PrismaTx> }>();
   createRegistry({ modules: {}, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
+}
+
+// SQLite: one function that opens it, the same names, and queries that can't write
+{
+  const open = () => bunSqlite({ client: new Database("app.db") });
+  const database = sqlite.drizzleAdapter(open, { transactionAttempts: 5 });
+  const { query, createRegistry } = init<{ scope: object; db: sqlite.DrizzleDb<ReturnType<typeof open>> }>();
+  createRegistry({ modules: {}, database, jobs: { adapter: sqlite.databaseQueue(database), scope: { load: (saved) => saved } } });
+  // @ts-expect-error a query has no insert
+  query({ handler: async (ctx) => ctx.db.insert });
+  // @ts-expect-error the function, not a connection
+  sqlite.drizzleAdapter(open());
 }

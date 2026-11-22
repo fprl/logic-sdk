@@ -29,9 +29,8 @@ export type DrizzleAdapterOptions = Pick<DatabaseAdapter, "transactionAttempts">
 
 /**
  * Use a Drizzle database for mutations. Needs a driver with async interactive transactions: node-postgres, postgres.js,
- * PGlite, Neon websocket, Hyperdrive. Not D1 or HTTP drivers, and not Drizzle's synchronous SQLite drivers
- * (better-sqlite3, bun:sqlite, node:sqlite, Durable Objects): they commit before an async mutation finishes, and
- * Drizzle's types already reject them here. Not libsql either (the types reject it): overlapping mutations fail on a file.
+ * PGlite, Neon websocket, Hyperdrive. Not D1 or HTTP drivers. SQLite has its own adapter, `logic-sdk/drizzle/sqlite`.
+ * The types reject SQLite and libsql databases here.
  */
 export function drizzleAdapter<Db extends Transactional>(
   db: Db,

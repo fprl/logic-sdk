@@ -12,7 +12,7 @@ createRegistry({
 });
 ```
 
-`drizzleAdapter(db)` takes any Drizzle database with async interactive transactions: node-postgres, postgres.js, PGlite, Neon (websocket) and Hyperdrive. For SQLite, see [below](#not-d1-http-drivers-or-sqlite-yet).
+`drizzleAdapter(db)` takes any Drizzle database with async interactive transactions: node-postgres, postgres.js, PGlite, Neon (websocket) and Hyperdrive. For SQLite, see [SQLite](/docs/adapters/sqlite).
 
 ## Types
 
@@ -109,10 +109,8 @@ jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, lo
 - **A job that fails for good in the consumer** comes back as a `failed` row. See [Cloudflare](/docs/adapters/cloudflare).
 - **You don't need one to use a queue:** `cloudflareQueue(env.JOBS)` alone works, and loses a job only when the process dies between commit and send.
 
-## Not D1, HTTP drivers, or SQLite yet
+## Not D1 or HTTP drivers
 
 Cloudflare D1 rejects `BEGIN` and `SAVEPOINT`, and HTTP drivers can't hold a transaction open. `createRegistry` refuses to start when there are mutations but no transactional adapter. On Workers, use Postgres through Hyperdrive.
 
-Drizzle's better-sqlite3, bun:sqlite, node:sqlite and Durable Objects drivers run transactions synchronously: they commit before an async mutation finishes, so a failed mutation would keep its writes. Drizzle's types reject them in `drizzleAdapter`.
-
-No libsql either, and the types reject it. On a local file, mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). Use Postgres for now: the database queue and the outbox need it anyway.
+No libsql either, and the types reject it. On a local file, mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). For SQLite on a disk, use [`logic-sdk/drizzle/sqlite`](/docs/adapters/sqlite).

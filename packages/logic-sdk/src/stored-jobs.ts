@@ -1,5 +1,5 @@
 // Jobs in your database, written in the mutation's transaction: run from there (databaseQueue), or kept until a queue
-// has them (outbox). The table's statements are SQL, one set per database (postgres.ts), and run through
+// has them (outbox). The table's statements are SQL, one set per database (postgres.ts, sqlite.ts), and run through
 // the database adapter's `query`, so this file knows no ORM and no driver.
 import { replaceKeyOf, type DeliveryOutcome, type Dispatcher, type Job, type Runner, type SqlDatabase, type SweepResult } from "./index.ts";
 

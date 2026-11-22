@@ -1,0 +1,64 @@
+---
+title: SQLite
+description: SQLite on a disk, with the same mutations, jobs and tests.
+---
+
+```ts
+import { drizzle } from "drizzle-orm/node-sqlite"; // or bun-sqlite
+import { databaseQueue, drizzleAdapter, type DrizzleDb } from "logic-sdk/drizzle/sqlite";
+
+const open = () => drizzle("app.db");
+const database = drizzleAdapter(open);
+
+type Config = {
+  scope: Scope;
+  db: DrizzleDb<ReturnType<typeof open>>;
+};
+
+createRegistry({
+  modules,
+  database,
+  jobs: { adapter: databaseQueue(database), scope: { store, load } },
+});
+```
+
+You give one function that opens the file. The adapter does what Rails does: WAL, `BEGIN IMMEDIATE`, and a 5 second wait for the lock.
+
+- **It opens the connections itself.** One stays open to read, so a query never waits for a mutation or sees what it hasn't committed. Each transaction gets its own, closed when it ends, so a write that arrives late (a branch of a `Promise.all` that failed) is refused, as on Postgres. That costs under a millisecond with a small schema, about one with 500 tables.
+- **Per-connection settings go in the function,** so every connection has them. `bun:sqlite` starts with foreign keys off:
+
+  ```ts
+  const open = () => {
+    const db = drizzle("app.db");
+    db.run(sql`pragma foreign_keys = on`);
+    return db;
+  };
+  ```
+
+- **Writes go one at a time.** A line that moves is waited for, however long. One transaction that holds the lock for more than 5 seconds fails the ones waiting behind it, so keep slow work in actions. Time spent waiting for another process doesn't count.
+- **Use `ctx.run` inside a mutation, never `registry.as(scope).run`:** that one waits behind the mutation that's waiting for it. It fails after 5 seconds and says so.
+- **Another process holding the file** is waited for without blocking the event loop. Still locked after 5 seconds, the mutation is retried: `drizzleAdapter(open, { transactionAttempts })`, three tries by default.
+- **Scripts write through mutations,** or through a connection of their own (`open()`). `database.db` refuses writes.
+- **Call `drizzleAdapter` once per process,** not per request.
+- **A failure SQLite rolls back by itself** (a full disk, `RAISE(ROLLBACK)`, `ON CONFLICT ROLLBACK`) ends the transaction at once. Don't catch one and keep writing: what follows is saved on its own.
+
+## Jobs
+
+`databaseQueue`, `outbox`, crons and `startTicking` work as [on Postgres](/docs/adapters/drizzle#database-queue). Several processes on one file can sweep at once.
+
+```ts
+// db/schema.ts: drizzle-kit adds the tables to your migrations
+export { cronRunsTable, jobsTable } from "logic-sdk/drizzle/sqlite";
+```
+
+Without Drizzle, `logic-sdk/sqlite` has the same two functions and `jobsSchema`, for [an adapter of your own](/docs/adapters/other-orms). Its `query` gets `?` parameters, in order.
+
+## Tests
+
+`createTestRegistry` works as on Postgres: each test is rolled back. `":memory:"` is refused, because every connection would get a database of its own, so give tests a file in a temporary folder. A failure SQLite rolls back by itself ends the test's transaction too, so what that test writes afterwards stays in the file.
+
+## What it runs on
+
+- **Node 24 (`node:sqlite`) and Bun (`bun:sqlite`),** both tested, with Node processes racing and killed on one file. better-sqlite3 has the same Drizzle shape and isn't tested.
+- **SQLite 3.42 or later,** for the jobs table's clock. Both bundle a newer one.
+- **A disk of its own:** not Workers, not serverless, not a network file system. Not D1, libsql or Turso.
