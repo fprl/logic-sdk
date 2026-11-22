@@ -54,6 +54,12 @@ export function sqlState(error: unknown): string | undefined {
 /** Seconds a job due now waits for the request that queued it, before a sweep may take it: how soon a crash after commit is noticed. */
 const PICKUP = 30;
 
+/**
+ * Seconds a runner keeps extending a job's lease: the limit of a Workers cron or queue consumer, and pg-boss's default
+ * expiry. Past it, a job that hangs is taken over like a crashed one. A longer job needs a `lease` that long.
+ */
+const MAX_EXTEND = 15 * 60;
+
 /** Who owns a job while it runs. */
 interface Claim {
   receipt: string;
@@ -108,8 +114,9 @@ export const cronRunsTable = pgTable("logic_cron_runs", {
 
 export interface OutboxOptions {
   /**
-   * Seconds a runner owns a job before a sweep may take it over. Default 300. Longer than your slowest listener;
-   * with `via`, it only covers the handoff, so it's how soon a handoff that crashed is tried again.
+   * Seconds a runner owns a job before a sweep may take it over: how soon a crash is noticed. Default 300. A running
+   * job extends it every third of it, for 15 minutes, so it needn't cover your slowest listener, unless one takes
+   * longer than that. With `via`, it only covers the handoff, so it's how soon a handoff that crashed is tried again.
    */
   lease?: number;
   /**
@@ -169,18 +176,46 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     db.update(t).set({ availableAt: inSeconds(backoff(claim.attempt)), lastError: describe(error) }).where(mine(ids, claim));
 
   /**
+   * While a job runs, its lease is extended, as Laravel Cloud does on SQS: a slow job stays its runner's, and a dead
+   * runner's job is free a lease later. Returns the stop, which waits for the extension on its way: landing after a
+   * backoff, it would replace the backoff.
+   */
+  function keepExtending(job: Job, claim: Claim, runner: Runner): () => Promise<void> {
+    const until = Date.now() + MAX_EXTEND * 1000;
+    let extending = Promise.resolve();
+    const timer = setInterval(
+      () => {
+        if (Date.now() >= until) return clearInterval(timer);
+        extending = extending
+          .then(async () => {
+            await db.update(t).set({ availableAt: inSeconds(lease) }).where(mine([job.id], claim));
+          })
+          .catch((e) => runner.report(e, job, claim.attempt));
+      },
+      (lease * 1000) / 3,
+    );
+    return () => {
+      clearInterval(timer);
+      return extending;
+    };
+  }
+
+  /**
    * Run one claimed job here and record how it went. The core decides: `failed` (its `fail` wrote the row), a throw
    * (tries left: back off), or done and discarded (delete the row).
    */
   async function run(job: Job, claim: Claim, runner: Runner): Promise<keyof SweepResult> {
+    const stopExtending = keepExtending(job, claim, runner);
     let outcome: DeliveryOutcome;
     try {
-      outcome = await runner.run(job, {
-        attempt: claim.attempt,
-        fail: async (error) => {
-          await markFailed([job.id], claim, error);
-        },
-      });
+      outcome = await runner
+        .run(job, {
+          attempt: claim.attempt,
+          fail: async (error) => {
+            await markFailed([job.id], claim, error);
+          },
+        })
+        .finally(stopExtending);
     } catch (e) {
       await backOff([job.id], claim, e);
       return "retrying";

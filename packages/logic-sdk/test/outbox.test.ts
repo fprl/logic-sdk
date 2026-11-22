@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { pgTable, text } from "drizzle-orm/pg-core";
-import { beforeEach, expect, test } from "bun:test";
+import { beforeEach, expect, setSystemTime, test } from "bun:test";
 import { z } from "zod";
 import { cronRunsTable, drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
 import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
@@ -449,4 +449,53 @@ test("a failed row says when, and where it threw; retry clears both", async () =
   expect(row!.lastError).toMatch(/\n\s+at /); // the stack
   expect(await registry.jobs.retry(row!.id)).toBe(true);
   expect(await rows()).toMatchObject([{ failedAt: null, lastError: null }]);
+});
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("a job slower than its lease stays its runner's: the lease extends while it runs", async () => {
+  let swept: unknown;
+  const slow = listener({
+    event: () => added,
+    async handler() {
+      await sleep(900); // twice the lease
+      swept = await registry.jobs.sweep();
+      ran.push("slow");
+    },
+  });
+  const registry = createRegistry({ modules: { x: { added, add, slow } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.45 }), scope: { load: (saved) => saved } } });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(swept).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // nothing was free to take
+  expect(ran).toEqual(["slow"]);
+  expect(await rows()).toEqual([]); // and it finished as a success
+});
+
+test("extending stops after 15 minutes, so a hung job is taken over in the end", async () => {
+  const before: string[] = [];
+  const hung = listener({
+    event: () => added,
+    async handler() {
+      setSystemTime(new Date(Date.now() + 16 * 60_000));
+      await sleep(100); // an extension already on its way lands
+      before.push((await rows())[0]!.availableAt.toISOString());
+      await sleep(250); // a few more turns of the timer
+      before.push((await rows())[0]!.availableAt.toISOString());
+    },
+  });
+  const registry = createRegistry({ modules: { x: { added, add, hung } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.15 }), scope: { load: (saved) => saved } } });
+  try {
+    await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  } finally {
+    setSystemTime();
+  }
+  expect(before).toHaveLength(2);
+  expect(before[1]).toBe(before[0]!);
+});
+
+test("a retry's backoff stands: no extension lands after it", async () => {
+  const flaky = listener({ event: () => added, attempts: 2, async handler() { await sleep(120); throw new Error("down"); } });
+  const registry = createRegistry({ modules: { x: { added, add, flaky } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.15, backoff: () => 600 }), scope: { load: (saved) => saved } }, onError: () => {} });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  await sleep(120);
+  expect((await rows())[0]!.availableAt.getTime() - Date.now()).toBeGreaterThan(590_000);
 });

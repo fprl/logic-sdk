@@ -83,7 +83,7 @@ export const sendReceipt = listener({
 
 - **`attempts` defaults to 1,** like Rails (no `retry_on`), Laravel (`--tries=1`) and Solid Queue. A retry repeats side effects, so you opt in per listener, like Laravel's `$tries`. Oban defaults to 20 and pg-boss to 3.
 - **Out of attempts, the job is `failed`:** kept by the outbox and pg-boss, retried with `registry.jobs.retry(id)`.
-- **A last try that never finished** (the process crashed, or the listener outlived the outbox's lease) is `failed` without running again, as Laravel's worker does.
+- **A last try that never finished** (the process crashed, or the job ran past the time the outbox keeps extending its lease) is `failed` without running again, as Laravel's worker does.
 - **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
 - **`delay`** is stamped on the job as `runAt`. The outbox keeps the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
 - **`inProcess()` tries once and can't hold a job:** `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `outbox(db)`. Cloudflare alone holds up to 24 hours.
