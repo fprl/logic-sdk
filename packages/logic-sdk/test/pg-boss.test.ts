@@ -160,10 +160,10 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     ran = [];
     await app.run(add, { name: "ok" });
     await expect(app.run(add, { name: "rolled-back" })).rejects.toThrow("no");
-    await until(() => ran.includes("ok#1"));
+    // pg-boss marks it completed after the handler returns, so wait for that, not for the handler
+    await until(async () => (await rowsAbout("x.react", "ok"))[0]?.state === "completed");
+    expect(ran).toEqual(["ok#1"]);
     expect(await rowsAbout("x.react", "rolled-back")).toEqual([]);
-    const [row] = await rowsAbout("x.react", "ok");
-    expect(row?.state).toBe("completed");
   });
 
   test("a listener's delay is pg-boss's startAfter: it waits, then runs", async () => {
