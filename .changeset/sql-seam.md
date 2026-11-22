@@ -5,6 +5,7 @@
 **Any ORM that can run SQL in a transaction has `databaseQueue` and `outbox`,** through one `query` method on the database adapter.
 
 ```ts
+import type { DatabaseAdapter } from "logic-sdk";
 import { databaseQueue } from "logic-sdk/postgres";
 
 const database = {
@@ -18,5 +19,5 @@ createRegistry({ modules, database, jobs: { adapter: databaseQueue(database), sc
 ```
 
 - **Breaking:** `logic-sdk/drizzle` is `logic-sdk/drizzle/pg`.
-- **Breaking:** `databaseQueue` and `outbox` take the adapter `database` got, not the Drizzle database: `const database = drizzleAdapter(db)`, then `databaseQueue(database)`.
+- **Breaking:** that `drizzleAdapter` takes Postgres databases only: libsql no longer typechecks (overlapping mutations failed on it).
 - `jobsSchema` is the tables as SQL, for migrations without drizzle-kit.

@@ -115,4 +115,4 @@ Cloudflare D1 rejects `BEGIN` and `SAVEPOINT`, and HTTP drivers can't hold a tra
 
 Drizzle's better-sqlite3, bun:sqlite, node:sqlite and Durable Objects drivers run transactions synchronously: they commit before an async mutation finishes, so a failed mutation would keep its writes. Drizzle's types reject them in `drizzleAdapter`.
 
-Don't use a local libsql file either, though it typechecks: mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). Remote Turso is untested. Use Postgres for now: the database queue and the outbox need it anyway.
+No libsql either, and the types reject it. On a local file, mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). Use Postgres for now: the database queue and the outbox need it anyway.
