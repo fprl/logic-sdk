@@ -60,7 +60,7 @@ With your own adapter, set `transactionAttempts` next to `retryable`.
 Two transactions that lock the same rows in opposite orders deadlock. Write them in one order, by key:
 
 ```ts
-const items = input.items.toSorted((a, b) => a.sku.localeCompare(b.sku));
+const items = input.items.toSorted((a, b) => (a.sku < b.sku ? -1 : 1));
 for (const item of items) await takeStock(ctx, item);
 ```
 
