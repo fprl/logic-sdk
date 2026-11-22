@@ -39,7 +39,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
 
 1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
-2. **SQLite, plain (API, approved with the seam).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
+2. **SQLite, plain (API, approved: `drizzleAdapter(() => drizzle("app.db"), options)`, the adapter opens both connections).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
 3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
 4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
 5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
@@ -54,7 +54,7 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
 15. **Try it in a real app,** then release on an explicit go.
 
-Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `retry: { attempts }` under 1 as listeners do.
+Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `transactionAttempts` under 1 as listeners' `attempts` do.
 
 Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 

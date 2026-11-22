@@ -371,7 +371,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
-  const attempts = Math.max(1, options.retry?.attempts ?? 3);
+  const transactionAttempts = Math.max(1, options.database?.transactionAttempts ?? 3); // the app's, so a test's nested adapter keeps it
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
     o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.source} failed`, e));
@@ -600,7 +600,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           });
           break;
         } catch (e) {
-          if (attempt < attempts && database!.retryable?.(e)) { // SAFETY: as above
+          if (attempt < transactionAttempts && database!.retryable?.(e)) { // SAFETY: as above
             // a random pause, so transactions that just deadlocked don't retry in lockstep and collide again
             await new Promise((r) => setTimeout(r, Math.random() * 20 * attempt));
             continue;

@@ -413,6 +413,11 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   nest?(tx: Tx): DatabaseAdapter<Tx, Tx>;
   /** Did this transaction lose a race the database says to retry (deadlock, serialization failure)? */
   retryable?(error: unknown): boolean;
+  /**
+   * Tries in total for a top-level mutation whose transaction is `retryable`, each in a fresh one, like Laravel's
+   * `DB::transaction(fn, attempts)`. Default 3; 1 turns it off. A job's own tries are its `attempts`.
+   */
+  transactionAttempts?: number;
 }
 
 /** Runs one job: resolves when it's done or failed for good (acknowledge it), throws when a retry might help. */
@@ -546,12 +551,6 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
    * are 2 or 3).
    */
   maxEventDepth?: number;
-  /**
-   * Re-run a top-level mutation in a fresh transaction when the database says it lost a race (deadlock,
-   * serialization failure). Safe because mutations have no side effects and events are rebuilt per attempt.
-   * Default 3 attempts in total; `{ attempts: 1 }` turns it off.
-   */
-  retry?: { attempts?: number };
 }
 
 /** A registry bound to who is calling: `const caller = registry.as(scope)`. */
