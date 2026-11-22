@@ -11,7 +11,7 @@ Follow this exactly. Every module looks the same.
 
 ```
 src/
-  logic.ts       export const { query, mutation, action, event, listener, createRegistry } = init<Config>();
+  logic.ts       export const { query, mutation, action, event, listener, createRegistry } = init<Config>();   // Config's db: DrizzleDb<Db>, so queries can't write
   policies.ts    Scope type and policies: sync type guards over scope (anyone, member, admin)
   registry.ts    createRegistry({ modules: { bookings, ... } })
   <module>/

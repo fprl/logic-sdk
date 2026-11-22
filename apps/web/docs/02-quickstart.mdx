@@ -14,18 +14,16 @@ import {
   type MutationCtx as Mutation,
   type QueryCtx as Query,
 } from "logic-sdk";
-import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle";
 import type { Scope } from "./policies";
 
-type Tx = DrizzleTx<typeof db>;
+type Db = typeof db;
 
 type Config = {
   // Who is calling: your own type, JSON only
   scope: Scope;
-  // What mutations get
-  db: Tx;
-  // What queries get: no insert, update or delete
-  reader: DrizzleReader<Tx>;
+  // Queries get a reader (no insert, update or delete), mutations the transaction
+  db: DrizzleDb<Db>;
   // What actions and listeners get
   services: { mailer: Mailer; payments: Payments };
   // Settings every function reads as ctx.config: plain data

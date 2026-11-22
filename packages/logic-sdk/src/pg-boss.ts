@@ -3,23 +3,23 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { fromDrizzle, type Db, type DrizzleTransactionLike, type JobInsert, type JobResult, type PgBoss, type Queue, type WorkOptions } from "pg-boss";
-import { replaceKeyOf, type DatabaseAdapter, type Dispatcher, type Job, type Jobs, type Registry } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type Dispatcher, type ForListeners, type Job, type Jobs, type Registry } from "./index.ts";
 import { startTicking } from "./node.ts";
 
+/** One queue's tuning: `meta.pgBoss`, and `work()`'s `calls` and `crons`. */
+export interface PgBossTuning {
+  /** The listener's queue (`expireInSeconds`, `retryDelay`, `deadLetter`…), applied by `work()`. `partition` only when it's created. */
+  queue?: Omit<Queue, "name" | "retryLimit" | "retryBackoff" | "policy">;
+  /** Its workers in each process that calls `work()`: `localConcurrency`, `batchSize`, `pollingIntervalSeconds`… */
+  worker?: Omit<WorkOptions, "includeMetadata" | "perJobResults" | "transactional" | "transactionTimeoutSeconds">;
+}
+
 /**
- * What this adapter reads from a listener's `meta`: `init<{ meta: PgBossMeta & AppMeta }>()`, then
+ * What this adapter reads from a listener's `meta` (not a function's): `init<{ meta: PgBossMeta & AppMeta }>()`, then
  * `meta: { pgBoss: { queue: { expireInSeconds: 120 }, worker: { localConcurrency: 5 } } }`. Tuning only: retries are the
  * listener's `attempts`, and the other adapters ignore it.
  */
-export type PgBossMeta = {
-  pgBoss?: {
-    /** The listener's queue (`expireInSeconds`, `retryDelay`, `deadLetter`…), applied by `work()`. `partition` only when it's created. */
-    queue?: Omit<Queue, "name" | "retryLimit" | "retryBackoff" | "policy">;
-    /** Its workers in each process that calls `work()`: `localConcurrency`, `batchSize`, `pollingIntervalSeconds`… */
-    worker?: Omit<WorkOptions, "includeMetadata" | "perJobResults" | "transactional" | "transactionTimeoutSeconds">;
-  };
-};
-type Tuning = NonNullable<PgBossMeta["pgBoss"]>;
+export type PgBossMeta = ForListeners<{ pgBoss?: PgBossTuning }>;
 
 /** Our queues' names start with it, so they can't collide with your own pg-boss queues, and `work()` can find ours. */
 const PREFIX = "logic-sdk.";
@@ -32,10 +32,10 @@ export const CALLS_QUEUE = `${PREFIX}calls`; // ids always have a dot, so no lis
 const queueOf = (job: Job) => (job.kind === "delivery" ? queueName(job.listener) : job.kind === "cron" ? queueName(job.cron) : CALLS_QUEUE);
 
 /** A queue as `meta.pgBoss.queue` tunes it. Backoff on, as on every job we insert, which `retryDelayMax` needs. */
-const queueConfig = (queue: Tuning["queue"]) => ({ ...queue, retryBackoff: true });
+const queueConfig = (queue: PgBossTuning["queue"]) => ({ ...queue, retryBackoff: true });
 
 /** `meta.pgBoss` as `PgBossMeta` types it where you write it (meta is stored loose). */
-const tuningOf = (meta: Readonly<Record<string, unknown>> | undefined) => meta?.pgBoss as Tuning | undefined;
+const tuningOf = (meta: Readonly<Record<string, unknown>> | undefined) => meta?.pgBoss as PgBossTuning | undefined;
 
 // A UUID of our own, so the v5 ids below can't collide with anyone else's.
 const NAMESPACE = Buffer.from("408a95afcd954c069af0d15cb1dfc0db", "hex");
@@ -78,7 +78,7 @@ const inTx = (tx: unknown): Db => fromDrizzle(tx as DrizzleTransactionLike, sql)
  */
 export function pgBoss(boss: PgBoss): Dispatcher {
   let database: DatabaseAdapter<unknown, unknown> | undefined;
-  const queueOptions = new Map<string, Tuning["queue"]>();
+  const queueOptions = new Map<string, PgBossTuning["queue"]>();
 
   /**
    * pg-boss needs a job's queue to exist, and `work()` creates them all; this covers a process that enqueues first (a
@@ -169,9 +169,9 @@ export function pgBoss(boss: PgBoss): Dispatcher {
 
 export interface PgBossWorkOptions {
   /** The shared queue of scheduled calls, tuned like a listener's `meta.pgBoss`: `{ worker: { localConcurrency: 10 } }`. */
-  calls?: Tuning;
+  calls?: PgBossTuning;
   /** Every cron's queue, tuned the same way (crons have no `meta`): `{ queue: { expireInSeconds: 3600 } }` for a long one. */
-  crons?: Tuning;
+  crons?: PgBossTuning;
   /** Where a failed cron tick goes, and a queue left with jobs but no listener. Default `console.error`. */
   onError?: (error: unknown) => void;
 }
@@ -193,7 +193,7 @@ export async function work(
 ): Promise<void> {
   const { listeners, crons } = registry.definitions;
   const onError = options.onError ?? ((error) => console.error("[logic-sdk]", error));
-  const queues: { name: string; tuning: Tuning | undefined }[] = [
+  const queues: { name: string; tuning: PgBossTuning | undefined }[] = [
     ...listeners.map((l) => ({ name: queueName(l.id), tuning: tuningOf(l.listener.meta) })),
     ...crons.map((c) => ({ name: queueName(c.id), tuning: options.crons })),
     { name: CALLS_QUEUE, tuning: options.calls },

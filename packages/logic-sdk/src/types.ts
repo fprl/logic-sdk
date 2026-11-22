@@ -15,10 +15,11 @@ export type Out<S> = S extends StandardSchemaV1<unknown, infer O> ? O : never;
 export interface Config {
   /** Who and where: actor, account, locale... Must be JSON-serializable (it travels with events). */
   scope: object;
-  /** The transaction handle mutations receive (e.g. a Drizzle transaction). */
+  /**
+   * Your database's type: `DrizzleDb<Db>`, or your own `ReadWrite<Reader, Tx>`. Queries get the reader, mutations the
+   * transaction. A plain type is what both get.
+   */
   db?: unknown;
-  /** What queries receive. Defaults to `db`. Use a read-only type (e.g. `DrizzleReader<Tx>`). */
-  reader?: unknown;
   /** Side-effecting services (mailer, payments...). Only actions and listeners receive them. */
   services?: object;
   /**
@@ -26,14 +27,55 @@ export interface Config {
    * Build it once from your env at the entry; clients built from secrets go in `services` instead.
    */
   config?: object;
-  /** The shape of `meta` on your functions (tags, rate limits, "agent may call"...). Read by `wrap` and adapters. */
+  /**
+   * The shape of `meta`: yours, plus what your adapters read (`AppMeta & AIMeta & PgBossMeta`). Yours goes on functions
+   * and listeners, each adapter's only where it reads it.
+   */
   meta?: object;
 }
 export type ScopeOf<C extends Config> = C["scope"];
-export type DbOf<C extends Config> = C extends { db: infer D } ? D : never;
-type ReaderOf<C extends Config> = C extends { reader: infer R } ? R : DbOf<C>;
+declare const READ_WRITE: unique symbol;
+/** A database type with two sides: what queries get and what mutations get. `DrizzleDb<Db>` is one. Type only. */
+export interface ReadWrite<Reader, Tx> {
+  readonly [READ_WRITE]: { reader: Reader; tx: Tx };
+}
+/** Says what's missing from the setup, where `never` would say nothing. */
+interface SetupError<Message extends string> {
+  readonly setupError: Message;
+}
+type NoDb = SetupError<"Add db to the Config you pass to init">;
+/** What mutations get, and `database`'s transaction type. `never`: the app declared no database. */
+export type DbOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<any, infer Tx> ? Tx : D) : never;
+type ReaderOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<infer Reader, any> ? Reader : D) : NoDb;
+type TxOf<C extends Config> = C extends { db: unknown } ? DbOf<C> : NoDb;
 export type ServicesOf<C extends Config> = C extends { services: infer S } ? S : {};
-export type MetaOf<C extends Config> = C extends { meta: infer M } ? M : never;
+type MetaOf<C extends Config> = C extends { meta: infer M } ? M : never;
+declare const FOR_FUNCTIONS: unique symbol;
+declare const FOR_LISTENERS: unique symbol;
+/** An adapter's part of `meta`, read on queries, mutations and actions: `type AIMeta = ForFunctions<{ ai?: ... }>`. */
+export interface ForFunctions<M> {
+  readonly [FOR_FUNCTIONS]?: M;
+}
+/** An adapter's part of `meta`, read on listeners: `type PgBossMeta = ForListeners<{ pgBoss?: ... }>`. */
+export interface ForListeners<M> {
+  readonly [FOR_LISTENERS]?: M;
+}
+type AppPart<M> = { [P in keyof M as P extends symbol ? never : P]: M[P] };
+type AdapterPart<M, S extends symbol> = S extends keyof M ? NonNullable<M[S]> : {};
+/** `never` when nothing is left, or `{}` would take any object. */
+type NeverIfEmpty<M> = keyof M extends never ? never : M;
+/** A query, mutation or action's `meta`. */
+export type FunctionMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_FUNCTIONS>>
+  : never;
+/** A listener's `meta`. */
+export type ListenerMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_LISTENERS>>
+  : never;
+/** What `wrap` sees: it runs for both. */
+export type CallMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_FUNCTIONS> & AdapterPart<M, typeof FOR_LISTENERS>>
+  : never;
 /** Without a declared `config`, nothing may be passed or read: no silently ignored settings. */
 export type ConfigOf<C extends Config> = C extends { config: infer F } ? F : Record<string, never>;
 
@@ -261,7 +303,7 @@ export interface QueryCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S
   run: Run<"query", ScopeOf<C>>;
 }
 export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
-  db: DbOf<C>;
+  db: TxOf<C>;
   /**
    * Call a query or mutation inside this same transaction, with its policy and validation:
    * `await ctx.run(availability.hold, { propertyId })`. If it fails, the whole transaction rolls back.
@@ -320,7 +362,7 @@ type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
   input?: IS;
   /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
   authorize?: P;
-  meta?: MetaOf<C>;
+  meta?: FunctionMetaOf<C>;
   handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
 };
 /**

@@ -51,6 +51,8 @@ Not adopted: `await using` in tests. It isn't safely portable across runtimes ye
 - **Node 24 and 26.** The repo develops on 26; the packages declare `>=24` because nothing in them needs 26, and Node 24 is supported until April 2028.
 - **`maxEventDepth` defaults to 8.** Real chains are 2 or 3 hops; deeper is almost always a loop.
 
+- **`db` is one type with two sides: `db: DrizzleDb<Db>`.** It was `db` plus an optional `reader` that defaulted to `db`, so leaving one line out let queries write. `ReadWrite<Reader, Tx>` is the plain shape for other ORMs. What would change it: queries that need a different database altogether (a replica), which is a value, not only a type.
+
 ## Code review fixes
 
 A second Fable pass reviewed the built code and found real bugs. All are fixed, each with a regression test:
@@ -143,6 +145,7 @@ export const sendReceipt = listener({
 
 - **Nobody has one in the definition.** Convex `query`, tRPC, TanStack Start `createServerFn` and Inngest `createFunction` don't; the AI SDK's `tool()` description is optional; trpc-to-openapi reads `meta.openapi.description` and oRPC `.meta(openapi({ description }))`. Text for a tool lives in that tool's namespace of meta.
 - **People get JSDoc.** One sentence above each export shows on hover wherever the function is used, which a field never did, and the CLI reads it statically (oxc returns comments with positions; about 10 lines), first paragraph only.
+- **Each adapter's type says where it's read: `ForFunctions`, `ForListeners`.** `meta: AppMeta & AIMeta & PgBossMeta` reads the same, and `pgBoss` on an action is now an error where it was silently ignored. Considered: TypeScript augmentation, which is project-wide, so a second `init` would offer options its registry doesn't have; a `listenerMeta` key in `Config`, which grows one key per kind (the user: "the lib becomes sufferable"). tRPC's `meta<M>()` is per instance too ([metadata](https://trpc.io/docs/server/metadata)). What would change it: an adapter that reads one option on only some kinds of function.
 - **Adapters own a namespace in your meta and export its type.** `logic-sdk/ai` exports `AIMeta = { ai?: { tool?, description? } }`; you add it to your shape (`meta: AIMeta & AppMeta`). Meta stays yours: the library reserves no key, so nothing collides with your own `description`.
 - **Options last override meta,** for every adapter: `toAITool(caller, fn, { description })`, or `describe: (f) => …` on `toAITools` (the bulk form), then `meta.ai.description`, else none. `toAITools` defaults `filter` to `meta.ai.tool === true`, so the agent door stays opt-in without a key of your own.
 - **Cost, accepted:** nothing flags a tool without a description (models pick worse; a `check` rule could warn later).
@@ -177,7 +180,7 @@ What would change it: a real app needing ctx types that depend on per-function m
 Plugin contributions are app-wide and known at `init`, so the object model carries them:
 
 ```ts
-type Config = { scope: Scope; db: Tx; services: Services; plugins: [Audit, RateLimit] };   // types only
+type Config = { scope: Scope; db: DrizzleDb<Db>; services: Services; plugins: [Audit, RateLimit] };   // types only
 export const { query, mutation, listener, createRegistry } = init<Config>();
 
 mutation({
@@ -191,7 +194,7 @@ createRegistry({ modules, plugins: [audit(), rateLimit({ store })] });  // a val
 ```
 
 - **Namespaced by plugin name** on both sides (`meta.rateLimit`, `ctx.audit`): no collisions, and it greps.
-- **Types:** `MetaOf<C>` adds `{ [P in Plugins as P["name"]]?: P["meta"] }`, and the ctx per kind adds `{ [P in Plugins as P["name"]]: P["ctx"][K] }`, so a plugin can add to mutations only.
+- **Types:** `FunctionMetaOf<C>` and `ListenerMetaOf<C>` add `{ [P in Plugins as P["name"]]?: P["meta"] }`, and the ctx per kind adds `{ [P in Plugins as P["name"]]: P["ctx"][K] }`, so a plugin can add to mutations only.
 - **Runtime:** `{ name, wrap?, ctx?: { query?, mutation?, action? }, onRegister? }`. `wrap` is the existing hook; `onRegister` sees every definition, for checks like "every exposed mutation has a rate limit".
 - **Jobs are core, not a plugin.** Scheduling needs the transaction handle, which is the dispatcher's seam.
 - **What would change it:** a plugin whose ctx type depends on per-function order. Same test as middleware above.

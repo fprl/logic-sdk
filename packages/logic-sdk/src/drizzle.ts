@@ -1,6 +1,6 @@
 import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { replaceKeyOf, type DatabaseAdapter, type DeliveryOutcome, type Dispatcher, type Job, type Runner, type SweepResult } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type DeliveryOutcome, type Dispatcher, type Job, type ReadWrite, type Runner, type SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -15,6 +15,12 @@ export type DrizzleReader<Db> = Omit<
   Db,
   "insert" | "update" | "delete" | "execute" | "transaction" | "batch" | "run" | "refreshMaterializedView"
 >;
+
+/**
+ * Your database in `Config`: `db: DrizzleDb<Db>`, where `type Db = typeof db`. Queries get a `DrizzleReader`, mutations
+ * the transaction.
+ */
+export type DrizzleDb<Db extends Transactional> = ReadWrite<DrizzleReader<DrizzleTx<Db>>, DrizzleTx<Db>>;
 
 /**
  * Use a Drizzle database for mutations. Needs a driver with async interactive transactions: node-postgres, postgres.js,
