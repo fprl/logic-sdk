@@ -113,4 +113,4 @@ jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, lo
 
 Cloudflare D1 rejects `BEGIN` and `SAVEPOINT`, and HTTP drivers can't hold a transaction open. `createRegistry` refuses to start when there are mutations but no transactional adapter. On Workers, use Postgres through Hyperdrive.
 
-Don't use a local libsql file either, though it typechecks: mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). For SQLite on a disk, use [`logic-sdk/drizzle/sqlite`](/docs/adapters/sqlite).
+No libsql either, and the types reject it. On a local file, mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). For SQLite on a disk, use [`logic-sdk/drizzle/sqlite`](/docs/adapters/sqlite).
