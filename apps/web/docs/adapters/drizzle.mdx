@@ -17,14 +17,17 @@ createRegistry({
 ## Types
 
 ```ts
-import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle";
 
-// What mutations get: the transaction
-type Tx = DrizzleTx<typeof db>;
-
-// What queries get: no insert, update, delete or execute
-type Reader = DrizzleReader<Tx>;
+type Config = {
+  scope: Scope;
+  db: DrizzleDb<typeof db>;
+};
 ```
+
+Queries get a reader (no `insert`, `update`, `delete` or `execute`), mutations the transaction. For a helper outside a ctx, the two sides are `DrizzleReader<Tx>` and `DrizzleTx<typeof db>`.
+
+Without Drizzle, write the two sides yourself: `db: ReadWrite<MyReader, MyTx>`, from `logic-sdk`. A plain `db: MyTx` is what both get, so queries could then write.
 
 ## Retries
 

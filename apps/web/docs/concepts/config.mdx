@@ -9,7 +9,7 @@ Your app has settings: a base URL, a limit, a currency. Declare their shape once
 // src/logic.ts
 type Config = {
   scope: Scope;
-  db: Tx;
+  db: DrizzleDb<Db>;
   config: {
     app: { url: string };
     orders: { maxItems: number; currency: "EUR" | "USD" };

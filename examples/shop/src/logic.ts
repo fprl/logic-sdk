@@ -1,9 +1,8 @@
 import { init, type MutationCtx as Mutation, type QueryCtx as Query } from "logic-sdk";
-import type { DrizzleReader, DrizzleTx } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle";
 import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 
 export type Db = PgAsyncDatabase<PgQueryResultHKT>;
-type Tx = DrizzleTx<Db>;
 
 /** Who is calling: your own type, the library only passes it along. A union, so policies can narrow it. */
 export type User = { id: string; role: "customer" | "staff" };
@@ -28,8 +27,7 @@ export interface Mailer {
 
 type Config = {
   scope: Scope;
-  db: Tx;
-  reader: DrizzleReader<Tx>;
+  db: DrizzleDb<Db>;
   services: { mailer: Mailer };
   config: Settings;
 };

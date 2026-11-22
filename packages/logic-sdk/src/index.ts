@@ -6,6 +6,7 @@ import type {
   ActionCtx,
   Call,
   CallJob,
+  CallMetaOf,
   Config,
   ConfigOf,
   Constructor,
@@ -24,7 +25,7 @@ import type {
   Kind,
   Listener,
   ListenerCtx,
-  MetaOf,
+  ListenerMetaOf,
   MutationCtx,
   Out,
   Overrides,
@@ -47,6 +48,7 @@ export type {
   CallJob,
   Caller,
   Config,
+  Constructor,
   Cron,
   CronJob,
   DatabaseAdapter,
@@ -63,7 +65,10 @@ export type {
   Fn,
   FnIn,
   FnOut,
+  ForFunctions,
+  ForListeners,
   Frozen,
+  In,
   Job,
   JobScope,
   Jobs,
@@ -73,9 +78,11 @@ export type {
   ListenerCtx,
   ListenerEvent,
   MutationCtx,
+  Out,
   Overrides,
   Policy,
   QueryCtx,
+  ReadWrite,
   Registered,
   RegisteredCron,
   RegisteredEvent,
@@ -89,6 +96,7 @@ export type {
   RunOptions,
   Runner,
   ScheduleOptions,
+  Schema,
   SweepResult,
 } from "./types.ts";
 export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
@@ -102,7 +110,7 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Om
   /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions<ScopeOf<C>, T>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
-  wrap?: (call: Call<MetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
+  wrap?: (call: Call<CallMetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
 } &
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
   ({} extends ConfigOf<C> ? { config?: ConfigOf<C> } : { config: ConfigOf<C> }) &
@@ -128,7 +136,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
   return {
     /** Create the registry once at startup: `createRegistry({ modules, database, services })`. */
     createRegistry: <const Mods extends Record<string, object>, T = ScopeOf<C>>(options: TypedOptions<C, Mods, T>) =>
-      build<ScopeOf<C>, Mods, ConfigOf<C>>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by MetaOf<C>; the values come from typed defs
+      build<ScopeOf<C>, Mods, ConfigOf<C>>(options as RegistryOptions<Mods>, {}), // meta in wrap is typed by CallMetaOf<C>; the values come from typed defs
     /** Reads data. Can run other queries. No writes, no events, no services. */
     query: make("query") as Constructor<C, "query">,
     /** Changes data inside one transaction. Can run queries and mutations (same transaction) and emit events. */
@@ -177,14 +185,14 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       attempts?: number;
       /** Seconds after the event before the first try. Needs an adapter that holds jobs: `inProcess()` is refused. */
       delay?: number;
-      meta?: MetaOf<C>;
+      meta?: ListenerMetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O> => {
       const { id, event, attempts, delay, meta, handler } = def;
       checkAttempts("listener", attempts);
       if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
         throw new Error(`[logic-sdk] listener delay must be seconds, 0 or more (got ${delay}).`);
-      // meta is checked against your MetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
+      // meta is checked against ListenerMetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
       return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, meta: meta as Listener["meta"], handler });
     },
   };

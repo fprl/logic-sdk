@@ -1,5 +1,5 @@
 import { jsonSchema, tool, type Tool } from "ai";
-import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type Fn, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
+import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type Fn, type FnIn, type FnOut, type ForFunctions, type Registry, type RegisteredFn } from "./index.ts";
 type UnionToIntersection<U> = (U extends unknown ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
 
 /** `{ bookings_confirm, pricing_priceStay, … }`: one AI SDK tool per exposed function, typed. */
@@ -14,18 +14,18 @@ export type AIToolsOf<Mods> = UnionToIntersection<
   }[keyof Mods & string]
 >;
 
-/**
- * What this adapter reads from a function's `meta`. Add it to your meta shape: `init<{ meta: AIMeta & AppMeta }>()`,
- * then `meta: { ai: { tool: true, description: "Use when the customer asks to cancel an order" } }`.
- */
-export type AIMeta = {
-  ai?: {
-    /** `toAITools` includes it (by default). The agent door is opt-in: exposed for your UI doesn't mean a tool. */
-    tool?: boolean;
-    /** What the model reads to decide when to call it. Optional, but models pick tools better with one. */
-    description?: string;
-  };
+type AIOptions = {
+  /** `toAITools` includes it (by default). The agent door is opt-in: exposed for your UI doesn't mean a tool. */
+  tool?: boolean;
+  /** What the model reads to decide when to call it. Optional, but models pick tools better with one. */
+  description?: string;
 };
+
+/**
+ * What this adapter reads from a function's `meta` (not a listener's). Add it to your meta shape:
+ * `init<{ meta: AIMeta & AppMeta }>()`, then `meta: { ai: { tool: true, description: "Use when the customer asks to cancel an order" } }`.
+ */
+export type AIMeta = ForFunctions<{ ai?: AIOptions }>;
 
 interface ErrorOption {
   /** Unexpected (non-domain) errors. The model only sees "internal_error". Default: console.error. */
@@ -43,7 +43,7 @@ export interface AIToolsOptions extends ErrorOption {
 }
 
 /** `meta.ai` as `AIMeta` types it where you write it (meta is stored loose). */
-const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }) => fn.meta?.ai as AIMeta["ai"];
+const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }) => fn.meta?.ai as AIOptions | undefined;
 
 const isExposed = (fn: Fn): fn is ExposedFn => fn.expose === true;
 

@@ -1,14 +1,17 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
-import { drizzleAdapter } from "../src/drizzle.ts";
+import type { AIMeta } from "../src/ai.ts";
+import { drizzleAdapter, type DrizzleDb } from "../src/drizzle.ts";
+import type { PgBossMeta } from "../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
+import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { z } from "zod";
-import { init } from "../src/index.ts";
+import { init, type ForListeners, type ReadWrite } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
 type Signed = Scope & { actor: string };
-const { query, mutation, action, event, listener, cron, createRegistry: create } = init<{ scope: Scope; db: Store; reader: Readonly<Store>; services: { mail: (to: string) => void } }>();
+const { query, mutation, action, event, listener, cron, createRegistry: create } = init<{ scope: Scope; db: ReadWrite<Readonly<Store>, Store>; services: { mail: (to: string) => void } }>();
 const anyone = () => true;
 const signed = (s: Scope): s is Signed => s.actor !== null;
 
@@ -263,4 +266,61 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   cron({ schedule: "* * * * *", run: needs, input: { n: "1" }, scope: system });
   // @ts-expect-error scope must be the app's
   cron({ schedule: "* * * * *", run: none, scope: { nope: 1 } });
+}
+
+// db: DrizzleDb gives queries a reader and mutations the transaction
+{
+  const d = init<{ scope: Scope; db: DrizzleDb<PgliteDatabase> }>();
+  d.query({ handler: async (ctx) => ctx.db.select() });
+  // @ts-expect-error queries can't write
+  d.query({ handler: async (ctx) => ctx.db.insert });
+  d.mutation({ handler: async (ctx) => ctx.db.insert });
+  d.createRegistry({ modules: {}, database: drizzleAdapter({} as PgliteDatabase) });
+  // @ts-expect-error the registry still needs the database
+  d.createRegistry({ modules: {} });
+}
+
+// no db: the type says what to do
+{
+  const n = init<{ scope: Scope }>();
+  const says = (_: { readonly setupError: "Add db to the Config you pass to init" }) => {};
+  n.query({ handler: async (ctx) => says(ctx.db) });
+  n.mutation({ handler: async (ctx) => says(ctx.db) });
+  // @ts-expect-error no database was declared
+  n.query({ handler: async (ctx) => ctx.db.select() });
+  n.createRegistry({ modules: {} });
+}
+
+// meta: yours goes everywhere, each adapter's where it reads it, per init
+{
+  type AppMeta = { area: "shop" | "orders" };
+  type QueueMeta = ForListeners<{ queue?: { priority: number } }>; // someone else's adapter
+  const shop = init<{ scope: Scope; meta: AppMeta & AIMeta & PgBossMeta & QueueMeta }>();
+  const happened = shop.event({ payload: z.object({}) });
+  shop.action({ meta: { area: "shop", ai: { tool: true } }, handler: async () => 1 });
+  shop.listener({ event: () => happened, meta: { area: "orders", pgBoss: {}, queue: { priority: 1 } }, handler: async () => 1 });
+  shop.createRegistry({
+    modules: {},
+    wrap: async (call, next) => {
+      const seen: [AppMeta["area"] | undefined, boolean | undefined, object | undefined] = [call.meta?.area, call.meta?.ai?.tool, call.meta?.pgBoss];
+      void seen;
+      return next();
+    },
+  });
+  // @ts-expect-error pg-boss only reads listeners
+  shop.action({ meta: { area: "shop", pgBoss: {} }, handler: async () => 1 });
+  // @ts-expect-error AI only reads functions
+  shop.listener({ event: () => happened, meta: { area: "shop", ai: {} }, handler: async () => 1 });
+  // @ts-expect-error a typo inside an adapter's options
+  shop.action({ meta: { area: "shop", ai: { tol: true } }, handler: async () => 1 });
+  // @ts-expect-error the app's own part is still required
+  shop.action({ meta: { ai: { tool: true } }, handler: async () => 1 });
+
+  const admin = init<{ scope: Scope; meta: AIMeta }>();
+  const changed = admin.event({ payload: z.object({}) });
+  admin.action({ meta: { ai: {} }, handler: async () => 1 });
+  // @ts-expect-error this init didn't add pg-boss
+  admin.action({ meta: { pgBoss: {} }, handler: async () => 1 });
+  // @ts-expect-error nothing here is read on listeners, so there's no meta to set
+  admin.listener({ event: () => changed, meta: { anything: 1 }, handler: async () => 1 });
 }
