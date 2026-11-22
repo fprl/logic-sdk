@@ -4,7 +4,7 @@ description: The database adapter, and the types for queries and mutations.
 ---
 
 ```ts
-import { drizzleAdapter } from "logic-sdk/drizzle";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 
 createRegistry({
   modules,
@@ -17,7 +17,7 @@ createRegistry({
 ## Types
 
 ```ts
-import type { DrizzleDb } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle/pg";
 
 type Config = {
   scope: Scope;
@@ -39,19 +39,21 @@ Reads the SQLSTATE code of a database error, even when Drizzle wraps it. Use it 
 
 ## Database queue
 
-`databaseQueue(db)` makes your database the queue, like Laravel's `database` driver: each job is a row written in the mutation's transaction, so a committed one is never lost (a receipt, a webhook). Your app runs it, with no worker process. Postgres, Drizzle 1.0.
+`databaseQueue(database)` makes your database the queue, like Laravel's `database` driver: each job is a row written in the mutation's transaction, so a committed one is never lost (a receipt, a webhook). Your app runs it, with no worker process. Postgres, Drizzle 1.0, or [another ORM](/docs/adapters/other-orms).
 
 ```ts
 // db/schema.ts: drizzle-kit adds the table to your migrations
-export { jobsTable } from "logic-sdk/drizzle";
+export { jobsTable } from "logic-sdk/drizzle/pg";
 
 // registry.ts
-import { databaseQueue, drizzleAdapter } from "logic-sdk/drizzle";
+import { databaseQueue, drizzleAdapter } from "logic-sdk/drizzle/pg";
+
+const database = drizzleAdapter(db);
 
 export const registry = createRegistry({
   modules,
-  database: drizzleAdapter(db),
-  jobs: { adapter: databaseQueue(db), scope: { store, load } }, // who a job runs as: see Jobs
+  database,
+  jobs: { adapter: databaseQueue(database), scope: { store, load } }, // who a job runs as: see Jobs
 });
 
 // what a crash or a failure left behind: a platform trigger, or on Node
@@ -90,13 +92,15 @@ export default {
 
 ## Outbox
 
-`outbox(db, queue)` puts that table in front of another queue. The row is kept only until the queue has the job, then the queue runs it:
+`outbox(database, queue)` puts that table in front of another queue. The row is kept only until the queue has the job, then the queue runs it:
 
 ```ts
-import { drizzleAdapter, outbox } from "logic-sdk/drizzle";
+import { drizzleAdapter, outbox } from "logic-sdk/drizzle/pg";
 import { cloudflareQueue } from "logic-sdk/cloudflare";
 
-jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope: { store, load } },
+const database = drizzleAdapter(db);
+// in createRegistry
+jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, load } },
 ```
 
 - **Same table, same sweep:** re-export `jobsTable` and trigger `registry.jobs.sweep()`, as above. The sweep sends what a crash or a failed send left behind.

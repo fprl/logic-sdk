@@ -38,7 +38,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
 
-1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
+1. **Done. The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
 2. **SQLite, plain (API, approved: `drizzleAdapter(() => drizzle("app.db"), options)`, the adapter opens both connections).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
 3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
 4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
@@ -63,9 +63,9 @@ Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional co
 1. **Use it in a real app.** What feels clunky there decides what comes next.
 2. **Durable events, then crons.** The plan is in DESIGN.md ("Next: listeners, plugins, durable events, crons").
    - **Done: the delivery contract.** One `Delivery` per (event, listener) with a dedupe id; `registry.jobs.run(delivery, { attempt })` resolves `done`/`failed` or throws to retry; `depth` on the envelope; payload and scope checked as plain JSON at emit; `ctx.event` without the stored scope.
-   - **Done: `databaseQueue(db)` in `logic-sdk/drizzle`** (Postgres, Drizzle 1.0): rows in the transaction, leased first try after commit, fenced completion, Graphile-style backoff, `registry.jobs.sweep()` and `registry.jobs.retry(id)` (optional `sweep` and `retry` on the transport contract), failed rows you query yourself. The slot is `jobs` and the lists are `registry.definitions` (DESIGN.md, "Naming the slot").
+   - **Done: `databaseQueue(database)` in `logic-sdk/drizzle/pg` and `logic-sdk/postgres`** (Postgres, Drizzle 1.0): rows in the transaction, leased first try after commit, fenced completion, Graphile-style backoff, `registry.jobs.sweep()` and `registry.jobs.retry(id)` (optional `sweep` and `retry` on the transport contract), failed rows you query yourself. The slot is `jobs` and the lists are `registry.definitions` (DESIGN.md, "Naming the slot").
    - **Done: `jobs: { adapter, scope }`,** optional `id` on every definer, scope at rest applied by the core (`store`/`load`, a `discarded` outcome), `kind` on every job.
-   - **Done: `logic-sdk/cloudflare`:** `cloudflareQueue(env.JOBS)` alone or as `outbox(db, queue)`, `handleQueue(registry, batch)` for the consumer. Adapters get a `Runner` (`run`, `report`).
+   - **Done: `logic-sdk/cloudflare`:** `cloudflareQueue(env.JOBS)` alone or as `outbox(database, queue)`, `handleQueue(registry, batch)` for the consumer. Adapters get a `Runner` (`run`, `report`).
    - **Done: `attempts` and `delay` on listeners,** enforced by the core; adapters get `check` (refuse at startup) and `fail` (keep what a consumer failed). Tests: `begin`/`rollback` hooks, `jobs: "inline" | "manual"`, `t.jobs.drain()` and `perform()`.
    - **Done: pg-boss** (`logic-sdk/pg-boss`: `pgBoss(boss)`, `work(registry, boss)`, a queue per listener and cron). Per-key order (`key_strict_fifo`) waits for `key`.
    - **Next:** Inngest (one Inngest function per listener, from `registry.definitions`) before the adapter contract is called stable. `key`, `dedupe` and `timeout` land with those adapters, refused in `check` where they can't be honoured. Drizzle 1.0 (RC) only, like the rest of the library.
@@ -114,7 +114,7 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 
 ## Open
 
-- **Tenancy sugar (maybe):** a typed `owned(table)` condition in `logic-sdk/drizzle`, bound to the scope, that fails to compile on tables without `accountId`. Sugar only.
+- **Tenancy sugar (maybe):** a typed `owned(table)` condition in `logic-sdk/drizzle/pg`, bound to the scope, that fails to compile on tables without `accountId`. Sugar only.
 - **Top-level queries** read outside a transaction, so a query with several selects can see different snapshots. A `READ ONLY` transaction flag on the adapter would fix it.
 - **A typed proxy** (`caller.bookings.confirm(input)`) as sugar over `run`, after a type-cost prototype.
 

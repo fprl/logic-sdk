@@ -1,12 +1,12 @@
-import type { Dispatcher } from "logic-sdk";
-import { databaseQueue, drizzleAdapter } from "logic-sdk/drizzle";
+import type { Dispatcher, SqlDatabase } from "logic-sdk";
+import { databaseQueue, type DrizzleTx } from "logic-sdk/drizzle/pg";
 import * as catalog from "./catalog";
 import { createRegistry, type Db, type Mailer, type Settings } from "./logic";
 import * as orders from "./orders";
 
 /** The only file that imports every module. Each host (node.ts, worker.ts, app/) calls it with its own pieces. */
 export const createShop = (options: {
-  db: Db;
+  database: SqlDatabase<Db, DrizzleTx<Db>>;
   settings: Settings;
   mailer?: Mailer;
   /** Where this host's jobs go. Default: the database is the queue. */
@@ -15,11 +15,11 @@ export const createShop = (options: {
 }) =>
   createRegistry({
     modules: { catalog, orders },
-    database: drizzleAdapter(options.db),
+    database: options.database,
     services: { mailer: options.mailer ?? consoleMailer },
     config: options.settings,
     jobs: {
-      adapter: options.jobs ?? databaseQueue(options.db),
+      adapter: options.jobs ?? databaseQueue(options.database),
       // demo auth has no users table. In your app: `store` the ids, `load` the user with today's role
       scope: { load: (saved) => saved },
     },

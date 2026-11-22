@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, setSystemTime
 import { fromPglite, PgBoss } from "pg-boss";
 import postgres from "postgres";
 import { z } from "zod";
-import { drizzleAdapter } from "../src/drizzle.ts";
+import { drizzleAdapter } from "../src/drizzle/pg.ts";
 import { init, type DatabaseAdapter, type FailureInfo, type Job } from "../src/index.ts";
 import { CALLS_QUEUE, pgBoss, pgBossId, queueName, work, type PgBossMeta } from "../src/pg-boss.ts";
 

@@ -14,7 +14,7 @@ import {
   type MutationCtx as Mutation,
   type QueryCtx as Query,
 } from "logic-sdk";
-import type { DrizzleDb } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle/pg";
 import type { Scope } from "./policies";
 
 type Db = typeof db;
@@ -99,7 +99,7 @@ export const cancel = mutation({
   <Step title="Register your modules in registry.ts">
 
 ```ts
-import { drizzleAdapter } from "logic-sdk/drizzle";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 import * as availability from "./availability";
 import * as bookings from "./bookings";
 

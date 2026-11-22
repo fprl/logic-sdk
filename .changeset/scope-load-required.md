@@ -6,7 +6,7 @@
 
 ```ts
 jobs: {
-  adapter: databaseQueue(db),
+  adapter: databaseQueue(database),
   scope: {
     store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId }),
     load: (saved) => scopeFor(saved), // today's roles; null discards the job

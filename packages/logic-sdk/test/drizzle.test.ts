@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { expect, test } from "bun:test";
-import { drizzleAdapter, type DrizzleDb } from "../src/drizzle.ts";
+import { drizzleAdapter, type DrizzleDb } from "../src/drizzle/pg.ts";
 import { init } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 

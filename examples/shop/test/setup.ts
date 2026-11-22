@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 import type { Db, Mailer, Scope } from "../src/logic";
 import { createShop } from "../src/registry";
 
@@ -9,7 +10,7 @@ const pg = new PGlite();
 await pg.exec(readFileSync(new URL("../src/db/migrate.sql", import.meta.url), "utf8"));
 
 export const shop = createShop({
-  db: drizzle({ client: pg }) as unknown as Db,
+  database: drizzleAdapter(drizzle({ client: pg }) as unknown as Db),
   settings: { app: { url: "https://shop.test" }, orders: { maxItems: 10 } },
 });
 

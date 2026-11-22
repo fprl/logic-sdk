@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { databaseQueue, drizzleAdapter, jobsTable, type DrizzleTx } from "../src/drizzle.ts";
+import { databaseQueue, drizzleAdapter, jobsSchema, jobsTable, type DrizzleTx } from "../src/drizzle/pg.ts";
 import { init } from "../src/index.ts";
 
 // PGlite runs one connection at a time, so only real Postgres can show two sweepers racing (CI sets DATABASE_URL).
@@ -25,13 +25,8 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
   } });
   try {
     const db = drizzle({ client });
-    await db.execute(sql`
-      CREATE TABLE logic_jobs (
-        id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
-        attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
-        receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
-      )`);
-    await db.execute(sql`CREATE UNIQUE INDEX logic_jobs_replace ON logic_jobs (replace_key) WHERE status = 'pending' and attempts = 0`);
+    const database = drizzleAdapter(db);
+    await client.unsafe(jobsSchema);
 
     const { event, listener, createRegistry } = init<{ scope: object; db: DrizzleTx<typeof db> }>();
     const happened = event({ payload: z.object({ n: z.number() }) });
@@ -43,7 +38,7 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
         await new Promise((r) => setTimeout(r, 5)); // hold the row a little, so sweepers overlap
       },
     });
-    const registry = createRegistry({ modules: { x: { happened, count } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
+    const registry = createRegistry({ modules: { x: { happened, count } }, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
 
     const jobs = Array.from({ length: 60 }, (_, n) => {
       const envelope = { id: `e${n}`, name: "x.happened", payload: { n }, scope: {}, occurredAt: new Date().toISOString(), depth: 1 };

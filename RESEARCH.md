@@ -145,7 +145,7 @@ A job may run hours later, after retries. None of these stacks carry the caller'
 ## What we take from each
 
 - **Rails:** the after-commit default is the honest baseline for external queues, with the crash window documented, not hidden. Small adapter interface (enqueue, enqueue at).
-- **Fizzy:** where the consequence matters, a row plus a recurring sweep. We offer that as `databaseQueue(db)`, so nobody writes it by hand.
+- **Fizzy:** where the consequence matters, a row plus a recurring sweep. We offer that as `databaseQueue(database)`, so nobody writes it by hand.
 - **Laravel:** options that change correctness live on the job (`$tries`, backoff, uniqueness), not on the worker. Failures are rows you can list and retry. The database queue joins the transaction by default.
 - **Scope at rest:** store ids, rebuild the scope fresh at delivery, discard when what it points at is gone (Rails, Fizzy, Laravel). Our policies already re-run on every `ctx.run`, so a fresh scope gets Laravel's re-check for free.
 - **Phoenix and Oban:** transactional enqueue is worth headlining when the queue is in your database (pg-boss for us). Scope built at the edge, passed first: our `scope`.

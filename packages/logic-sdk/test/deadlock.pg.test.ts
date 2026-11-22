@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { drizzleAdapter, sqlState, type DrizzleDb } from "../src/drizzle.ts";
+import { drizzleAdapter, sqlState, type DrizzleDb } from "../src/drizzle/pg.ts";
 import { init } from "../src/index.ts";
 
 // PGlite runs one transaction at a time, so only real Postgres can deadlock (CI sets DATABASE_URL).

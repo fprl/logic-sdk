@@ -96,7 +96,7 @@ Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter]
 
 ```ts
 // db/schema.ts
-export { jobsTable, cronRunsTable } from "logic-sdk/drizzle";
+export { jobsTable, cronRunsTable } from "logic-sdk/drizzle/pg";
 ```
 
 - **With `pgBoss(boss)`, a minute runs once** too: its pg-boss id is derived from `<cron id>@<minute>`, and pg-boss skips an insert whose id it already has (finished jobs are kept 7 days).

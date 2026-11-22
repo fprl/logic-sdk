@@ -14,7 +14,8 @@ Any [Standard Schema](https://standardschema.dev) library works for `input` and 
 | Import | What it gives you |
 |---|---|
 | `logic-sdk` | `init`, the definers, `createRegistry`, errors |
-| `logic-sdk/drizzle` | `drizzleAdapter(db)`, and jobs in your Postgres: `databaseQueue`, `outbox` |
+| `logic-sdk/drizzle/pg` | `drizzleAdapter(db)`, and jobs in your Postgres: `databaseQueue`, `outbox` |
+| `logic-sdk/postgres` | The same two on Postgres with any ORM, and the tables as SQL |
 | `logic-sdk/cloudflare` | `cloudflareQueue`, `handleQueue`, `handleScheduled` |
 | `logic-sdk/pg-boss` | `pgBoss(boss)` and `work(registry, boss)` |
 | `logic-sdk/node` | `startTicking`, crons and sweeps in a long-running process |
@@ -27,4 +28,4 @@ Any [Standard Schema](https://standardschema.dev) library works for `input` and 
 
 - **Node 24 or newer**, Bun, or Cloudflare Workers. The core has no `node:` imports and no `AsyncLocalStorage`.
 - **TypeScript:** developed and tested on TypeScript 7. Older versions are untested.
-- **A database with interactive transactions** for mutations: Postgres through Drizzle today. Cloudflare D1 and HTTP-only drivers can't hold a transaction open, so they can't run mutations.
+- **A database with interactive transactions** for mutations: Postgres, through Drizzle or [another ORM](/docs/adapters/other-orms). Cloudflare D1 and HTTP-only drivers can't hold a transaction open, so they can't run mutations.

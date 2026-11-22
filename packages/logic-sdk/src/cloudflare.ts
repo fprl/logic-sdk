@@ -27,7 +27,7 @@ const encoder = new TextEncoder();
 
 /**
  * Send jobs to a Cloudflare Queue after commit. Alone it's lossy (a Worker that dies between commit and send loses
- * them); behind an outbox it's durable: `jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope: { store, load } }`.
+ * them); behind an outbox it's durable: `jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, load } }`.
  * Run them with `handleQueue(registry, batch)` in your consumer.
  */
 export function cloudflareQueue(queue: QueueBinding): Dispatcher {

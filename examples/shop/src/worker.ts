@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { cloudflareQueue, handleQueue, handleScheduled, type QueueBatch, type QueueBinding } from "logic-sdk/cloudflare";
-import { outbox } from "logic-sdk/drizzle";
+import { drizzleAdapter, outbox } from "logic-sdk/drizzle/pg";
 import postgres from "postgres";
 import { createApi } from "./http";
 import { createShop, settingsFrom } from "./registry";
@@ -11,11 +11,11 @@ type Waiting = { waitUntil(promise: Promise<unknown>): void };
 // Workers: a shop per request, on this request's Hyperdrive connection. Its jobs run through Cloudflare Queues, behind
 // an outbox so none is lost between commit and send.
 const shopFor = (env: Bindings, ctx: Waiting) => {
-  const db = drizzle({ client: postgres(env.HYPERDRIVE.connectionString, { max: 5, fetch_types: false }) });
+  const database = drizzleAdapter(drizzle({ client: postgres(env.HYPERDRIVE.connectionString, { max: 5, fetch_types: false }) }));
   return createShop({
-    db,
+    database,
     settings: settingsFrom(env),
-    jobs: outbox(db, cloudflareQueue(env.JOBS)),
+    jobs: outbox(database, cloudflareQueue(env.JOBS)),
     waitUntil: (promise) => ctx.waitUntil(promise),
   });
 };

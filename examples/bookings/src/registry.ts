@@ -1,4 +1,4 @@
-import { drizzleAdapter } from "logic-sdk/drizzle";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 import { createRegistry, type Db } from "./logic";
 import type { Services } from "./services";
 import * as availability from "./availability";
