@@ -223,7 +223,7 @@ export async function work(
   }
 
   // a renamed or removed listener leaves its queue with no worker, and pg-boss's retention deletes those jobs unrun:
-  // say so, like a job databaseQueue can't find code for (it fails at once, kept)
+  // say so: with no worker, these jobs never get a try to report
   const ours = new Set(queues.map((q) => q.name));
   for (const q of await boss.getQueues())
     if (q.name.startsWith(PREFIX) && !ours.has(q.name) && q.queuedCount > 0)

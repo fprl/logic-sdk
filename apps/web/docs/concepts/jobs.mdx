@@ -135,7 +135,7 @@ export const confirm = mutation({
 
 ## Ids
 
-A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: they fail at once and are kept, like Rails' `ClassMissingError` in Solid Queue, and `registry.jobs.retry(id)` runs them once the code is back. Give it an `id` before you rename, and queued jobs keep finding it:
+A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: each try fails until their attempts are used, like a missing class in Laravel. Then they're failed, and where your adapter keeps them, `registry.jobs.retry(id)` runs them once the code is back. Give it an `id` before you rename, and queued jobs keep finding it:
 
 ```ts
 // notifications/listeners.ts
@@ -150,7 +150,7 @@ export const sendAll = listener({
 - **Local to the module:** in a `notifications` module, `id: "send"` is `notifications.send`. Write `"send"`, not `"notifications.send"`: the module key is added for you.
 - **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls store function ids.
 - **Unique:** a clash throws at `createRegistry`.
-- **Deploy new code before what calls it.** In a rolling deploy, an old process can pick up a job for a listener only the new code has, and it fails at once (kept; `registry.jobs.retry(id)` runs it). Ship a new listener one deploy before the code that emits its event.
+- **Deploy new code before what calls it.** In a rolling deploy, an old process can pick up a job for a listener only the new code has, and that costs the job a try. With attempts left the new process runs it later; with the default of one it's failed. Give the listener `attempts`, or ship it one deploy before the code that emits its event.
 - **Where else it shows:** the [fetch adapter](/docs/adapters/fetch)'s routes and error codes (`notifications.send.forbidden`) use the id. oRPC routers and AI tools keep the export name, because their types come from your modules' export names.
 
 ## Who a job runs as

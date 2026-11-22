@@ -182,10 +182,14 @@ export function makeJobs(deps: JobsDeps) {
       }
     };
 
-    // code this version doesn't have (renamed or removed): failed at once and kept, like Rails' ClassMissingError.
-    // `registry.jobs.retry(id)` runs it once the code is back.
+    // code this process doesn't have (renamed, removed, or not deployed here yet) is a try like any other, as Laravel
+    // treats a missing class: in a rolling deploy the new code gets a later one.
+    const cantRun = (why: string) =>
+      attemptOnce(async () => {
+        throw new Error(`[logic-sdk] ${why}`);
+      });
     const missing = (what: string, id: string) =>
-      failed(new Error(`[logic-sdk] ${id} isn't a registered ${what} (renamed or removed?), so job ${job.id} can't run.`));
+      cantRun(`${id} isn't a registered ${what} (renamed, removed or not deployed here yet?), so job ${job.id} can't run.`);
     if (job.kind === "cron") {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
@@ -204,7 +208,7 @@ export function makeJobs(deps: JobsDeps) {
         return "done";
       });
     }
-    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${id} has kind ${JSON.stringify(kind)}, which this version can't run.`));
+    if (job.kind !== "delivery") return cantRun(`job ${id} has kind ${JSON.stringify(kind)}, which this version can't run.`);
     const l = listenerById.get(job.listener);
     if (!l) return missing("listener", job.listener);
     const { envelope } = job;
