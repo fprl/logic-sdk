@@ -10,7 +10,7 @@ Write the layer between your routes and your database once, as plain declaration
 npm i logic-sdk zod
 ```
 
-Node 24+, Bun or Cloudflare Workers. Postgres for mutations, through Drizzle or any ORM that can run SQL in a transaction.
+Node 24+, Bun or Cloudflare Workers. Postgres or SQLite on a disk for mutations, through Drizzle or any ORM that can run SQL in a transaction.
 
 ## Quick start
 
@@ -113,6 +113,8 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 |---|---|
 | `logic-sdk/drizzle/pg` | The database adapter, `databaseQueue` and `outbox` |
 | `logic-sdk/postgres` | `databaseQueue` and `outbox` on Postgres with any ORM |
+| `logic-sdk/drizzle/sqlite` | The same on SQLite: `drizzleAdapter(() => drizzle("app.db"))` |
+| `logic-sdk/sqlite` | `databaseQueue` and `outbox` on SQLite with any ORM |
 | `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
 | `logic-sdk/pg-boss` | Jobs in pg-boss |
 | `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |

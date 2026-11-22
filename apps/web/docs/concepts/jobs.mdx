@@ -38,7 +38,7 @@ inProcess()  default, zero infra
   mutation ─ commit ─► run the listeners in this process
   lost if the process dies after commit
 
-databaseQueue(database)  durable, Postgres: your database is the queue (Laravel's database driver)
+databaseQueue(database)  durable, Postgres or SQLite: your database is the queue (Laravel's database driver)
   mutation ─ insert a row ─ commit ─► your app runs it, deletes the row
                                    └► failed or crashed: registry.jobs.sweep() runs it again
 
