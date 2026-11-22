@@ -24,9 +24,9 @@ export type DrizzleDb<Db extends Transactional> = ReadWrite<DrizzleReader<Drizzl
 
 /**
  * Use a Drizzle database for mutations. Needs a driver with async interactive transactions: node-postgres, postgres.js,
- * PGlite, Neon websocket, Hyperdrive, libsql. Not D1 or HTTP drivers, and not Drizzle's synchronous SQLite drivers
+ * PGlite, Neon websocket, Hyperdrive. Not D1 or HTTP drivers, and not Drizzle's synchronous SQLite drivers
  * (better-sqlite3, bun:sqlite, node:sqlite, Durable Objects): they commit before an async mutation finishes, and
- * Drizzle's types already reject them here.
+ * Drizzle's types already reject them here. Not a local libsql file either: overlapping mutations fail (SQLITE_BUSY).
  */
 export function drizzleAdapter<Db extends Transactional>(db: Db): DatabaseAdapter<Db, DrizzleTx<Db>> {
   return {

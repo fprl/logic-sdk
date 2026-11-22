@@ -282,6 +282,27 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 - an adapter refuses what it can't honour in **`check({ listeners, database })`**, at `createRegistry` (Cloudflare alone refuses a `delay` over 24 hours; the outbox in front holds it instead)
 - **`inProcess()` and inline tests ignore `attempts` and `delay`:** one try, right away, like Laravel's sync queue (`SyncQueue::later` ignores the delay, and sync jobs aren't retried). Not "emulates everything": that was this file's earlier claim, and it wasn't true.
 
+### The jobs model: Laravel, as it runs on SQS
+
+Settled on 2026-11-22. **What happens to a job once it's queued follows one model: Laravel on SQS.** We mixed Laravel, Oban and Solid Queue piece by piece before, and the pieces didn't fit together. "On SQS" matters: Laravel's own database driver has no receipt and doesn't extend ([DatabaseQueue](https://github.com/laravel/framework/blob/v13.43.0/src/Illuminate/Queue/DatabaseQueue.php)).
+
+- **Claim:** a runner takes a job for a limited time (SQS's [visibility timeout](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html)). Taking it counts as an attempt.
+- **Receipt:** each claim gets a new one ([receipt handle](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-queue-message-identifiers.html)), and only the current one can extend or finish the job. An attempt number can't do this: `retry(id)` starts them again at 1.
+- **Slow:** the runner extends its time while it works, up to a maximum, as Laravel Cloud's [managed queues](https://cloud.laravel.com/docs/queues) do (three minutes at a time, on SQS). A Laravel worker can also [kill a job at its `timeout`](https://laravel.com/docs/13.x/queues#worker-timeouts) before its time runs out. JavaScript in flight can't be killed, so extending is the half we can have.
+- **Time: 300 seconds, still.** It's what [Vercel's Queues SDK](https://vercel.com/docs/queues/sdk) defaults to, and it extends too. A shorter one notices a crash sooner, but loses a healthy job whose extension waits for a busy connection: with a pool of one, extending waits for the whole of a running mutation.
+- **Crash:** nobody extends, the time runs out, and the next sweep retries the job, or keeps it as failed when it has no attempts left. No supervisor and no list of live processes: Workers and Vercel have neither.
+- **Failed:** kept until someone retries or deletes it, like Laravel's failed jobs.
+
+The rule: a question about a queued job's life (claim, extend, retry, fail, order) is answered by what Laravel on SQS does. Other stacks can still teach us what surrounds it (inserting in the transaction, `replace`, cron dedupe, names), not change it. One addition the database gives us: a job that is a mutation can be finished in its own transaction, which SQS can't do.
+
+Not chosen: a fixed time with no extension ([Oban's Lifeline](https://github.com/oban-bg/oban/blob/main/lib/oban/lifeline.ex), an hour by default) has to outlast the longest job on any platform, so a crash waits that long, and a longer job is failed or run twice while it works. Solid Queue's model (a job belongs to a live process, watched by a supervisor) needs long-lived processes. Graphile Worker's `runOnce` doesn't release a crashed job's lock ([runner](https://github.com/graphile/worker/blob/main/src/runner.ts)), and that lock [lasts at least four hours](https://worker.graphile.org/docs/error-handling).
+
+Where the outbox doesn't follow it yet: it doesn't extend, it fences on the attempt number, and it claims a commit's jobs all at once. The sections below describe the code as it is.
+
+Evidence so far: renewal timers keep ticking during a job and inside `waitUntil` on workerd run locally. Deployed Workers and Vercel are untested.
+
+What would change it: long-lived Node becoming the main target (then pg-boss's model), or renewal timers not holding up on workerd or Vercel (then a fixed time longer than the platform's limit, as on Laravel Vapor).
+
 ### The delivery contract (step 1 of durable events)
 
 - **A delivery is one listener's share of one event:** `{ kind: "delivery", id: "<listener id>@<event id>", listener, envelope }`. `kind` is stored with every job, like Rails' `job_class` and Oban's `worker` column, so jobs queued today still run once scheduled calls and cron ticks exist; a kind this version doesn't know fails at once and is kept (see below). `@`, not `:`, because BullMQ rejects custom job ids containing `:` ([job ids](https://docs.bullmq.io/guide/jobs/job-ids)). Queues carry one message per delivery, so a failing listener retries alone and the id is the dedupe key every transport agrees on.
@@ -305,6 +326,16 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 - **`registry.jobs.sweep()`, not `outbox.sweep(registry)`.** The transport contract has an optional `sweep(run, options)`; the registry passes its own `jobs.run` on each call, so nothing is bound or stored and a serverless factory returns one thing. Transports that store nothing (in-process, pg-boss) resolve zeros, so a cron handler doesn't care which one you use.
 - **`retry(id)` revives failed rows only** and returns whether it did. A pending row belongs to its runner or a sweep, and resetting its attempts would break the fence and run it twice at once. Oban's `retry_job` ignores available and executing jobs the same way ([Oban](https://oban.hexdocs.pm/Oban.html)). `registry.jobs.retry` throws on `inProcess()`: sweeping nothing is harmless in a cron, but retrying an id on a transport that stores nothing is a bug.
 - **`expose` stays in the core, and adapters only narrow it.** It's the "may leave the process" boundary that makes `authorize` and `output` required, checked once in `createRegistry`. Adapters subtract with a `filter` (and a meta namespace when they have a per-function default, like `meta.ai.tool`), never add: an adapter publishing something not exposed would skip that check. trpc-to-openapi works the same way (a procedure reaches OpenAPI only with `meta.openapi`, on top of the router), and Convex chooses public vs internal in the core (`mutation` vs `internalMutation`). A `filter` for the fetch and oRPC adapters comes when someone needs one.
+
+### SQLite: not yet
+
+It's the next database after Postgres (no MySQL for now), waiting on a driver that holds up. Checked on 2026-11-22:
+
+- **Synchronous drivers** (better-sqlite3, node:sqlite, bun:sqlite) commit before an async mutation finishes. Drizzle's types reject them in `drizzleAdapter`.
+- **A local libsql file** failed 9 of 10 concurrent mutations with `SQLITE_BUSY` (0.17.4). Queueing writers in the process isn't enough: a reader open at commit, or a second writer, leaves a lock or a connection that can't commit ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361), open and reported on 0.18.0).
+- **Remote Turso** is the first candidate to prove. Untested, and its interactive transactions [time out after 5 seconds](https://docs.turso.tech/sdk/ts/reference#interactive-transactions).
+
+What would change it: those issues fixed, or remote Turso passing the Postgres outbox's tests.
 
 ### Cloudflare Queues (step 3)
 
