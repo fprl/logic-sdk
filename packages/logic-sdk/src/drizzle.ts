@@ -303,7 +303,7 @@ function storedJobs(db: PgClient, options: OutboxOptions, via?: Dispatcher): Sto
      * Inside the mutation's transaction: one unclaimed row per job. Due now: a sweep leaves it `PICKUP` seconds to this
      * request. Delayed: available from `runAt`, for a sweep.
      */
-    async enqueue(tx: unknown, jobs: Job[]) {
+    async enqueue(tx, jobs) {
       const client = tx as PgClient; // SAFETY: check() refuses a database that isn't this db, so tx is its transaction
       const firstTicks = await recordTicks(client, jobs.filter((j) => j.kind === "cron"));
       const row = (j: Job) => ({

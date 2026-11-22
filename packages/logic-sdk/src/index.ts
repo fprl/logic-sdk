@@ -130,7 +130,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
   // One implementation behind the typed signature of `Constructor`; `checkExposure` is the runtime half that matters.
   const make =
     <K extends Kind>(kind: K) =>
-    (def: any): any =>
+    (def: object) =>
       Object.freeze({ [BRAND]: kind, kind, ...def });
 
   return {
@@ -159,8 +159,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
      * `cron({ schedule: "0 9 * * 1", run: reports.sendWeekly, scope: system })`.
      */
     cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron => {
-      const { id, schedule, timezone, run, scope, attempts } = def;
-      const input = "input" in def ? def.input : undefined;
+      const { id, schedule, timezone, run, input, scope, attempts } = def;
       parseSchedule(schedule);
       if (timezone !== undefined) assertTimeZone(timezone);
       checkAttempts("cron", attempts);
@@ -290,16 +289,14 @@ function assertPlain(value: unknown, what: string, hint: string): void {
       return;
     }
     if (typeof v !== "object") return fail(`a ${typeof v}`);
-    const obj = v;
-    if (seen.has(obj)) fail("a circular reference");
-    seen.add(obj);
-    if (Array.isArray(obj)) obj.forEach((item, i) => check(item, `${path}[${i}]`));
+    if (seen.has(v)) fail("a circular reference");
+    seen.add(v);
+    if (Array.isArray(v)) v.forEach((item, i) => check(item, `${path}[${i}]`));
     else {
-      const proto = Object.getPrototypeOf(obj);
-      if (proto !== Object.prototype && proto !== null) fail(`a ${obj.constructor?.name ?? "class instance"}`);
-      for (const [k, item] of Object.entries(obj)) check(item, path ? `${path}.${k}` : k);
+      if (!isPlain(v)) fail(`a ${v.constructor?.name ?? "class instance"}`);
+      for (const [k, item] of Object.entries(v)) check(item, path ? `${path}.${k}` : k);
     }
-    seen.delete(obj);
+    seen.delete(v);
   };
   check(value, "");
 }
@@ -589,12 +586,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       const input = await prepare();
       let committed: { out: unknown; events: Envelope[]; jobs: Job[] };
       for (let attempt = 1; ; attempt++) {
-        let state: TxState | undefined;
         try {
           // SAFETY: createRegistry refuses mutations without a database that has interactive transactions
           committed = await database!.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
-            const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, events: [], calls: [], pending: [] });
+            const tx: TxState = { db: txDb, doomed: false, reason: undefined, events: [], calls: [], pending: [] };
             const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
@@ -610,13 +606,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
             continue;
           }
           throw e;
-        } finally {
-          if (state) await Promise.allSettled(state.pending);
         }
       }
 
       // committed. Nothing below may fail the caller.
-      if (committed.events.length || committed.jobs.length) await afterCommit(committed.events, committed.jobs);
+      await afterCommit(committed.events, committed.jobs);
       return committed.out;
     });
   }

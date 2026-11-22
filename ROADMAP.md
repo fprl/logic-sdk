@@ -12,7 +12,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
   - a typed scope
   - internal by default
 - **Don't claim "unique dooming".** Convex, Effect and Laravel also handle nested failures safely, with sub-transactions or savepoints. Only Rails commits partial writes when a caught error is ignored.
-- **Don't headline durability** until an outbox ships. Lead with the conventions, the test story and AI-legibility.
+- **Don't headline durability** until 0.5.0 is released and tried in a real app. Lead with the conventions, the test story and AI-legibility.
 - **Not Rails.** It's the business-logic layer only. Hono, Drizzle, Better Auth and the rest stay the user's choice.
 - **The layer under the framework:** "the Data Access Layer Next.js tells you to write, as a library." Redwood and Blitz died on host coupling.
 - **Adoptable one mutation at a time.** No DDD vocabulary in the API or docs.
@@ -38,23 +38,23 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
 
-1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (to approve). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
-2. **SQLite, plain (API).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
-3. **One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
-4. **The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
+1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
+2. **SQLite, plain (API, approved with the seam).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
+3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
+4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
 5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
 6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error.
 7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them.
 8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
-9. **Rolling deploys:** an old process fails a new listener's job at once. A recorded decision (DESIGN.md, "A job this code can't run"): revisit with the owner, don't change it quietly (API).
-10. **Casts and `!` left in the CLI,** and the type cost of per-kind meta (about 40% more instantiations on 1,200 functions).
+9. **Rolling deploys:** an old process fails a new listener's job at once. A recorded decision (DESIGN.md, "A job this code can't run"): revisit with the owner, don't change it quietly (API). Found on 2026-11-22: it contradicts "The jobs model". Laravel retries a missing class while tries are left ([CallQueuedHandler](https://github.com/laravel/framework/blob/1caec34a347d3bdd875b18d0e279aef9b80435c2/src/Illuminate/Queue/CallQueuedHandler.php) throws, the worker releases), and so does Oban. Prototyped the same: a job with three attempts survives a rolling deploy, one with the default single attempt still fails and waits for `retry(id)`.
+10. **Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
 11. **`logic-sdk show` lists every error a function can throw,** nested calls included (kind, code, where from), and `check` fails on a code that isn't a literal. Asked for and agreed on 2026-11-19 with the output designed, never built.
-12. **Docs that match what ships:** README, installation, WHY, one table of what each adapter guarantees, dedupe wording (the event id, in a record of that listener's own).
-13. **Outbox to consumer, tested as one:** `outbox(database, queue)` through `handleQueue`, the shop's Worker typed with real Worker types and its consumer run in workerd.
+12. **Done ([46](https://github.com/fprl/logic-sdk/pull/46)). Docs that match what ships:** README, installation, WHY, one table of what each adapter guarantees, dedupe wording (the event id, in a record of that listener's own).
+13. **Tested ([47](https://github.com/fprl/logic-sdk/pull/47), [49](https://github.com/fprl/logic-sdk/pull/49)), except real Worker types. Outbox to consumer, tested as one:** `outbox(database, queue)` through `handleQueue`, the shop's Worker typed with real Worker types and its consumer run in workerd.
 14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
 15. **Try it in a real app,** then release on an explicit go.
 
-Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option.
+Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, drop `transactions: "interactive"` from `DatabaseAdapter`, and refuse `retry: { attempts }` under 1 as listeners do.
 
 Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
@@ -71,9 +71,9 @@ Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional co
    - **Next:** Inngest (one Inngest function per listener, from `registry.definitions`) before the adapter contract is called stable. `key`, `dedupe` and `timeout` land with those adapters, refused in `check` where they can't be honoured. Drizzle 1.0 (RC) only, like the rest of the library.
    - **Done:** the database queue's claim tested with concurrent sweepers on real Postgres (CI sets `DATABASE_URL` for every workspace).
    - **SQLite and other ORMs:** see "Before 0.5.0".
-   - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `databaseQueue(db)` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
+   - **Then `vercelQueue`,** like `cloudflareQueue`: alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider.
    - **Listener options:** `attempts`, `delay` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
-   - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with the outbox (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).
+   - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with `databaseQueue` or `outbox` (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).
 
    Until per-listener options exist, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
 3. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.

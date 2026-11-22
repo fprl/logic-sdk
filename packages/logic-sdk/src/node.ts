@@ -53,14 +53,18 @@ export function startTicking(
 
   const startOfMinute = (ms: number) => Math.floor(ms / MINUTE) * MINUTE;
 
+  const track = (running: Set<Promise<void>>, work: Promise<unknown>) => {
+    const run = work.then(() => {}, onError);
+    running.add(run);
+    void run.finally(() => running.delete(run));
+  };
+
   const tick = (at: Date) => {
     if (ticks.size >= MAX_RUNNING) {
       onError(new Error(`[logic-sdk] skipped the ${at.toISOString()} tick: ${ticks.size} earlier ticks are still running. Is the database reachable?`));
       return;
     }
-    const running = registry.jobs.tick(at).then(() => {}, onError);
-    ticks.add(running);
-    void running.finally(() => ticks.delete(running));
+    track(ticks, registry.jobs.tick(at));
   };
 
   const armTick = (minute: number) => {
@@ -78,9 +82,7 @@ export function startTicking(
       onError(new Error(`[logic-sdk] skipped a sweep: ${sweeps.size} earlier sweeps are still running. Is a job hung, or the database unreachable?`));
       return;
     }
-    const running = registry.jobs.sweep().then(() => {}, onError);
-    sweeps.add(running);
-    void running.finally(() => sweeps.delete(running));
+    track(sweeps, registry.jobs.sweep());
   };
 
   armTick(startOfMinute(Date.now()) + MINUTE);

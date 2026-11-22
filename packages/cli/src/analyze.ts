@@ -15,9 +15,9 @@ export interface Edge {
   at: Loc;
   scope?: string[]; // scope keys this run changes: ctx.run(fn, input, { scope: { actor } }) → ["actor"]
 }
-/** An `export const name = …(…)` in a module file. Matched against the registry by id, so definer names don't matter. */
+/** An `export const name = …(…)` in a module file. Matched against the registry by module and export, so definer names don't matter. */
 export interface SourceFn {
-  id: string;
+  key: string; // `<module>.<export>`: the id can differ
   at: Loc;
   authorize?: string; // the policy as written (`authorize: member` → "member"), "inline", or undefined
   runs: Edge[];
@@ -96,11 +96,12 @@ const typeOnly = (s: Node) =>
 /** Every specifier a file loads: imports, re-exports, and `import("...")` with a string. `values`: skip type-only ones. */
 function specifiers(program: Node, values = false): { spec: string; start: number; decl?: Node }[] {
   const found: { spec: string; start: number; decl?: Node }[] = [];
-  for (const s of program.body)
+  for (const s of program.body) {
     if (values && typeOnly(s)) continue;
-    else if (s.type === "ImportDeclaration") found.push({ spec: s.source.value, start: s.start, decl: s });
-    else if ((s.type === "ExportNamedDeclaration" || s.type === "ExportAllDeclaration") && s.source)
+    if (s.type === "ImportDeclaration") found.push({ spec: s.source.value, start: s.start, decl: s });
+    if ((s.type === "ExportNamedDeclaration" || s.type === "ExportAllDeclaration") && s.source)
       found.push({ spec: s.source.value, start: s.start });
+  }
   walk(program, (n) => {
     const src = n.type === "ImportExpression" ? n.source : undefined;
     if (src?.type === "Literal" && typeof src.value === "string") found.push({ spec: src.value, start: n.start });
@@ -109,6 +110,142 @@ function specifiers(program: Node, values = false): { spec: string; start: numbe
 }
 
 export class ParseError extends Error {}
+
+/**
+ * Where ctx is in `fns`: the parameter at `param`, or any parameter named ctx (helpers: `findBooking(ctx, id)`).
+ * `run`/`emit` count only on it: `ctx.run(…)`, or destructured from it. Never `db.run(…)`.
+ */
+const ctxIn = (fns: Node[], param: number | "any") => {
+  const names = new Set(["ctx"]);
+  const direct = new Map<string, "run" | "emit">(); // local name → what it is
+  const configNames = new Map<string, string>(); // local name → the config path it holds ("" = all of config)
+  const configKeys: string[] = []; // keys read by destructuring: `{ config: { orders } }`, `const { maxItems } = ctx.config.orders`
+  const keyPath = (a: string, b: string) => (a ? `${a}.${b}` : b);
+  /** `{ orders, app: { url } }` taken from the config path `prefix`: each leaf is a key read, each name an alias. */
+  const fromConfigPattern = (pattern: Node, prefix: string) => {
+    for (const prop of pattern.properties ?? []) {
+      const key = prop.key?.name;
+      const value = prop.value?.type === "AssignmentPattern" ? prop.value.left : prop.value;
+      if (!key) {
+        if (prop.type === "RestElement" && prop.argument?.type === "Identifier") configNames.set(prop.argument.name, prefix);
+        continue;
+      }
+      if (value?.type === "ObjectPattern") fromConfigPattern(value, keyPath(prefix, key));
+      else {
+        configKeys.push(keyPath(prefix, key));
+        if (value?.type === "Identifier") configNames.set(value.name, keyPath(prefix, key));
+      }
+    }
+  };
+  const fromPattern = (pattern: Node | undefined, isCtx: boolean) => {
+    const p = pattern?.type === "AssignmentPattern" ? pattern.left : pattern;
+    if (p?.type === "Identifier" && isCtx) names.add(p.name);
+    if (p?.type === "ObjectPattern")
+      for (const prop of p.properties) {
+        const key = prop.key?.name;
+        const value = prop.value?.type === "AssignmentPattern" ? prop.value.left : prop.value;
+        if ((key === "run" || key === "emit") && value?.type === "Identifier") direct.set(value.name, key);
+        if (key === "config" && value?.type === "Identifier") configNames.set(value.name, "");
+        if (key === "config" && value?.type === "ObjectPattern") fromConfigPattern(value, "");
+      }
+  };
+  for (const f of fns) (param === "any" ? f.params : [f.params[param]]).forEach((p: Node) => fromPattern(p, param !== "any"));
+  const onCtx = (n: Node | undefined): boolean => {
+    const o = unwrap(n);
+    return o?.type === "Identifier" && names.has(o.name);
+  };
+  const kindOf = (call: Node): "run" | "emit" | undefined => {
+    if (call.callee.type === "Identifier") return direct.get(call.callee.name);
+    const prop = call.callee.type === "MemberExpression" && !call.callee.computed ? call.callee.property?.name : undefined;
+    return (prop === "run" || prop === "emit") && onCtx(call.callee.object) ? prop : undefined;
+  };
+  /**
+   * The config path an expression holds: `ctx.config.orders.maxItems` or `config.orders.maxItems` → "orders.maxItems",
+   * `ctx.config` → "" (all of it). `callee`: it's being called, so its last name is a method (`url.startsWith`), not a key.
+   */
+  const configPath = (expr: Node | undefined, callee = false): string | undefined => {
+    const path: string[] = [];
+    let cur = unwrap(expr);
+    while (cur?.type === "MemberExpression" && !cur.computed) {
+      path.unshift(cur.property.name);
+      cur = unwrap(cur.object);
+    }
+    if (callee || path.at(-1) === "length") path.pop();
+    if (cur?.type === "Identifier" && configNames.has(cur.name)) return path.reduce(keyPath, configNames.get(cur.name)!);
+    if (path[0] === "config" && onCtx(cur)) return path.slice(1).join(".");
+    return undefined;
+  };
+  // aliases, in source order: `const { run, config } = ctx`, `const c = ctx.config`, `const { maxItems } = c.orders`
+  walk(fns, (n) => {
+    if (n.type !== "VariableDeclarator") return;
+    const init = unwrap(n.init);
+    if (n.id?.type === "ObjectPattern" && init?.type === "Identifier" && names.has(init.name)) return fromPattern(n.id, false);
+    const held = configPath(init);
+    if (held === undefined) return;
+    if (n.id?.type === "Identifier") configNames.set(n.id.name, held);
+    if (n.id?.type === "ObjectPattern") fromConfigPattern(n.id, held);
+  });
+  return { kindOf, configPath, configKeys };
+};
+
+const ENV_PACKAGES = new Set(["process", "node:process"]);
+const directEnv = (program: Node, loc: (o: number) => Loc): { what: string; at: Loc }[] => {
+  const found: { what: string; at: Loc }[] = [];
+  const cf = new Set<string>(); // `import * as cf from "cloudflare:workers"`: cf.env counts
+  const processes = new Set(["process"]); // `import proc from "node:process"`: proc.env counts
+  for (const s of program.body) {
+    if (s.type !== "ImportDeclaration" || typeOnly(s)) continue;
+    const from = s.source.value;
+    for (const sp of s.specifiers) {
+      if (sp.importKind === "type") continue;
+      if (sp.type === "ImportSpecifier" && sp.imported?.name === "env" && (from === "cloudflare:workers" || ENV_PACKAGES.has(from)))
+        found.push({ what: `env from "${from}"`, at: loc(s.start) });
+      if (sp.type !== "ImportSpecifier" && from === "cloudflare:workers") cf.add(sp.local.name);
+      if (sp.type !== "ImportSpecifier" && ENV_PACKAGES.has(from)) processes.add(sp.local.name);
+    }
+  }
+  const isProcess = (n: Node | undefined): boolean => {
+    const o = unwrap(n);
+    if (o?.type === "Identifier") return processes.has(o.name);
+    return o?.type === "MemberExpression" && !o.computed && o.property?.name === "process" && ["globalThis", "global", "window", "self"].includes(o.object?.name);
+  };
+  walk(program, (n) => {
+    if (n.type === "MemberExpression") {
+      const key = n.computed ? (n.property?.type === "Literal" ? n.property.value : undefined) : n.property?.name;
+      if (key !== "env") return;
+      const o = unwrap(n.object);
+      if (isProcess(o)) found.push({ what: "process.env", at: loc(n.start) });
+      else if (o?.type === "MetaProperty") found.push({ what: "import.meta.env", at: loc(n.start) });
+      else if (o?.type === "Identifier" && o.name === "Bun") found.push({ what: "Bun.env", at: loc(n.start) });
+      else if (o?.type === "Identifier" && cf.has(o.name)) found.push({ what: 'env from "cloudflare:workers"', at: loc(n.start) });
+    }
+    // const { env } = process
+    if (n.type === "VariableDeclarator" && n.id?.type === "ObjectPattern" && isProcess(n.init) && n.id.properties.some((p: Node) => p.key?.name === "env"))
+      found.push({ what: "process.env", at: loc(n.start) });
+  });
+  return found;
+};
+
+/** Record checks must be sync and their result used. */
+function canIssues(program: Node, loc: (o: number) => Loc): CanIssue[] {
+  const cans: CanIssue[] = [];
+  walk(program, (n) => {
+    const fnName =
+      n.type === "FunctionDeclaration" ? n.id?.name
+      : n.type === "VariableDeclarator" && isFunction(unwrap(n.init)) ? n.id?.name
+      : (n.type === "Property" || n.type === "MethodDefinition") && isFunction(n.value) ? n.key?.name
+      : undefined;
+    const fnNode = n.type === "FunctionDeclaration" ? n : n.type === "VariableDeclarator" ? unwrap(n.init) : n.value;
+    if (fnName && CAN.test(fnName) && fnNode?.async) cans.push({ code: "async-can", name: fnName, how: "declared", at: loc(n.start) });
+    const awaited = n.type === "AwaitExpression" ? unwrap(n.argument) : undefined;
+    if (awaited?.type === "CallExpression" && CAN.test(calleeName(awaited) ?? ""))
+      cans.push({ code: "async-can", name: calleeName(awaited)!, how: "awaited", at: loc(n.start) });
+    const discarded = n.type === "ExpressionStatement" ? unwrap(n.expression) : undefined;
+    if (discarded?.type === "CallExpression" && CAN.test(calleeName(discarded) ?? ""))
+      cans.push({ code: "unused-can", name: calleeName(discarded)!, how: "discarded", at: loc(n.start) });
+  });
+  return cans;
+}
 
 export function analyze(root: string, registryFile: string): Source {
   // tsconfig `paths` (found from each file, like tsc) and package.json `imports` (#alias) resolve like any import.
@@ -221,122 +358,8 @@ export function analyze(root: string, registryFile: string): Source {
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
   type Found = Pick<SourceFn, "runs" | "emits" | "checks" | "config">;
 
-  /**
-   * Where ctx is in `fns`: the parameter at `param`, or any parameter named ctx (helpers: `findBooking(ctx, id)`).
-   * `run`/`emit` count only on it: `ctx.run(…)`, or destructured from it. Never `db.run(…)`.
-   */
-  const ctxIn = (fns: Node[], param: number | "any") => {
-    const names = new Set(["ctx"]);
-    const direct = new Map<string, "run" | "emit">(); // local name → what it is
-    const configNames = new Map<string, string>(); // local name → the config path it holds ("" = all of config)
-    const configKeys: string[] = []; // keys read by destructuring: `{ config: { orders } }`, `const { maxItems } = ctx.config.orders`
-    const join = (a: string, b: string) => (a ? `${a}.${b}` : b);
-    /** `{ orders, app: { url } }` taken from the config path `prefix`: each leaf is a key read, each name an alias. */
-    const fromConfigPattern = (pattern: Node, prefix: string) => {
-      for (const prop of pattern.properties ?? []) {
-        const key = prop.key?.name;
-        const value = prop.value?.type === "AssignmentPattern" ? prop.value.left : prop.value;
-        if (!key) {
-          if (prop.type === "RestElement" && prop.argument?.type === "Identifier") configNames.set(prop.argument.name, prefix);
-          continue;
-        }
-        if (value?.type === "ObjectPattern") fromConfigPattern(value, join(prefix, key));
-        else {
-          configKeys.push(join(prefix, key));
-          if (value?.type === "Identifier") configNames.set(value.name, join(prefix, key));
-        }
-      }
-    };
-    const fromPattern = (pattern: Node | undefined, isCtx: boolean) => {
-      const p = pattern?.type === "AssignmentPattern" ? pattern.left : pattern;
-      if (p?.type === "Identifier" && isCtx) names.add(p.name);
-      if (p?.type === "ObjectPattern")
-        for (const prop of p.properties) {
-          const key = prop.key?.name;
-          const value = prop.value?.type === "AssignmentPattern" ? prop.value.left : prop.value;
-          if ((key === "run" || key === "emit") && value?.type === "Identifier") direct.set(value.name, key);
-          if (key === "config" && value?.type === "Identifier") configNames.set(value.name, "");
-          if (key === "config" && value?.type === "ObjectPattern") fromConfigPattern(value, "");
-        }
-    };
-    for (const f of fns) (param === "any" ? f.params : [f.params[param]]).forEach((p: Node) => fromPattern(p, param !== "any"));
-    const onCtx = (n: Node | undefined): boolean => {
-      const o = unwrap(n);
-      return o?.type === "Identifier" && names.has(o.name);
-    };
-    const kindOf = (call: Node): "run" | "emit" | undefined => {
-      if (call.callee.type === "Identifier") return direct.get(call.callee.name);
-      const prop = call.callee.type === "MemberExpression" && !call.callee.computed ? call.callee.property?.name : undefined;
-      return (prop === "run" || prop === "emit") && onCtx(call.callee.object) ? prop : undefined;
-    };
-    /**
-     * The config path an expression holds: `ctx.config.orders.maxItems` or `config.orders.maxItems` → "orders.maxItems",
-     * `ctx.config` → "" (all of it). `callee`: it's being called, so its last name is a method (`url.startsWith`), not a key.
-     */
-    const configPath = (expr: Node | undefined, callee = false): string | undefined => {
-      const path: string[] = [];
-      let cur = unwrap(expr);
-      while (cur?.type === "MemberExpression" && !cur.computed) {
-        path.unshift(cur.property.name);
-        cur = unwrap(cur.object);
-      }
-      if (callee || path.at(-1) === "length") path.pop();
-      if (cur?.type === "Identifier" && configNames.has(cur.name)) return path.reduce(join, configNames.get(cur.name)!);
-      if (path[0] === "config" && onCtx(cur)) return path.slice(1).join(".");
-      return undefined;
-    };
-    // aliases, in source order: `const { run, config } = ctx`, `const c = ctx.config`, `const { maxItems } = c.orders`
-    walk(fns, (n) => {
-      if (n.type !== "VariableDeclarator") return;
-      const init = unwrap(n.init);
-      if (n.id?.type === "ObjectPattern" && init?.type === "Identifier" && names.has(init.name)) return fromPattern(n.id, false);
-      const held = configPath(init);
-      if (held === undefined) return;
-      if (n.id?.type === "Identifier") configNames.set(n.id.name, held);
-      if (n.id?.type === "ObjectPattern") fromConfigPattern(n.id, held);
-    });
-    return Object.assign(kindOf, { configPath, configKeys });
-  };
-
   // Environment reads: modules get settings from ctx.config, so neither they nor what they import read env.
   const env: EnvRead[] = [];
-  const ENV_PACKAGES = new Set(["process", "node:process"]);
-  const directEnv = (program: Node, loc: (o: number) => Loc): { what: string; at: Loc }[] => {
-    const found: { what: string; at: Loc }[] = [];
-    const cf = new Set<string>(); // `import * as cf from "cloudflare:workers"`: cf.env counts
-    const processes = new Set(["process"]); // `import proc from "node:process"`: proc.env counts
-    for (const s of program.body) {
-      if (s.type !== "ImportDeclaration" || typeOnly(s)) continue;
-      const from = s.source.value;
-      for (const sp of s.specifiers) {
-        if (sp.importKind === "type") continue;
-        if (sp.type === "ImportSpecifier" && sp.imported?.name === "env" && (from === "cloudflare:workers" || ENV_PACKAGES.has(from)))
-          found.push({ what: `env from "${from}"`, at: loc(s.start) });
-        if (sp.type !== "ImportSpecifier" && from === "cloudflare:workers") cf.add(sp.local.name);
-        if (sp.type !== "ImportSpecifier" && ENV_PACKAGES.has(from)) processes.add(sp.local.name);
-      }
-    }
-    const isProcess = (n: Node | undefined): boolean => {
-      const o = unwrap(n);
-      if (o?.type === "Identifier") return processes.has(o.name);
-      return o?.type === "MemberExpression" && !o.computed && o.property?.name === "process" && ["globalThis", "global", "window", "self"].includes(o.object?.name);
-    };
-    walk(program, (n) => {
-      if (n.type === "MemberExpression") {
-        const key = n.computed ? (n.property?.type === "Literal" ? n.property.value : undefined) : n.property?.name;
-        if (key !== "env") return;
-        const o = unwrap(n.object);
-        if (isProcess(o)) found.push({ what: "process.env", at: loc(n.start) });
-        else if (o?.type === "MetaProperty") found.push({ what: "import.meta.env", at: loc(n.start) });
-        else if (o?.type === "Identifier" && o.name === "Bun") found.push({ what: "Bun.env", at: loc(n.start) });
-        else if (o?.type === "Identifier" && cf.has(o.name)) found.push({ what: 'env from "cloudflare:workers"', at: loc(n.start) });
-      }
-      // const { env } = process
-      if (n.type === "VariableDeclarator" && n.id?.type === "ObjectPattern" && isProcess(n.init) && n.id.properties.some((p: Node) => p.key?.name === "env"))
-        found.push({ what: "process.env", at: loc(n.start) });
-    });
-    return found;
-  };
   /** App files a file loads at runtime (not packages, not modules, not type-only imports). */
   const appImports = (file: string, program: Node) =>
     specifiers(program, true).flatMap(({ spec, start }) => {
@@ -351,7 +374,11 @@ export function analyze(root: string, registryFile: string): Source {
     visiting.add(file);
     const { program, loc } = read(file);
     let found: { what: string; at: Loc } | null = directEnv(program, loc)[0] ?? null;
-    for (const { target } of found ? [] : appImports(file, program)) if ((found = envVia(target, visiting))) break;
+    if (!found)
+      for (const { target } of appImports(file, program)) {
+        found = envVia(target, visiting);
+        if (found) break;
+      }
     visiting.delete(file);
     envMemo.set(file, found);
     return found;
@@ -405,54 +432,45 @@ export function analyze(root: string, registryFile: string): Source {
       const k = key || "*"; // "*": all of it escaped (passed on whole), so any key may be read
       if (!found.config.includes(k)) found.config.push(k);
     };
-    const follow = (node: unknown, file: File, ctxCall: ReturnType<typeof ctxIn>, found: Found, seen: Set<Node>) => {
-      for (const k of ctxCall.configKeys) readConfig(found, k);
+    const follow = (node: unknown, file: File, ctx: ReturnType<typeof ctxIn>, found: Found, seen: Set<Node>) => {
+      for (const k of ctx.configKeys) readConfig(found, k);
       const callees = new Set<Node>();
       walk(node, (n) => {
         if (n.type === "MemberExpression") {
-          const key = ctxCall.configPath(n, callees.has(n));
+          const key = ctx.configPath(n, callees.has(n));
           if (key) readConfig(found, key); // "" here is `ctx.config` itself, the start of a longer path
         }
         if (n.type !== "CallExpression") return;
         if (n.callee.type === "MemberExpression") callees.add(n.callee); // walked after its call: see the method
-        for (const arg of n.arguments) if (arg.type === "Identifier" || ctxCall.configPath(arg) === "") readConfig(found, ctxCall.configPath(arg));
+        for (const arg of n.arguments) {
+          const key = ctx.configPath(arg);
+          // handed on: a destructured setting, or all of config. A longer path is read as a member expression
+          if (arg.type === "Identifier" || key === "") readConfig(found, key);
+        }
         const name = calleeName(n);
-        const kind = ctxCall(n);
+        const kind = ctx.kindOf(n);
         if (kind === "run") found.runs.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start), ...scopeOf(n.arguments[2]) });
         else if (kind === "emit") found.emits.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
         else if (name && CAN.test(name)) {
           if (!found.checks.includes(name)) found.checks.push(name);
         } else if (name && n.callee.type === "Identifier")
-          for (const h of helpers.get(name) ?? [])
-            if (!seen.has(h.node)) follow(h.node.body, h.file, ctxIn([h.node], "any"), found, seen.add(h.node));
+          for (const h of helpers.get(name) ?? []) {
+            if (seen.has(h.node)) continue;
+            seen.add(h.node);
+            follow(h.node.body, h.file, ctxIn([h.node], "any"), found, seen);
+          }
       });
     };
 
     for (const file of files) {
       const { program, loc, docAt } = file;
 
-      // Record checks must be sync and their result used
-      walk(program, (n) => {
-        const fnName =
-          n.type === "FunctionDeclaration" ? n.id?.name
-          : n.type === "VariableDeclarator" && isFunction(unwrap(n.init)) ? n.id?.name
-          : (n.type === "Property" || n.type === "MethodDefinition") && isFunction(n.value) ? n.key?.name
-          : undefined;
-        const fnNode = n.type === "FunctionDeclaration" ? n : n.type === "VariableDeclarator" ? unwrap(n.init) : n.value;
-        if (fnName && CAN.test(fnName) && fnNode?.async) cans.push({ code: "async-can", name: fnName, how: "declared", at: loc(n.start) });
-        const awaited = n.type === "AwaitExpression" ? unwrap(n.argument) : undefined;
-        if (awaited?.type === "CallExpression" && CAN.test(calleeName(awaited) ?? ""))
-          cans.push({ code: "async-can", name: calleeName(awaited)!, how: "awaited", at: loc(n.start) });
-        const discarded = n.type === "ExpressionStatement" ? unwrap(n.expression) : undefined;
-        if (discarded?.type === "CallExpression" && CAN.test(calleeName(discarded) ?? ""))
-          cans.push({ code: "unused-can", name: calleeName(discarded)!, how: "discarded", at: loc(n.start) });
-      });
-
+      cans.push(...canIssues(program, loc));
       for (const s of program.body) {
         const decl = s.type === "ExportNamedDeclaration" ? s.declaration?.declarations?.[0] : undefined;
         const call = unwrap(decl?.init);
         if (call?.type !== "CallExpression" || decl.id?.type !== "Identifier") continue;
-        const fn: SourceFn = { id: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], fetches: [], dates: [], doc: docAt(s.start) };
+        const fn: SourceFn = { key: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], fetches: [], dates: [], doc: docAt(s.start) };
 
         const def = call.arguments[0];
         const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];
@@ -476,7 +494,7 @@ export function analyze(root: string, registryFile: string): Source {
         follow(call.arguments, file, ctxIn(handlers, 0), fn, new Set());
         // keep the most specific keys: `orders.maxItems`, not also `orders`
         fn.config = fn.config.includes("*") ? ["*"] : fn.config.filter((k) => !fn.config.some((o) => o.startsWith(k + "."))).sort();
-        fns.set(fn.id, fn);
+        fns.set(fn.key, fn);
       }
     }
   }
