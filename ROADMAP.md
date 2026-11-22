@@ -38,7 +38,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
 
-1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. Drizzle keeps `databaseQueue(db)` and its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
+1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (to approve). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
 2. **SQLite, plain (API).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
 3. **One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
 4. **The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
