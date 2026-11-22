@@ -211,11 +211,16 @@ for (const [driver, connect] of Object.entries(drivers)) {
   });
 }
 
+test("a new Drizzle database over one client is the same connection: refused", () => {
+  const client = new DatabaseSync(newFile());
+  expect(() => drizzleAdapter(() => nodeSqlite({ client }))).toThrow(/opens a new connection each time/);
+});
+
 describe("SQLite: waiting for the writer", () => {
   function setup() {
     const file = newFile();
     const open = () => nodeSqlite(file);
-    return { database: drizzleAdapter(open), ...init<{ scope: object; db: DrizzleDb<ReturnType<typeof open>> }>() };
+    return { open, database: drizzleAdapter(open), ...init<{ scope: object; db: DrizzleDb<ReturnType<typeof open>> }>() };
   }
 
   test("a line that moves is waited for, however long", async () => {
@@ -223,6 +228,16 @@ describe("SQLite: waiting for the writer", () => {
     const slow = mutation({ async handler() { await sleep(80); } });
     const app = createRegistry({ modules: { x: { slow } }, database }).as({});
     await Promise.all(Array.from({ length: 75 }, () => app.run(slow))); // 6 seconds in all
+  });
+
+  test("another process's lock doesn't count against the transaction ahead", async () => {
+    const { mutation, createRegistry, database, open } = setup();
+    const other = open();
+    other.run(sql`begin immediate`);
+    setTimeout(() => other.run(sql`commit`), 4000);
+    const slow = mutation({ async handler() { await sleep(1500); } });
+    const app = createRegistry({ modules: { x: { slow } }, database }).as({});
+    await Promise.all([app.run(slow), app.run(slow)]); // the second waits 5.5 seconds, 1.5 of them for a transaction here
   });
 
   test("a mutation waiting for a call behind it fails after 5 seconds instead of hanging", async () => {

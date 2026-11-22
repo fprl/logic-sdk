@@ -361,7 +361,7 @@ It's the next database after Postgres (no MySQL for now). What didn't hold up, c
 
 - **A connection per transaction, closed at its end.** On a kept writer, a write that arrived after a rollback was saved, or joined the next caller's transaction; Postgres drivers refuse it ("Transaction is closed"). It's why the function shape pays off. It costs 0.1 ms with a small schema, about 1 ms with 500 tables.
 - **WAL is set where the lock is taken, inside its async retry.** Set at startup, 57 of 96 processes that started together on a new file failed with "database is locked".
-- **The 5 second limit is on the transaction ahead, not on the line.** A limit on the whole wait failed 39 of 100 honest mutations of 80 ms. Without any limit a mutation awaiting `registry.as().run` hangs forever.
+- **The 5 second limit is on the transaction ahead, not on the line.** A limit on the whole wait failed 39 of 100 honest mutations of 80 ms. Without any limit a mutation awaiting `registry.as().run` hangs forever. Its clock restarts while the head waits for another process: counting that wait failed the line behind with the wrong error, which isn't retried (Fable's breaker).
 - **SQLite's own busy timeout is 0 for writers:** on a synchronous driver it stops the event loop, and with it the owner of the lock. Rails' busy handler sleeps outside the lock for the same reason.
 - **The reader is `query_only`,** so a query that writes fails at runtime, not only in the types.
 - **Every statement has `RETURNING`:** better-sqlite3's `all()` refuses one that returns nothing.

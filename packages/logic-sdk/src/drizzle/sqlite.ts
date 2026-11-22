@@ -45,8 +45,8 @@ export function drizzleAdapter<Db extends SyncSqlite>(
 
   const takeTurn = turns();
   const transaction = <T>(fn: (tx: DrizzleTx<Db>) => Promise<T>) =>
-    takeTurn(async () => {
-      const tx = await begin(open);
+    takeTurn(async (restartClock) => {
+      const tx = await begin(open, restartClock);
       try {
         const out = await fn(tx);
         exec(tx, "COMMIT");
@@ -114,7 +114,7 @@ function undo(db: Pick<SyncSqlite, "run">, ...statements: string[]) {
 /** Refused at startup: either mistake would otherwise show up later, as missing writes or a closed connection. */
 function checkOpen<Db extends SyncSqlite>(open: () => Db, reader: Db) {
   const another = open();
-  if (another === reader)
+  if (another.$client === reader.$client)
     throw new Error('[logic-sdk] drizzleAdapter needs a function that opens a new connection each time: drizzleAdapter(() => drizzle("app.db")).');
   const [main] = another.all<{ file: string }>(sql`PRAGMA database_list`);
   another.$client.close();
@@ -126,9 +126,10 @@ function checkOpen<Db extends SyncSqlite>(open: () => Db, reader: Db) {
  * A new connection that holds the write lock. Another process may have it: we wait here, with the event loop free,
  * since waiting inside SQLite stops the whole process on a synchronous driver (Rails' busy handler, for the same reason).
  */
-async function begin<Db extends SyncSqlite>(open: () => Db): Promise<Db> {
+async function begin<Db extends SyncSqlite>(open: () => Db, restartClock: () => void): Promise<Db> {
   const deadline = Date.now() + BUSY_TIMEOUT;
   for (;;) {
+    restartClock(); // those behind us in line time how long we hold the lock, not how long another process does
     let tx: Db | undefined;
     try {
       tx = open();
@@ -146,12 +147,15 @@ async function begin<Db extends SyncSqlite>(open: () => Db): Promise<Db> {
 
 /**
  * One at a time, in order, since SQLite has one writer. Waiting in a line that moves is fine, however long. It fails
- * when the transaction ahead has run for 5 seconds: often one that waits for a call behind it in this line, forever.
+ * when the transaction ahead has held the lock for 5 seconds: often one that waits for a call behind it, forever.
  */
 function turns() {
   let last = Promise.resolve();
   let startedAt = 0;
-  return async <T>(work: () => Promise<T>): Promise<T> => {
+  const restartClock = () => {
+    startedAt = Date.now();
+  };
+  return async <T>(work: (restartClock: () => void) => Promise<T>): Promise<T> => {
     const arrived = Date.now();
     const ahead = last;
     const done = Promise.withResolvers<void>();
@@ -162,8 +166,8 @@ function turns() {
         // the one ahead may have changed while we waited: the line moved
         if (Date.now() >= giveUpAt()) throw new Error(HELD);
       }
-      startedAt = Date.now();
-      return await work();
+      restartClock();
+      return await work(restartClock);
     } finally {
       done.resolve();
     }
@@ -171,7 +175,7 @@ function turns() {
 }
 
 const HELD =
-  "[logic-sdk] Waited 5 seconds for a transaction in this process, and SQLite writes one at a time. Does a mutation await registry.as(scope).run instead of ctx.run, or do slow work that belongs in an action?";
+  "[logic-sdk] Waited 5 seconds for a transaction in this process, and SQLite writes one at a time. Does a mutation await registry.as(scope).run instead of ctx.run, or do slow work that belongs in an action? In tests, is a t.begin() still open?";
 
 /** Whether `promise` settles by then. The timer is cleared, so a process with nothing else to do can exit. */
 const settlesBy = (promise: Promise<void>, time: number) =>

@@ -35,7 +35,7 @@ You give one function that opens the file. The adapter does what Rails does: WAL
   };
   ```
 
-- **Writes go one at a time.** A line that moves is waited for, however long. One transaction that runs for more than 5 seconds fails the ones waiting behind it, so keep slow work in actions.
+- **Writes go one at a time.** A line that moves is waited for, however long. One transaction that holds the lock for more than 5 seconds fails the ones waiting behind it, so keep slow work in actions. Time spent waiting for another process doesn't count.
 - **Use `ctx.run` inside a mutation, never `registry.as(scope).run`:** that one waits behind the mutation that's waiting for it. It fails after 5 seconds and says so.
 - **Another process holding the file** is waited for without blocking the event loop. Still locked after 5 seconds, the mutation is retried: `drizzleAdapter(open, { transactionAttempts })`, three tries by default.
 - **Scripts write through mutations,** or through a connection of their own (`open()`). `database.db` refuses writes.
@@ -55,7 +55,7 @@ Without Drizzle, `logic-sdk/sqlite` has the same two functions and `jobsSchema`,
 
 ## Tests
 
-`createTestRegistry` works as on Postgres: each test is rolled back. `":memory:"` is refused, because every connection would get a database of its own, so give tests a file in a temporary folder.
+`createTestRegistry` works as on Postgres: each test is rolled back. `":memory:"` is refused, because every connection would get a database of its own, so give tests a file in a temporary folder. A failure SQLite rolls back by itself ends the test's transaction too, so what that test writes afterwards stays in the file.
 
 ## What it runs on
 
