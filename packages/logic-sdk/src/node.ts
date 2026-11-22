@@ -1,7 +1,7 @@
 import type { Jobs } from "./index.ts";
 
 export interface TickingOptions {
-  /** Seconds between sweeps: the outbox's retries, delayed jobs and what a crash left behind. Default 60; 0 turns it off. */
+  /** Seconds between sweeps: databaseQueue's retries, delayed jobs and what a crash left behind. Default 60; 0 turns it off. */
   sweepEvery?: number;
   /** Where a failed tick or sweep goes, and a skipped minute. Default `console.error`. */
   onError?: (error: unknown) => void;

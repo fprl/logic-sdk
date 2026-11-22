@@ -82,7 +82,7 @@ test("a job over 128 KB fails the send with a clear error, reported after commit
   expect(reported).toEqual([expect.stringMatching(/bytes; Cloudflare Queues take 128000 per message. Keep payloads to ids/)]);
 });
 
-test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry says to put the outbox in front", async () => {
+test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry says to put an outbox in front", async () => {
   const later = listener({ event: () => happened, delay: 90, async handler() {} });
   const queue = fakeQueue();
   const registry = createRegistry({ modules: { x: { happened, emit, later } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue), scope: { load: (saved) => saved } } });
@@ -91,7 +91,7 @@ test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry 
 
   const tooLate = listener({ event: () => happened, delay: 90_000, async handler() {} });
   expect(() => createRegistry({ modules: { x: { happened, emit, tooLate } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue), scope: { load: (saved) => saved } } })).toThrow(
-    /x\.tooLate waits 90000s; your jobs adapter holds jobs for at most 86400s\. Put outbox\(db\) in front/,
+    /x\.tooLate waits 90000s; your jobs adapter holds jobs for at most 86400s\. Put an outbox in front/,
   );
 });
 

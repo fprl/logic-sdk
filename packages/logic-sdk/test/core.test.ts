@@ -614,8 +614,8 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
-  expect(() => make()).toThrow(/x\.later waits 90s, but your jobs adapter can't hold jobs \(inProcess\(\) can't\)\. Use outbox\(db\)/);
-  expect(() => make({ holds: { max: 60 }, async deliver() {} })).toThrow(/holds jobs for at most 60s\. Put outbox\(db\) in front/);
+  expect(() => make()).toThrow(/x\.later waits 90s, but your jobs adapter can't hold jobs \(inProcess\(\) can't\)\. Use databaseQueue\(db\)/);
+  expect(() => make({ holds: { max: 60 }, async deliver() {} })).toThrow(/holds jobs for at most 60s\. Put an outbox in front/);
   expect(ran).toEqual([]);
 });
 
@@ -1183,11 +1183,11 @@ test("ctx.schedule replace: refused where nothing can replace (in-process), and 
   const ping = action({ async handler() {} });
   const go = mutation({ input: z.object({ key: z.string() }), async handler(ctx, { key }) { ctx.schedule(ping, undefined, { delay: 0, replace: key }); } });
   const app = createRegistry<Scope>({ modules: { x: { ping, go } }, database: memoryDatabase() }).as({ actor: "a", locale: "es" });
-  await expect(app.run(go, { key: "b1" })).rejects.toThrow(/your jobs adapter can't replace one it already has\. Use outbox\(db\)/);
+  await expect(app.run(go, { key: "b1" })).rejects.toThrow(/your jobs adapter can't replace one it already has\. Use databaseQueue\(db\)/);
   await expect(app.run(go, { key: "" })).rejects.toThrow(/replace must be a non-empty key/);
 });
 
-test("testing: the test registry holds what your adapter holds, so a missing outbox fails in tests too", async () => {
+test("testing: the test registry holds what your adapter holds, so a missing database queue fails in tests too", async () => {
   const { registry: onInProcess, book } = scheduleSetup({ jobs: {} });
   const t = createTestRegistry(onInProcess);
   await t.begin();

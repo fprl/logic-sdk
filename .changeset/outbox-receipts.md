@@ -2,12 +2,7 @@
 "logic-sdk": minor
 ---
 
-**The outbox no longer fails or loses jobs it shouldn't.** `outboxTable` has two new columns, so generate a migration (`drizzle-kit generate`):
-
-```sql
-ALTER TABLE "logic_outbox" ADD COLUMN "receipt" text;
-ALTER TABLE "logic_outbox" ADD COLUMN "failed_at" timestamp with time zone;
-```
+**`databaseQueue` and `outbox` don't fail or lose jobs they shouldn't.** `jobsTable` has `receipt` and `failed_at` for it.
 
 - A slow or dead listener no longer fails the others of the same commit: each job is claimed just before it runs.
 - After `registry.jobs.retry(id)`, the runner that had lost the job can no longer finish, and delete, the new run's row: each claim has its own receipt.

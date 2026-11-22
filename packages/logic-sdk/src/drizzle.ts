@@ -48,7 +48,8 @@ export function sqlState(error: unknown): string | undefined {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Outbox: events written in the mutation's transaction, delivered after commit, retried until done
+ * Jobs in your database, written in the mutation's transaction: run from there (databaseQueue), or kept until a queue
+ * has them (outbox)
  * ──────────────────────────────────────────────────────────────────────────── */
 
 /** Seconds a job due now waits for the request that queued it, before a sweep may take it: how soon a crash after commit is noticed. */
@@ -70,12 +71,12 @@ interface Claim {
 const waiting = sql`status = 'pending' and attempts = 0`;
 
 /**
- * The outbox table (Postgres). Re-export it from your schema so drizzle-kit adds it to your migrations:
- * `export { outboxTable } from "logic-sdk/drizzle";`. One row per pending job; done rows are deleted,
- * failed ones stay so you can query them and `retry` them.
+ * The table behind `databaseQueue` and `outbox` (Postgres), Laravel's `jobs`. Re-export it from your schema so
+ * drizzle-kit adds it to your migrations: `export { jobsTable } from "logic-sdk/drizzle";`. One row per pending job;
+ * done rows are deleted, failed ones stay so you can query them and `retry` them.
  */
-export const outboxTable = pgTable(
-  "logic_outbox",
+export const jobsTable = pgTable(
+  "logic_jobs",
   {
     /** The job id: `<listener id>@<event id>`, `<cron id>@<minute>`, or `<function id>@<uuid>`. */
     id: text("id").primaryKey(),
@@ -96,15 +97,15 @@ export const outboxTable = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("logic_outbox_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
+    index("logic_jobs_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
     // one waiting call per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
-    uniqueIndex("logic_outbox_replace").on(t.replaceKey).where(waiting),
+    uniqueIndex("logic_jobs_replace").on(t.replaceKey).where(waiting),
   ],
 );
 
 /**
  * The cron runs already ticked, so a minute ticked twice (several servers, a redelivered trigger) runs once, like
- * Solid Queue's recurring executions. Re-export it next to `outboxTable` when you have crons. Rows older than a day go.
+ * Solid Queue's recurring executions. Re-export it next to `jobsTable` when you have crons. Rows older than a day go.
  */
 export const cronRunsTable = pgTable("logic_cron_runs", {
   /** The cron job's id, `<cron id>@<minute>`. */
@@ -112,32 +113,32 @@ export const cronRunsTable = pgTable("logic_cron_runs", {
   ranAt: timestamp("ran_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export interface OutboxOptions {
+export interface DatabaseQueueOptions {
   /**
    * Seconds a runner owns a job before a sweep may take it over: how soon a crash is noticed. Default 300. A running
    * job extends it every third of it, for 15 minutes, so it needn't cover your slowest listener, unless one takes
-   * longer than that. With `via`, it only covers the handoff, so it's how soon a handoff that crashed is tried again.
+   * longer than that.
    */
   lease?: number;
-  /**
-   * Hand jobs to a queue instead of running them here: `outbox(db, { via: cloudflareQueue(env.JOBS) })`. The row makes the
-   * handoff durable, and the jobs of one commit go in one send. After it, the queue runs them and redelivers what throws;
-   * a job that fails for good comes back here as a failed row. A send that lands but whose row isn't deleted is sent
-   * again, so a job can run twice, even at once.
-   */
-  via?: Dispatcher;
-  /**
-   * Failed sends to `via` before the row is marked failed. Default 10: about 3.5 hours of backoff in all. A listener's
-   * own tries are its `attempts`.
-   */
-  maxAttempts?: number;
   /** Seconds to wait after a failed try. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
   backoff?: (attempt: number) => number;
 }
 
-/** The outbox adapter. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
-export interface Outbox extends Dispatcher {
-  /** Retries whose backoff is over and deliveries whose runner crashed (lease expired), claimed one at a time. */
+export interface OutboxOptions {
+  /** Seconds a send owns its jobs: how soon one that crashed is sent again. Default 300. */
+  lease?: number;
+  /** Seconds to wait after a failed send. Default `Math.exp(Math.min(attempt, 10))`, the curve Graphile Worker uses. */
+  backoff?: (attempt: number) => number;
+  /**
+   * Failed sends before the row is marked failed. Default 10: about 3.5 hours of backoff in all. A listener's own tries
+   * are its `attempts`.
+   */
+  maxAttempts?: number;
+}
+
+/** What `databaseQueue` and `outbox` return. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
+export interface StoredJobs extends Dispatcher {
+  /** What's due (retries, delayed jobs, what a crash left behind), claimed one at a time. */
   sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed row back in line, with a fresh set of attempts. `false` when no failed row has that id. */
   retry(id: string): Promise<boolean>;
@@ -147,20 +148,40 @@ export interface Outbox extends Dispatcher {
 type PgClient = Pick<PgAsyncDatabase<PgQueryResultHKT>, "insert" | "update" | "delete" | "select">;
 
 /**
- * A durable dispatcher: deliveries are rows written in the mutation's transaction, so a committed event is never lost.
- * After commit the request runs them (through `waitUntil` on serverless); `sweep` picks up what a crash or a failure
- * left behind. At least once: a crash between a listener finishing and its row being deleted runs it again.
+ * Your database as the queue, like Laravel's `database` driver: jobs are rows written in the mutation's transaction, so
+ * a committed one is never lost. After commit the request runs them (through `waitUntil` on serverless), so no worker
+ * is needed; `sweep` picks up what a crash or a failure left behind. At least once: a crash between a job finishing and
+ * its row being deleted runs it again.
  *
  * ```ts
- * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { store, load } } });
+ * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { store, load } } });
  * startTicking(registry); // from logic-sdk/node, or registry.jobs.sweep() from a platform's cron trigger
  * ```
  */
-export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
+export function databaseQueue(db: PgClient, options: DatabaseQueueOptions = {}): StoredJobs {
+  return storedJobs(db, options);
+}
+
+/**
+ * The outbox pattern: a table in front of another queue. Jobs are rows written in the mutation's transaction, kept only
+ * until `queue` has them: the jobs of one commit go in one send. Then the queue runs them and redelivers what throws;
+ * one that fails for good comes back here as a failed row. A send that lands but whose row isn't deleted is sent again,
+ * so a job can run twice, even at once.
+ *
+ * ```ts
+ * jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope: { store, load } }
+ * ```
+ */
+export function outbox(db: PgClient, queue: Dispatcher, options: OutboxOptions = {}): StoredJobs {
+  return storedJobs(db, options, queue);
+}
+
+/** Both: rows in `jobsTable`, claimed by receipt. Without `via` they run here; with it they're sent. */
+function storedJobs(db: PgClient, options: OutboxOptions, via?: Dispatcher): StoredJobs {
   const lease = options.lease ?? 300;
   const maxAttempts = options.maxAttempts ?? 10;
   const backoff = options.backoff ?? ((attempt: number) => Math.exp(Math.min(attempt, 10)));
-  const t = outboxTable;
+  const t = jobsTable;
   const inSeconds = (seconds: number) => sql`now() + make_interval(secs => ${seconds})`;
   /**
    * Writes only land on rows still pending under this claim: a slow runner can't undo a newer runner's work, and a
@@ -168,7 +189,6 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
    * `retry(id)` starts those again at 1.
    */
   const mine = (ids: string[], { receipt }: Claim) => and(inArray(t.id, ids), eq(t.receipt, receipt), eq(t.status, "pending"));
-  const via = options.via;
 
   const asFailed = (error: unknown) => ({ status: "failed" as const, lastError: describe(error), failedAt: sql`now()` });
   const markFailed = (ids: string[], claim: Claim, error: unknown) => db.update(t).set(asFailed(error)).where(mine(ids, claim));
@@ -275,8 +295,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     check({ database }) {
       if (database && database.db !== db)
         throw new Error(
-          "[logic-sdk] outbox(db) must use the same database as `database`: jobs are written in your mutation's transaction. " +
-            "For a queue in another database, use it as `via`.",
+          `[logic-sdk] ${via ? "outbox(db, queue)" : "databaseQueue(db)"} must use the same database as \`database\`: jobs are written in your mutation's transaction. ` +
+            "A queue in another database goes behind an outbox: outbox(db, queue).",
         );
     },
     /**

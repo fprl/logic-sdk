@@ -1,6 +1,6 @@
 ---
 title: Cloudflare
-description: Jobs through Cloudflare Queues, durable through the outbox.
+description: Jobs through Cloudflare Queues, alone or behind an outbox.
 ---
 
 ```ts
@@ -15,7 +15,7 @@ const makeRegistry = (env: Env, ctx: ExecutionContext) => {
     modules,
     database: drizzleAdapter(db),
     waitUntil: (p) => ctx.waitUntil(p),
-    jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }), scope: { store, load } }, // see Jobs: who a job runs as
+    jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope: { store, load } }, // see Jobs: who a job runs as
   });
 };
 
@@ -53,10 +53,10 @@ export default {
 
 | | Durable | When the job leaves |
 |---|---|---|
-| `outbox(db, { via: cloudflareQueue(env.JOBS) })` | yes | a row is written in your transaction; after commit it's sent and the row deleted |
+| `outbox(db, cloudflareQueue(env.JOBS))` | yes | a row is written in your transaction; after commit it's sent and the row deleted |
 | `cloudflareQueue(env.JOBS)` | no | sent after commit; a Worker that dies in between loses it |
 
-- **Through the outbox,** the jobs of one commit go in one send. A send that fails keeps the rows, is reported to `onError`, and the sweep sends them again with backoff. After `maxAttempts` failed sends a row is `failed`, and `registry.jobs.retry(id)` puts it back.
+- **Through an outbox,** the jobs of one commit go in one send. A send that fails keeps the rows, is reported to `onError`, and the sweep sends them again with backoff. After `maxAttempts` failed sends a row is `failed`, and `registry.jobs.retry(id)` puts it back.
 - **Alone,** it's the Rails and Laravel `after_commit` model: fine for jobs you can lose, like a cache warm-up.
 - **You don't need the outbox to use a queue.** Add it when losing a job between commit and send matters, or when you want failed jobs kept. It needs Postgres (through Hyperdrive on Workers).
 - **Sends stay under Cloudflare's limits:** 100 messages and 256 KB per send. A job over 128 KB fails its send with an error that says so: keep payloads to ids.
@@ -66,7 +66,7 @@ export default {
 `handleQueue(registry, batch)` runs each message's job with `registry.jobs.run(body, { attempt: message.attempts })`:
 
 - **`done`, `failed` and `discarded` are acknowledged.**
-- **A throw is retried** while the listener has [`attempts`](/docs/concepts/jobs#attempts-and-delay) left, after a backoff (`e^attempt` seconds, the outbox's curve). It overrides `retry_delay`.
+- **A throw is retried** while the listener has [`attempts`](/docs/concepts/jobs#attempts-and-delay) left, after a backoff (`e^attempt` seconds, `databaseQueue`'s curve). It overrides `retry_delay`.
 - **A job that fails for good is kept:** with the outbox, it's written back as a `failed` row, so you can query it and `registry.jobs.retry(id)` it like any other. That includes a job whose listener was renamed or removed: it fails at once, and `retry(id)` runs it once the code is back.
 - **One job per invocation: set `max_batch_size: 1`,** as Laravel Vapor does on SQS. Cloudflare's default is 10, and a Worker that dies mid-batch gets every message it didn't acknowledge delivered again: that spends the attempt of jobs that never ran, so with `attempts: 1` they fail. One per invocation also gives each job the whole 15 minutes. Cloudflare runs up to 250 invocations at once.
 - **One message at a time, each acknowledged on its own,** so one failure doesn't redeliver the whole batch.

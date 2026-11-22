@@ -3,14 +3,14 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
+import { databaseQueue, drizzleAdapter, jobsTable, type DrizzleTx } from "../src/drizzle.ts";
 import { init } from "../src/index.ts";
 
 // PGlite runs one connection at a time, so only real Postgres can show two sweepers racing (CI sets DATABASE_URL).
 const url = process.env.DATABASE_URL ?? "";
 
 test.skipIf(!url)("sweepers on separate connections at once: every job runs exactly once", async () => {
-  // a schema of its own, so whatever database DATABASE_URL names keeps its own logic_outbox
+  // a schema of its own, so whatever database DATABASE_URL names keeps its own logic_jobs
   const schema = `logic_sdk_test_${crypto.randomUUID().replaceAll("-", "")}`;
   const admin = postgres(url, { max: 1, onnotice: () => {} });
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
@@ -26,12 +26,12 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
   try {
     const db = drizzle({ client });
     await db.execute(sql`
-      CREATE TABLE logic_outbox (
+      CREATE TABLE logic_jobs (
         id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
         attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
         receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
       )`);
-    await db.execute(sql`CREATE UNIQUE INDEX logic_outbox_replace ON logic_outbox (replace_key) WHERE status = 'pending' and attempts = 0`);
+    await db.execute(sql`CREATE UNIQUE INDEX logic_jobs_replace ON logic_jobs (replace_key) WHERE status = 'pending' and attempts = 0`);
 
     const { event, listener, createRegistry } = init<{ scope: object; db: DrizzleTx<typeof db> }>();
     const happened = event({ payload: z.object({ n: z.number() }) });
@@ -43,14 +43,14 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
         await new Promise((r) => setTimeout(r, 5)); // hold the row a little, so sweepers overlap
       },
     });
-    const registry = createRegistry({ modules: { x: { happened, count } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+    const registry = createRegistry({ modules: { x: { happened, count } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
 
     const jobs = Array.from({ length: 60 }, (_, n) => {
       const envelope = { id: `e${n}`, name: "x.happened", payload: { n }, scope: {}, occurredAt: new Date().toISOString(), depth: 1 };
       return { id: `x.count@e${n}`, job: { kind: "delivery" as const, id: `x.count@e${n}`, listener: "x.count", envelope, attempts: 1 } };
     });
-    await db.insert(outboxTable).values(jobs); // due now, unclaimed
-    await db.execute(sql`ANALYZE logic_outbox`);
+    await db.insert(jobsTable).values(jobs); // due now, unclaimed
+    await db.execute(sql`ANALYZE logic_jobs`);
 
     const results = await Promise.all(Array.from({ length: 6 }, () => registry.jobs.sweep()));
 

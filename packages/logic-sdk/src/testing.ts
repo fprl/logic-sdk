@@ -28,7 +28,7 @@ export interface TestOptions<Cf = unknown> {
    * `"inline"` (default): listeners run right after each mutation, inside the test. `"manual"`: jobs wait in
    * `t.jobs.queued` until you `drain()` them, to test one module without the others reacting. Like Oban's
    * `testing: :inline | :manual`. Either way, what waits (a listener's `delay`, `ctx.schedule`) waits for `drain()`, and
-   * your app's adapter (an outbox, a queue) is never used.
+   * your app's adapter (a database queue, an outbox, Cloudflare) is never used.
    */
   jobs?: "inline" | "manual";
 }
