@@ -345,6 +345,14 @@ It's the next database after Postgres (no MySQL for now), waiting on a driver th
 
 What would change it: the two connections failing the shared adapter suite.
 
+### The jobs table in SQL, one seam for every ORM
+
+Agreed on 2026-11-22, not built yet (ROADMAP, "Before 0.5.0"). The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. What would change it: a driver whose parameters or returned rows can't go through one such method.
+
+### Live tests on deployed platforms
+
+Agreed direction on 2026-11-22, not built yet. Others do it like this: files-sdk runs [`*.live.test.ts`](https://github.com/haydenbleasel/files-sdk/blob/main/.github/workflows/live-tests.yml) by hand from Actions and skips without secrets; Cloudflare's workers-sdk [deploys under a random name, tests, deletes](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/e2e/deploy.test.ts), with a scheduled cleanup; Vercel's Workflow [tests preview deployments](https://github.com/vercel/workflow/blob/main/.github/workflows/tests.yml). We take files-sdk's trigger (never on a fork's PR) and Cloudflare's deploy, test, delete. What would change it: live failures a manual run finds too late; then a nightly.
+
 ### Cloudflare Queues (step 3)
 
 - **Two modes, one factory.** `cloudflareQueue(env.JOBS)` alone sends after commit (lossy, the Rails/Laravel model); `outbox(db, queue)` makes the handoff durable. `outbox` reuses the database queue's claim, fence and backoff: the only new step is "send" in place of "run", and `done` then means handed off.

@@ -48,7 +48,15 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
 9. **Rolling deploys:** an old process fails a new listener's job at once. A recorded decision (DESIGN.md, "A job this code can't run"): revisit with the owner, don't change it quietly (API).
 10. **Casts and `!` left in the CLI,** and the type cost of per-kind meta (about 40% more instantiations on 1,200 functions).
-11. **Try it in a real app,** then release on an explicit go.
+11. **`logic-sdk show` lists every error a function can throw,** nested calls included (kind, code, where from), and `check` fails on a code that isn't a literal. Asked for and agreed on 2026-11-19 with the output designed, never built.
+12. **Docs that match what ships:** README, installation, WHY, one table of what each adapter guarantees, dedupe wording (the event id, in a record of that listener's own).
+13. **Outbox to consumer, tested as one:** `outbox(database, queue)` through `handleQueue`, the shop's Worker typed with real Worker types and its consumer run in workerd.
+14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
+15. **Try it in a real app,** then release on an explicit go.
+
+Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option.
+
+Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
 ## Next
 
