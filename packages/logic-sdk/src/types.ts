@@ -222,9 +222,9 @@ export interface Cron {
 }
 
 /**
- * What running a job resolved to. `failed`: out of attempts, a rule said no (`invalid`, `unauthenticated`, `forbidden`,
- * `not_found`, `rejected`), the payload no longer matches its schema, or this code can't run it (renamed, removed, an
- * unknown kind). Retrying can't help, so acknowledge it; it's been reported.
+ * What running a job resolved to. `failed`: out of attempts (code this process doesn't have uses them too), a rule said
+ * no (`invalid`, `unauthenticated`, `forbidden`, `not_found`, `rejected`), or the payload no longer matches its schema.
+ * It's over, so acknowledge it; it's been reported.
  * `discarded`: `jobs.scope.load` returned null (who it ran as is gone). Acknowledge it too; it's been reported.
  */
 export type DeliveryOutcome = "done" | "failed" | "discarded";

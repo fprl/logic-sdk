@@ -589,7 +589,9 @@ test("registry.jobs.run: a throw retries while the job has tries left; rules and
   expect(await r.jobs.run(job({ kind: "gone" }))).toEqual("failed"); // a rule said no
   await expect(r.jobs.run(job({ kind: "taken" }))).rejects.toMatchObject({ kind: "conflict" }); // a lost race retries
   expect(await r.jobs.run(job({ nope: 1 }))).toEqual("failed"); // the payload no longer matches its schema
-  expect(await r.jobs.run(job({ kind: "fine" }, "x.gone"))).toEqual("failed"); // renamed or removed: kept for jobs.retry
+  await expect(r.jobs.run(job({ kind: "fine" }, "x.gone"))).rejects.toThrow(/x\.gone isn't a registered listener/); // code not here: a try like any other
+  expect(reported.at(-1)).toMatchObject({ source: "x.gone", attempt: 1, outcome: "retry" });
+  expect(await r.jobs.run(job({ kind: "fine" }, "x.gone"), { attempt: 3 })).toEqual("failed"); // the last try: kept for jobs.retry
   expect(reported.at(-1)).toMatchObject({ source: "x.gone", outcome: "failed" });
 });
 
@@ -871,11 +873,12 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
   await expect(flaky.jobs.run(job)).rejects.toThrow("db down");
 });
 
-test("a job of a kind this version doesn't know fails at once, and the adapter keeps it", async () => {
+test("a job of a kind this version doesn't know uses its attempts, then the adapter keeps it", async () => {
   const kept: string[] = [];
   const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {}, fail: async (_job, e) => void kept.push((e as Error).message) }, scope: { load: (saved) => saved } } });
-  const job = { kind: "nope", id: "x", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
-  expect(await registry.jobs.run(job as never)).toEqual("failed");
+  const job = { kind: "nope", id: "x", attempts: 2, listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
+  await expect(registry.jobs.run(job as never)).rejects.toThrow(/which this version can't run/);
+  expect(await registry.jobs.run(job as never, { attempt: 2 })).toEqual("failed");
   expect(kept).toEqual([expect.stringMatching(/job x has kind "nope", which this version can't run/)]);
 });
 
