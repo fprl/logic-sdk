@@ -218,7 +218,7 @@ Configured once, where the registry is created:
 ```ts
 jobs: { adapter: inProcess() }                                  // default: zero infra, lost on a crash
 jobs: { adapter: cloudflareQueue(env.JOBS), scope }             // sent after commit: the Rails/Laravel model, lossy
-jobs: { adapter: databaseQueue(database), scope }                     // durable, Postgres only
+jobs: { adapter: databaseQueue(database), scope }               // durable, Postgres or SQLite
 jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope } // durable handoff, plus queue retries, DLQ, concurrency
 jobs: { adapter: pgBoss(boss), scope }                          // transactional natively, no outbox needed
 ```
