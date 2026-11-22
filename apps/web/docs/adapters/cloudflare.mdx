@@ -67,7 +67,7 @@ export default {
 
 - **`done`, `failed` and `discarded` are acknowledged.**
 - **A throw is retried** while the listener has [`attempts`](/docs/concepts/jobs#attempts-and-delay) left, after a backoff (`e^attempt` seconds, `databaseQueue`'s curve). It overrides `retry_delay`.
-- **A job that fails for good is kept:** with the outbox, it's written back as a `failed` row, so you can query it and `registry.jobs.retry(id)` it like any other. That includes a job whose listener was renamed or removed: it fails at once, and `retry(id)` runs it once the code is back.
+- **A job that fails for good is kept:** with the outbox, it's written back as a `failed` row, so you can query it and `registry.jobs.retry(id)` it like any other. That includes a job whose listener this Worker doesn't have (renamed, removed, not deployed yet): it uses its attempts first, and `retry(id)` runs it once the code is back.
 - **One job per invocation: set `max_batch_size: 1`,** as Laravel Vapor does on SQS. Cloudflare's default is 10, and a Worker that dies mid-batch gets every message it didn't acknowledge delivered again: that spends the attempt of jobs that never ran, so with `attempts: 1` they fail. One per invocation also gives each job the whole 15 minutes. Cloudflare runs up to 250 invocations at once.
 - **One message at a time, each acknowledged on its own,** so one failure doesn't redeliver the whole batch.
 - **Type the Worker with `ExportedHandler<Env, Job>`,** so `batch` carries jobs. A producer and a consumer can be the same Worker, as above, or two.

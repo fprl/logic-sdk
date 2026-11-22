@@ -7,16 +7,21 @@ const Items = z.object({
   items: z.array(z.object({ sku: z.string(), quantity: z.int().min(1) })).min(1),
 });
 
+/** Rows are locked in SKU order: two carts with the same products in opposite orders would deadlock. */
+// not localeCompare: Node, Workers and Next must agree on the order
+const inLockOrder = <T extends { sku: string }>(items: T[]) => items.toSorted((a, b) => (a.sku < b.sku ? -1 : 1));
+
 /**
  * Take items out of stock and price them
  *
- * Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short.
+ * Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short. Lines come back in
+ * SKU order, the order it locks them in.
  */
 export const reserve = mutation({
   input: Items,
   async handler(ctx, input) {
     const lines = [];
-    for (const { sku, quantity } of input.items) {
+    for (const { sku, quantity } of inLockOrder(input.items)) {
       // The check and the write are one statement, so two buyers can't both take the last one
       const [product] = await ctx.db
         .update(products)
@@ -41,7 +46,7 @@ export const reserve = mutation({
 export const release = mutation({
   input: Items,
   async handler(ctx, input) {
-    for (const { sku, quantity } of input.items)
+    for (const { sku, quantity } of inLockOrder(input.items))
       await ctx.db
         .update(products)
         .set({ stock: sql`${products.stock} + ${quantity}` })

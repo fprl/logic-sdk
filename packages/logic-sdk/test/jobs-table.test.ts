@@ -243,7 +243,7 @@ test("databaseQueue(db) must share the registry's database: it writes in the mut
   expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(other), scope: { load: (saved) => saved } } })).toThrow(/must use the same database as `database`/);
 });
 
-test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
+test("out of tries, a job whose code is missing is failed with why, and retry runs it once the code is back", async () => {
   const { registry } = setup();
   const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
   await db.insert(jobsTable).values({ id: "x.react@e", job: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
@@ -254,6 +254,21 @@ test("a job whose listener was renamed or removed is failed at once with why, an
   expect(await registry.jobs.retry("x.react@e")).toBe(true);
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["gone#1"]);
+});
+
+test("a rolling deploy: the old server puts a job it has no code for back, and the new one runs it", async () => {
+  const server = (mods: Record<string, object>) =>
+    createRegistry({ modules: mods, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } }, onError: () => {} });
+  const oldServer = server({ x: { added, add } });
+  const newServer = server({ x: { added, add, react } });
+  const envelope = { id: "e", name: "x.added", payload: { name: "desk" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
+  await db.insert(jobsTable).values({ id: "x.react@e", job: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 2 } });
+
+  expect(await oldServer.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 1 });
+  expect(await rows()).toMatchObject([{ status: "pending", lastError: expect.stringMatching(/x\.react isn't a registered listener/) }]);
+  await makeDue();
+  expect(await newServer.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["desk#2"]);
 });
 
 test("a listener's attempts decide its tries, however many", async () => {
