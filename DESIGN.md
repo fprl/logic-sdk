@@ -214,7 +214,7 @@ jobs: { adapter: pgBoss(boss) }                                 // transactional
 - **Ship the lossy mode.** It's the Rails 8.2 and Laravel `after_commit` model, and fine for consequences you can lose (a live update, a cache warm-up). Fizzy uses it on purpose.
 - **`databaseQueue(db)` is the durable path:** it inserts rows in the mutation's transaction, flushes them after commit through `waitUntil` (which the registry already takes), and a sweeper retries what a crash left behind. It's Fizzy's "state row plus recurring sweep", without writing it by hand. It needs only Postgres, which every app with mutations has, so it behaves the same on Node, Workers and Vercel; a queue on top adds isolation, concurrency and a DLQ.
 - **pg-boss needs no outbox:** `send(..., { db })` joins the transaction, like Oban or Laravel's database driver.
-- **Every dispatcher declares its guarantee** (`at-most-once` or `at-least-once`), and `logic-sdk check` prints it, so the choice is visible.
+- **Every dispatcher declares its guarantee** (`at-most-once` or `at-least-once`), and `logic-sdk check` prints it, so the choice is visible. Not built: no adapter declares one and `check` prints none (found 2026-11-22).
 - **Adapters per provider, as subpaths** with optional peer dependencies: `logic-sdk/pg-boss`, `logic-sdk/drizzle`, `logic-sdk/cloudflare`, `logic-sdk/vercel`. Runtime is the host entry's job, and each provider's adapter covers both events and crons. Inngest and Upstash ship the same way: one core, a thin adapter per target.
 - **Cost:** the first table the library owns, and the sweeper needs crons.
 
@@ -341,7 +341,17 @@ It's the next database after Postgres (no MySQL for now), waiting on a driver th
 - **A local libsql file** failed 9 of 10 concurrent mutations with `SQLITE_BUSY` (0.17.4). Queueing writers in the process isn't enough: a reader open at commit, or a second writer, leaves a lock or a connection that can't commit ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361), open and reported on 0.18.0).
 - **Remote Turso** is the first candidate to prove. Untested, and its interactive transactions [time out after 5 seconds](https://docs.turso.tech/sdk/ts/reference#interactive-transactions).
 
-What would change it: those issues fixed, or remote Turso passing the Postgres database queue's tests.
+**Found later the same day: plain SQLite works on two connections.** One writes, a transaction at a time, with `BEGIN IMMEDIATE`, and one reads, in WAL, like Rails. On node:sqlite it passed 50 concurrent mutations with rollbacks, 4 processes writing at once, a SIGKILL mid-mutation, and the database queue's scenarios on the SQL seam. "Synchronous drivers can't" was true of one connection. An earlier look (one connection behind a lock, better-drizzle's way) was set aside because an outside query could join the open transaction: the second connection is what closes that. So SQLite is plain SQLite, on a disk. No Turso: it joined Supabase in October 2026 and its new work is a [rewrite before 1.0](https://github.com/tursodatabase/turso#faq).
+
+What would change it: the two connections failing the shared adapter suite.
+
+### The jobs table in SQL, one seam for every ORM
+
+Agreed on 2026-11-22, not built yet (ROADMAP, "Before 0.5.0"). The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. What would change it: a driver whose parameters or returned rows can't go through one such method.
+
+### Live tests on deployed platforms
+
+Agreed direction on 2026-11-22, not built yet. Others do it like this: files-sdk runs [`*.live.test.ts`](https://github.com/haydenbleasel/files-sdk/blob/main/.github/workflows/live-tests.yml) by hand from Actions and skips without secrets; Cloudflare's workers-sdk [deploys under a random name, tests, deletes](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/e2e/deploy.test.ts), with a scheduled cleanup; Vercel's Workflow [tests preview deployments](https://github.com/vercel/workflow/blob/main/.github/workflows/tests.yml). We take files-sdk's trigger (never on a fork's PR) and Cloudflare's deploy, test, delete. What would change it: live failures a manual run finds too late; then a nightly.
 
 ### Cloudflare Queues (step 3)
 
