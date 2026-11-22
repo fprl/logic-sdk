@@ -15,3 +15,5 @@ jobs: {
 ```
 
 To keep the scope as it was, write it down: `load: (saved) => saved`. `inProcess()` is unchanged: nothing waits.
+
+TypeScript catches a missing `scope` with those adapters. An empty `scope`, or a `store` without `load`, is caught at startup.

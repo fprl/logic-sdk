@@ -12,6 +12,7 @@ import type {
   Envelope,
   FailureInfo,
   Fn,
+  InProcess,
   Job,
   JobScope,
   Jobs,
@@ -23,8 +24,10 @@ import type {
   RunJobOptions,
   Runner,
 } from "./types.ts";
+import { RUNS_NOW } from "./types.ts";
 
-const IN_PROCESS: Dispatcher = {
+const IN_PROCESS: InProcess = {
+  [RUNS_NOW]: true,
   async deliver(jobs, { run }) {
     // one try, whatever `attempts` says: what throws has failed, so onError never hears of a retry that won't come
     for (const job of jobs) await run({ ...job, attempts: 1 });
@@ -34,7 +37,7 @@ const IN_PROCESS: Dispatcher = {
  * Default adapter: runs each job right after commit, in this process, one try (like Laravel's sync queue). It can't
  * hold a job for later, so a `delay` or a waiting `ctx.schedule` is refused. Lost on crash: use `databaseQueue` when that matters.
  */
-export const inProcess = (): Dispatcher => IN_PROCESS;
+export const inProcess = (): InProcess => IN_PROCESS;
 /** `inProcess()`: runs each job right after commit, in this process, so no scope waits at rest. */
 export const runsNow = (adapter: Dispatcher) => adapter === IN_PROCESS;
 

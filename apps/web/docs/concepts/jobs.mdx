@@ -155,7 +155,7 @@ export const sendAll = listener({
 
 ## Who a job runs as
 
-A job runs as the scope that emitted or scheduled it, so policies check it again and tenant-scoped helpers keep working. A job that waits in a table or a queue would run with the roles of the day it was queued, so every adapter but `inProcess()` needs `jobs.scope.load`, and `createRegistry` throws without it:
+A job runs as the scope that emitted or scheduled it, so policies check it again and tenant-scoped helpers keep working. A job that waits in a table or a queue would run with the roles of the day it was queued, so every adapter but `inProcess()` needs `jobs.scope.load`. TypeScript asks for `scope`, and `createRegistry` throws without `load`:
 
 - **`inProcess()` needs nothing:** it runs each job right after commit, so no scope waits.
 - **Keeping the scope as it was is a choice you write down:** `load: (saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
