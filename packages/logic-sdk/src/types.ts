@@ -103,7 +103,7 @@ export interface Envelope<P = unknown, S = object> {
   payload: P;
   scope: S;
   occurredAt: string;
-  /** Hops in the chain: 1 for an event a caller's mutation emitted, +1 each time a listener's mutation emits. */
+  /** Hops in the chain: 1 for an event a caller's mutation emitted, +1 each time a listener's mutation emits (or a call it schedules to run now). */
   depth: number;
 }
 
@@ -180,8 +180,9 @@ export interface Cron {
 }
 
 /**
- * What delivering one resolved to. `failed`: a rule said no (`invalid`, `unauthenticated`, `forbidden`, `not_found`,
- * `rejected`) or the payload no longer matches its schema. Retrying can't help, so acknowledge it; it's been reported.
+ * What running a job resolved to. `failed`: out of attempts, a rule said no (`invalid`, `unauthenticated`, `forbidden`,
+ * `not_found`, `rejected`), the payload no longer matches its schema, or this code can't run it (renamed, removed, an
+ * unknown kind). Retrying can't help, so acknowledge it; it's been reported.
  * `discarded`: `jobs.scope.load` returned null (who it ran as is gone). Acknowledge it too; it's been reported.
  */
 export type DeliveryOutcome = "done" | "failed" | "discarded";
@@ -372,11 +373,11 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   retryable?(error: unknown): boolean;
 }
 
-/** Delivers one: resolves when the listener is done or failed for good (acknowledge it), throws when a retry might help. */
+/** Runs one job: resolves when it's done or failed for good (acknowledge it), throws when a retry might help. */
 export type RunJob = (job: Job, options?: RunJobOptions) => Promise<DeliveryOutcome>;
 
 export interface RunJobOptions {
-  /** 1 on the first try; the transport counts. */
+  /** 1 on the first try; the adapter counts. */
   attempt?: number;
   /**
    * Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it. Default: the adapter's
@@ -385,7 +386,7 @@ export interface RunJobOptions {
   fail?: (error: unknown) => Promise<void>;
 }
 
-/** What a sweep did: delivered, failed for good, or put back with a backoff. */
+/** What a sweep did: done, failed for good, discarded (`jobs.scope.load` returned null), or put back with a backoff. */
 export interface SweepResult {
   done: number;
   failed: number;
@@ -413,7 +414,7 @@ export interface Dispatcher {
    * Without it, `ctx.schedule` with `replace` is refused.
    */
   replaces?: true;
-  /** At `createRegistry`: refuse a setup this adapter can't honour (a delay longer than the queue allows). */
+  /** At `createRegistry`: refuse a setup this adapter can't honour (a database it doesn't share). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
   /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
   enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
@@ -430,13 +431,15 @@ export interface Dispatcher {
   fail?(job: Job, error: unknown): Promise<void>;
 }
 
-/** What `onError` gets with a failure after commit. `delivery`, `attempt` and `outcome` are set when a listener's job failed. */
+/**
+ * What `onError` gets with a failure after commit. `job`, `attempt` and `outcome` are set when a job failed: the job
+ * itself, like Laravel's `JobFailed` and Oban's exception telemetry.
+ */
 export interface FailureInfo {
-  /** The listener, cron or scheduled function that failed (or the part of the registry, like `"(dispatcher)"`). */
-  listener: string;
-  envelope: Envelope | undefined;
-  /** The job's id. */
-  delivery?: string;
+  /** The listener, cron or scheduled function that failed, or the part of the registry (`"(dispatcher)"`). */
+  source: string;
+  /** The job that failed, or that the adapter couldn't take (`"(dispatcher)"`). */
+  job?: Job;
   attempt?: number;
   /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
   outcome?: "retry" | "failed" | "discarded";
@@ -531,7 +534,7 @@ export interface Overrides {
   database?: DatabaseAdapter<unknown, unknown>;
   services?: object;
   /** Merged over the registry's config, section by section. */
-  config?: object;
+  config?: unknown;
   adapter?: Dispatcher;
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
@@ -567,13 +570,14 @@ export interface Jobs {
    */
   tick(at?: Date): Promise<string[]>;
   /**
-   * Run what your transport has due, from a cron or an interval: `await registry.jobs.sweep()`. With `outbox(db)`, that's
-   * retries whose backoff is over and jobs whose runner crashed. Transports that store nothing resolve zeros.
+   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `outbox(db)`, that's
+   * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing, or maintain themselves
+   * (pg-boss), resolve zeros.
    */
   sweep(options?: { limit?: number }): Promise<SweepResult>;
   /**
    * Put a failed job back in line with a fresh set of attempts. `false` when no failed job has that id (it's pending,
-   * running, done, or never existed). Throws when your transport stores no jobs, like `inProcess()`.
+   * running, done, or never existed). Throws when your adapter keeps no jobs, like `inProcess()`.
    */
   retry(id: string): Promise<boolean>;
 }
@@ -593,7 +597,7 @@ export interface Registry<S extends object = object, Mods extends Record<string,
   };
   /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
   idOf(fnOrEvent: object): string;
-  /** The background work your `jobs` transport holds. */
+  /** The background work your `jobs` adapter holds. */
   readonly jobs: Jobs;
   /** @internal used by `logic-sdk/testing` */
   readonly [INTERNAL]: {

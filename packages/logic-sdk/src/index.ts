@@ -1,5 +1,5 @@
 import { describeIssues, DomainError, errorsFor } from "./errors.ts";
-import { inProcess, makeJobs, runsNow } from "./jobs.ts";
+import { inProcess, makeJobs, replaceKeyOf, runsNow } from "./jobs.ts";
 import { assertTimeZone, parseSchedule } from "./schedule.ts";
 import { BRAND, INTERNAL } from "./types.ts";
 import type {
@@ -92,7 +92,7 @@ export type {
   SweepResult,
 } from "./types.ts";
 export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
-export { inProcess } from "./jobs.ts";
+export { inProcess, replaceKeyOf } from "./jobs.ts";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * init: typed constructors
@@ -175,7 +175,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
        * Once they're used, the job is `failed` (kept by the outbox, retried with `registry.jobs.retry(id)`).
        */
       attempts?: number;
-      /** Seconds after the event before the first try. `inProcess()` ignores it, like Laravel's sync queue. */
+      /** Seconds after the event before the first try. Needs an adapter that holds jobs: `inProcess()` is refused. */
       delay?: number;
       meta?: MetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
@@ -281,8 +281,8 @@ function assertPlain(value: unknown, what: string, hint: string): void {
       if (!Number.isFinite(v)) fail(String(v));
       return;
     }
-    if (typeof v !== "object") fail(`a ${typeof v}`);
-    const obj = v as object;
+    if (typeof v !== "object") return fail(`a ${typeof v}`);
+    const obj = v;
     if (seen.has(obj)) fail("a circular reference");
     seen.add(obj);
     if (Array.isArray(obj)) obj.forEach((item, i) => check(item, `${path}[${i}]`));
@@ -353,9 +353,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
   const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
-  const enqueue = dispatcher.enqueue?.bind(dispatcher);
   const jobScope = options.jobs?.scope;
-  if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Listeners run as a scope, so rebuild it from what store saved.");
+  if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Jobs run as a scope, so rebuild it from what store saved.");
   // a job any adapter but inProcess() keeps runs as a scope saved earlier: rebuild it, or its roles are the ones from
   // back then (AshOban's actor_persister). The app's adapter, so a test registry agrees with the app it wraps.
   const appAdapter = options.jobs?.adapter;
@@ -370,7 +369,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const attempts = Math.max(1, options.retry?.attempts ?? 3);
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
-    o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.listener} failed`, e));
+    o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.source} failed`, e));
   const report = (e: unknown, info: FailureInfo) => {
     try {
       reportRaw(e, info);
@@ -385,7 +384,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         "Drivers without them (Cloudflare D1, HTTP drivers) are not supported for mutations.",
     );
   for (const l of listeners)
-    if (!l.event || !ids.has(l.event))
+    if (!ids.has(l.event))
       throw new Error(`[logic-sdk] Listener ${l.id} listens to an event that isn't registered in any module.`);
   dispatcher.check?.({ listeners, database });
 
@@ -411,6 +410,12 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const r = await schema["~standard"].validate(value);
     if (r.issues) throw new Error(`[logic-sdk] ${what} is invalid: ${JSON.stringify(describeIssues(r.issues))}`);
     return r.value;
+  }
+  /** What our own code passed a mutation's ctx, checked by the time it commits: a bad value fails the commit. */
+  function checkAtCommit(tx: TxState, schema: Schema, value: unknown, what: string) {
+    const check = parseOwn(schema, value, what).then(() => {});
+    check.catch(() => {}); // surfaced at commit; never an unhandled rejection
+    tx.pending.push(check);
   }
 
   for (const c of crons) {
@@ -441,8 +446,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     ...baseCtx(frame, id, ["query"]),
     db: frame.tx ? frame.tx.db : database?.db,
   });
-  function mutationCtx(frame: Frame, id: string): MutationCtx<any> {
-    const tx = frame.tx!;
+  function mutationCtx(frame: Frame, tx: TxState, id: string): MutationCtx<any> {
     return {
       ...baseCtx(frame, id, ["query", "mutation"]),
       db: tx.db,
@@ -450,9 +454,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
         tx.outbox.push(envelope);
-        const check = parseOwn(event.payload, envelope.payload, `${envelope.name} payload`).then(() => {});
-        check.catch(() => {}); // surfaced at commit; never an unhandled rejection
-        tx.pending.push(check);
+        checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`);
       },
       schedule: (fn, input, { at, delay, attempts = 1, replace }) => {
         const fnId = idOf(fn);
@@ -483,16 +485,12 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           job.replace = replace;
           // scheduled twice in this transaction: the later one wins here too (the dropped one's input is still checked:
           // a bad input is a bug wherever it is)
-          const earlier = tx.calls.findIndex((c) => c.fn === fnId && c.replace === replace);
+          const earlier = tx.calls.findIndex((c) => replaceKeyOf(c) === replaceKeyOf(job));
           if (earlier >= 0) tx.calls.splice(earlier, 1);
         }
         tx.calls.push(job);
         // our own code passed it: a bad input is a bug, surfaced at commit like an event's payload
-        if (fn.input) {
-          const check = parseOwn(fn.input, job.input, `${fnId} input`).then(() => {});
-          check.catch(() => {});
-          tx.pending.push(check);
-        }
+        if (fn.input) checkAtCommit(tx, fn.input, job.input, `${fnId} input`);
         return job.id;
       },
     };
@@ -517,7 +515,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toJobs, runner, jobs, due, checkHold } = makeJobs({
+  const { toJobs, runner, jobs, due, checkHold, reportEach } = makeJobs({
     listeners,
     events,
     crons,
@@ -568,7 +566,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       if (frame.tx) {
         const tx = frame.tx;
         try {
-          return await execute(await prepare(), mutationCtx(frame, id));
+          return await execute(await prepare(), mutationCtx(frame, tx, id));
         } catch (e) {
           if (!tx.doomed) {
             tx.doomed = true;
@@ -585,19 +583,20 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       for (let attempt = 1; ; attempt++) {
         let state: TxState | undefined;
         try {
+          // SAFETY: createRegistry refuses mutations without a database that has interactive transactions
           committed = await database!.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
             const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, outbox: [], calls: [], pending: [] });
-            const out = await execute(input, mutationCtx({ ...frame, tx }, id));
+            const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
             const jobs = toJobs(tx.outbox, tx.calls);
-            if (jobs.length) await enqueue?.(txDb, jobs);
+            if (jobs.length) await dispatcher.enqueue?.(txDb, jobs);
             return { out, outbox: tx.outbox, jobs };
           });
           break;
         } catch (e) {
-          if (attempt < attempts && database!.retryable?.(e)) {
+          if (attempt < attempts && database!.retryable?.(e)) { // SAFETY: as above
             // a random pause, so transactions that just deadlocked don't retry in lockstep and collide again
             await new Promise((r) => setTimeout(r, Math.random() * 20 * attempt));
             continue;
@@ -618,20 +617,18 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     try {
       for (const e of outbox) o.record?.(e);
       if (!jobs.length) return;
-      const delivery = (async () => dispatcher.deliver(jobs, runner))().catch((e) =>
-        report(e, { listener: "(dispatcher)", envelope: outbox[0] }),
-      );
+      const delivery = dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
       if (waitUntil) {
         try {
           waitUntil(delivery);
           return;
         } catch (e) {
-          report(e, { listener: "(waitUntil)", envelope: outbox[0] });
+          report(e, { source: "(waitUntil)" });
         }
       }
       await delivery;
     } catch (e) {
-      report(e, { listener: "(after commit)", envelope: outbox[0] });
+      report(e, { source: "(after commit)" });
     }
   }
 
@@ -648,7 +645,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     [INTERNAL]: {
       options,
       config,
-      derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) as object | undefined }),
+      derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) }),
       envelope: (event, payload, scope) => envelopeOf(event, payload, scope, 1),
       due,
     },

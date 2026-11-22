@@ -1,6 +1,6 @@
 import { and, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
-import type { DatabaseAdapter, DeliveryOutcome, Dispatcher, Job, Runner, SweepResult } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type DeliveryOutcome, type Dispatcher, type Job, type Runner, type SweepResult } from "./index.ts";
 
 /** Anything with Drizzle's `transaction(fn)`: a database or a transaction (nested = savepoint). */
 interface Transactional {
@@ -50,15 +50,15 @@ const waiting = sql`status = 'pending' and attempts = 0`;
 
 /**
  * The outbox table (Postgres). Re-export it from your schema so drizzle-kit adds it to your migrations:
- * `export { outboxTable } from "logic-sdk/drizzle";`. One row per pending delivery; done rows are deleted,
+ * `export { outboxTable } from "logic-sdk/drizzle";`. One row per pending job; done rows are deleted,
  * failed ones stay so you can query them and `retry` them.
  */
 export const outboxTable = pgTable(
   "logic_outbox",
   {
-    /** The job id: `<listener id>@<event id>`, or `<cron id>@<minute>`. */
+    /** The job id: `<listener id>@<event id>`, `<cron id>@<minute>`, or `<function id>@<uuid>`. */
     id: text("id").primaryKey(),
-    delivery: jsonb("delivery").$type<Job>().notNull(),
+    job: jsonb("job").$type<Job>().notNull(),
     /** `failed`: out of attempts, or a rule said no. Retrying is your call (`registry.jobs.retry(id)`). */
     status: text("status").$type<"pending" | "failed">().notNull().default("pending"),
     /** Incremented when a runner claims it, so a crash still uses an attempt. */
@@ -89,7 +89,7 @@ export const cronRunsTable = pgTable("logic_cron_runs", {
 
 export interface OutboxOptions {
   /**
-   * Seconds a runner owns a delivery before a sweep may take it over. Default 300. Longer than your slowest listener;
+   * Seconds a runner owns a job before a sweep may take it over. Default 300. Longer than your slowest listener;
    * with `via`, it only covers the handoff, so it's how soon a handoff that crashed is tried again.
    */
   lease?: number;
@@ -109,7 +109,7 @@ export interface OutboxOptions {
   backoff?: (attempt: number) => number;
 }
 
-/** The outbox transport. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
+/** The outbox adapter. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
 export interface Outbox extends Dispatcher {
   /** Retries whose backoff is over and deliveries whose runner crashed (lease expired), claimed one at a time. */
   sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
@@ -217,14 +217,14 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
      * Delayed: available from `runAt`, for a sweep.
      */
     async enqueue(tx: unknown, jobs: Job[]) {
-      const client = tx as PgClient;
+      const client = tx as PgClient; // SAFETY: check() refuses a database that isn't this db, so tx is its transaction
       const firstTicks = await recordTicks(client, jobs.filter((j) => j.kind === "cron"));
       const row = (j: Job) => ({
         id: j.id,
-        delivery: j,
+        job: j,
         attempts: 0,
         availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease),
-        replaceKey: j.kind === "call" && j.replace !== undefined ? `${j.fn}@${j.replace}` : null,
+        replaceKey: replaceKeyOf(j) ?? null,
       });
       const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id)).map(row);
       const plain = rows.filter((r) => r.replaceKey === null);
@@ -241,7 +241,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .onConflictDoUpdate({
             target: t.replaceKey,
             targetWhere: waiting,
-            set: { id: sql`excluded.id`, delivery: sql`excluded.delivery`, availableAt: sql`excluded.available_at`, lastError: null },
+            set: { id: sql`excluded.id`, job: sql`excluded.job`, availableAt: sql`excluded.available_at`, lastError: null },
           });
     },
     /**
@@ -278,12 +278,12 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .update(t)
           .set({ attempts: sql`${t.attempts} + 1`, availableAt: inSeconds(lease) })
           .where(inArray(t.id, due))
-          .returning({ delivery: t.delivery, attempts: t.attempts });
+          .returning({ job: t.job, attempts: t.attempts });
         if (!row) break;
         try {
-          result[await settle(row.delivery, row.attempts, runner)]++;
+          result[await settle(row.job, row.attempts, runner)]++;
         } catch (e) {
-          runner.report(e, row.delivery, row.attempts); // its bookkeeping failed (a lost connection): its lease brings it back
+          runner.report(e, row.job, row.attempts); // its bookkeeping failed (a lost connection): its lease brings it back
         }
       }
       return result;
@@ -303,7 +303,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
       const lastError = messageOf(error);
       await db
         .insert(t)
-        .values({ id: job.id, delivery: job, status: "failed", lastError })
+        .values({ id: job.id, job, status: "failed", lastError })
         .onConflictDoUpdate({ target: t.id, set: { status: "failed", lastError } });
     },
   };

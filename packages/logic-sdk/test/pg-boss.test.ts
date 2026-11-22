@@ -184,7 +184,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     expect(ran).toEqual(["flaky#1", "flaky#2", "flaky#3"]);
     const [row] = await rowsAbout("x.react", "flaky");
     expect(row?.output).toMatchObject({ message: "smtp down" }); // why, in pg-boss
-    expect(failures.filter((f) => f.delivery?.startsWith("x.react@")).map((f) => f.outcome)).toEqual(["retry", "retry", "failed"]);
+    expect(failures.filter((f) => f.job?.id.startsWith("x.react@")).map((f) => f.outcome)).toEqual(["retry", "retry", "failed"]);
   });
 
   test("a domain error fails it at once: no retries", async () => {

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { fromDrizzle, type Db, type DrizzleTransactionLike, type JobInsert, type JobResult, type PgBoss, type Queue, type WorkOptions } from "pg-boss";
-import type { DatabaseAdapter, Dispatcher, Job, Jobs, Registry } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type Dispatcher, type Job, type Jobs, type Registry } from "./index.ts";
 import { startTicking } from "./node.ts";
 
 /**
@@ -125,12 +125,11 @@ export function pgBoss(boss: PgBoss): Dispatcher {
     /** Inside the mutation's transaction: one insert per queue. pg-boss skips a row whose id it already has. */
     async enqueue(tx, jobs) {
       const db = inTx(tx);
-      const keyOf = (job: Job) => (job.kind === "call" && job.replace !== undefined ? `${job.fn}@${job.replace}` : undefined);
       for (const [name, list] of Map.groupBy(jobs, queueOf)) {
-        const keys = list.map(keyOf).filter((key) => key !== undefined);
+        const keys = list.map(replaceKeyOf).filter((key) => key !== undefined);
         await inQueue(name, async () => {
           if (keys.length) await replaceWaiting(db, keys);
-          await boss.insert(name, list.map((job) => rowOf(job, keyOf(job))), { db });
+          await boss.insert(name, list.map((job) => rowOf(job, replaceKeyOf(job))), { db });
         });
       }
     },

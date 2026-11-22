@@ -24,22 +24,33 @@ import type {
   Runner,
 } from "./types.ts";
 
-/**
- * Default dispatcher: delivers right after commit, in this process, once, ignoring `attempts` and `delay` (like Laravel's
- * sync queue). Lost on crash: use an outbox when that matters.
- */
-export const inProcess = (): Dispatcher => {
-  const adapter: Dispatcher = {
-    async deliver(deliveries, { run }) {
-      for (const d of deliveries) await run(d).catch(() => {}); // already reported; nothing retries in-process
-    },
-  };
-  immediate.add(adapter);
-  return adapter;
+const IN_PROCESS: Dispatcher = {
+  async deliver(jobs, { run }) {
+    for (const job of jobs) await run(job).catch(() => {}); // already reported; nothing retries in-process
+  },
 };
-const immediate = new WeakSet<Dispatcher>();
+/**
+ * Default adapter: runs each job right after commit, in this process, one try (like Laravel's sync queue). It can't
+ * hold a job for later, so a `delay` or a waiting `ctx.schedule` is refused. Lost on crash: use an outbox when that matters.
+ */
+export const inProcess = (): Dispatcher => IN_PROCESS;
 /** `inProcess()`: runs each job right after commit, in this process, so no scope waits at rest. */
-export const runsNow = (adapter: Dispatcher) => immediate.has(adapter);
+export const runsNow = (adapter: Dispatcher) => adapter === IN_PROCESS;
+
+/**
+ * What makes a scheduled call replaceable, `<function id>@<key>`: a newer call with the same one replaces it while it
+ * waits. Undefined for every other job. For adapters that replace (`replaces: true`).
+ */
+export const replaceKeyOf = (job: Job): string | undefined => (job.kind === "call" && job.replace !== undefined ? `${job.fn}@${job.replace}` : undefined);
+
+/** One listener's share of an event, as a job: `<listener id>@<event id>`, with the listener's tries. */
+export const deliveryOf = (l: RegisteredListener, e: Envelope): Delivery => ({
+  kind: "delivery",
+  id: `${l.id}@${e.id}`,
+  listener: l.id,
+  envelope: e,
+  attempts: l.listener.attempts ?? 1,
+});
 
 /** What running jobs needs from the registry: its definitions, and how it runs a function or a listener's handler. */
 export interface JobsDeps {
@@ -55,15 +66,15 @@ export interface JobsDeps {
   now(): Date;
   wrap(call: Call, next: () => Promise<unknown>): Promise<unknown>;
   report(error: unknown, info: FailureInfo): void;
-  /** Run a function as `scope`, like `registry.as(scope).run`, `eventDepth` hops into a chain (a scheduled call's). */
+  /** Run a function as `scope`, like `registry.as(scope).run`. `eventDepth`: the chain's hops so far (a scheduled call's `depth`). */
   runAs(fn: Fn, input: unknown, scope: object, eventDepth?: number): Promise<unknown>;
   /** The ctx a listener's handler gets, as `scope`, in an event chain `eventDepth` deep. */
   listenerCtx(scope: object, eventDepth: number, id: string): ActionCtx<any>;
 }
 
 /**
- * Jobs, for one registry: a listener's share of an event, a cron's run. Turns events into jobs, runs one (with its
- * tries), and is what `registry.jobs` calls.
+ * Jobs, for one registry: a listener's share of an event, a cron's run, a scheduled call. Turns a commit's events and
+ * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
   const { listeners, events, crons, functions, idOf, dispatcher, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
@@ -105,12 +116,12 @@ export function makeJobs(deps: JobsDeps) {
     const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
-    const loop = () => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
-    if (deepEvent) report(loop(), { listener: "(dispatcher)", envelope: deepEvent });
-    else if (deepCall) report(loop(), infoOf(deepCall));
+    const loop = (what: string) => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing ${what} (a loop?)`);
+    if (deepEvent) report(loop(deepEvent.name), { source: "(dispatcher)" });
+    else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
-        const job: Delivery = { kind: "delivery", id: `${l.id}@${e.id}`, listener: l.id, envelope: e, attempts: l.listener.attempts ?? 1 };
+        const job = deliveryOf(l, e);
         const delay = l.listener.delay;
         if (delay) job.runAt = new Date(Date.parse(e.occurredAt) + delay * 1000).toISOString();
         return job;
@@ -119,11 +130,16 @@ export function makeJobs(deps: JobsDeps) {
     return [...deliveries, ...calls.filter(fits)];
   }
 
+  /** An adapter that couldn't take a commit's jobs: each one may be lost, so each is reported. */
+  const reportEach = (error: unknown, jobs: Job[]) => {
+    for (const job of jobs) report(error, { source: "(dispatcher)", job });
+  };
+
   /** What `onError` hears about a job. */
   const infoOf = (job: Job, attempt?: number): FailureInfo =>
     job.kind === "delivery"
-      ? { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt }
-      : { listener: job.kind === "cron" ? job.cron : job.fn, envelope: undefined, delivery: job.id, attempt };
+      ? { source: job.listener, job, attempt }
+      : { source: job.kind === "cron" ? job.cron : job.fn, job, attempt };
 
   /** Who a stored job runs as: `jobs.scope.load` rebuilds it; null means discard it (reported). */
   async function scopeOf(job: Job, stored: object, attempt: number): Promise<object | null> {
@@ -140,7 +156,8 @@ export function makeJobs(deps: JobsDeps) {
    */
   async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
     const info = infoOf(job, attempt);
-    const kind: string = job.kind; // a job queued by another version can have a kind this one doesn't know
+    // read before narrowing: a job queued by another version can have a kind this one doesn't know
+    const { id, kind }: { id: string; kind: string } = job;
     const failed = async (error: unknown) => {
       report(error, { ...info, outcome: "failed" });
       await fail?.(error);
@@ -166,9 +183,11 @@ export function makeJobs(deps: JobsDeps) {
 
     // code this version doesn't have (renamed or removed): failed at once and kept, like Rails' ClassMissingError.
     // `registry.jobs.retry(id)` runs it once the code is back.
+    const missing = (what: string, id: string) =>
+      failed(new Error(`[logic-sdk] ${id} isn't a registered ${what} (renamed or removed?), so job ${job.id} can't run.`));
     if (job.kind === "cron") {
       const c = cronById.get(job.cron);
-      if (!c) return failed(new Error(`[logic-sdk] ${job.cron} isn't a registered cron (renamed or removed?), so job ${job.id} can't run.`));
+      if (!c) return missing("cron", job.cron);
       return attemptOnce(async () => {
         await runAs(c.cron.run, c.cron.input, c.cron.scope);
         return "done";
@@ -176,7 +195,7 @@ export function makeJobs(deps: JobsDeps) {
     }
     if (job.kind === "call") {
       const f = fnById.get(job.fn);
-      if (!f) return failed(new Error(`[logic-sdk] ${job.fn} isn't a registered function (renamed or removed?), so job ${job.id} can't run.`));
+      if (!f) return missing("function", job.fn);
       return attemptOnce(async () => {
         const scope = await scopeOf(job, job.scope, attempt);
         if (!scope) return "discarded";
@@ -184,9 +203,9 @@ export function makeJobs(deps: JobsDeps) {
         return "done";
       });
     }
-    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${info.delivery} has kind ${JSON.stringify(kind)}, which this version can't run.`));
+    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${id} has kind ${JSON.stringify(kind)}, which this version can't run.`));
     const l = listenerById.get(job.listener);
-    if (!l) return failed(new Error(`[logic-sdk] ${job.listener} isn't a registered listener (renamed or removed?), so job ${job.id} can't run.`));
+    if (!l) return missing("listener", job.listener);
     const { envelope } = job;
     const event = eventByName.get(envelope.name);
     return attemptOnce(async () => {
@@ -231,15 +250,15 @@ export function makeJobs(deps: JobsDeps) {
         if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like outbox(db)) need `database`.");
         await database.transaction((tx) => enqueue(tx, jobs));
       }
-      await dispatcher.deliver(jobs, runner).catch((e) => report(e, { listener: "(dispatcher)", envelope: undefined }));
+      await dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
       return jobs.map((job) => job.cron);
     },
     sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
     async retry(id) {
-      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs transport stores no jobs, so there's nothing to retry (${id}). outbox(db) does.`);
+      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). outbox(db) and pgBoss(boss) do.`);
       return dispatcher.retry(id);
     },
   };
 
-  return { toJobs, runner, jobs, due, checkHold };
+  return { toJobs, runner, jobs, due, checkHold, reportEach };
 }

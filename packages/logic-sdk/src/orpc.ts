@@ -45,8 +45,8 @@ export function toORPCRouter<S extends object, Mods extends Record<string, objec
 
   for (const f of registry.definitions.functions) {
     if (!f.exposed) continue;
-    let b = f.fn.input ? base.input(f.fn.input) : base;
-    if (f.fn.output) b = b.output(f.fn.output) as any;
+    const withInput = f.fn.input ? base.input(f.fn.input) : base;
+    const b = f.fn.output ? withInput.output(f.fn.output) : withInput;
     (router[f.module] ??= {})[f.name] = b.handler(async ({ input, context, signal }) => {
       try {
         return await context.caller.run(f.fn, input, { signal });

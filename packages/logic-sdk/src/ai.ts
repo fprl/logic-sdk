@@ -1,5 +1,5 @@
 import { jsonSchema, tool, type Tool } from "ai";
-import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
+import { isDomainError, type Caller, type ExposedFn, type ExposedOf, type Fn, type FnIn, type FnOut, type Registry, type RegisteredFn } from "./index.ts";
 type UnionToIntersection<U> = (U extends unknown ? (u: U) => void : never) extends (i: infer I) => void ? I : never;
 
 /** `{ bookings_confirm, pricing_priceStay, … }`: one AI SDK tool per exposed function, typed. */
@@ -44,6 +44,8 @@ export interface AIToolsOptions extends ErrorOption {
 
 /** `meta.ai` as `AIMeta` types it where you write it (meta is stored loose). */
 const aiMeta = (fn: { meta?: Readonly<Record<string, unknown>> }) => fn.meta?.ai as AIMeta["ai"];
+
+const isExposed = (fn: Fn): fn is ExposedFn => fn.expose === true;
 
 /** What a function without input looks like to the model: an object with nothing in it. It sends `{}`, which run ignores. */
 const noInput = jsonSchema({ type: "object", properties: {}, additionalProperties: false });
@@ -98,7 +100,7 @@ export function toAITools<S extends object, Mods extends Record<string, object>>
   const filter = options.filter ?? ((f: RegisteredFn) => aiMeta(f.fn)?.tool === true);
   const tools: Record<string, Tool> = {};
   for (const f of registry.definitions.functions)
-    if (f.exposed && filter(f))
-      tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn as ExposedFn, { onError: options.onError, description: options.describe?.(f) });
+    if (isExposed(f.fn) && filter(f))
+      tools[`${f.module}_${f.name}`] = toAITool(caller, f.fn, { onError: options.onError, description: options.describe?.(f) });
   return tools as Partial<AIToolsOf<Mods>>;
 }

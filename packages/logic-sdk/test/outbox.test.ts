@@ -11,7 +11,7 @@ import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/i
 const pg = new PGlite();
 await pg.exec(`
   CREATE TABLE logic_outbox (
-    id text PRIMARY KEY, delivery jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
+    id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
     attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
     last_error text, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
   );
@@ -116,7 +116,7 @@ test("a runner that crashed after commit: its lease expires and a sweep takes ov
   await app.run(add, { name: "rug" });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still leased
   const [row] = await rows(); // the row is the job: what was enqueued is what runs
-  expect(row!.delivery).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "rug" }, depth: 1 } });
+  expect(row!.job).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "rug" }, depth: 1 } });
   await makeDue(); // the lease ran out
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["rug#1"]); // never started, so this is its first try
@@ -179,7 +179,7 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
   const [row] = await rows();
   expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "queue unavailable" });
-  expect(reported).toEqual([expect.objectContaining({ listener: "x.react", delivery: row!.id, attempt: 1 })]);
+  expect(reported).toEqual([expect.objectContaining({ source: "x.react", job: expect.objectContaining({ id: row!.id }), attempt: 1 })]);
   await makeDue();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 }); // second handoff fails too
   via.down = false;
@@ -246,11 +246,11 @@ test("outbox(db) must share the registry's database: it writes in the mutation's
 test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
   const { registry } = setup();
   const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
-  await db.insert(outboxTable).values({ id: "x.react@e", delivery: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
+  await db.insert(outboxTable).values({ id: "x.react@e", job: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
   expect(await rows()).toMatchObject([{ status: "failed", lastError: expect.stringMatching(/x\.removed isn't a registered listener/) }]);
   // the code is back (here: the row points at a listener that exists)
-  await db.update(outboxTable).set({ delivery: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 1 } });
+  await db.update(outboxTable).set({ job: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 1 } });
   expect(await registry.jobs.retry("x.react@e")).toBe(true);
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["gone#1"]);
@@ -308,7 +308,7 @@ test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs 
   const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(book);
   const [row] = await rows();
-  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, delivery: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
+  expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, job: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
   expect(row!.availableAt.getTime() - Date.now()).toBeGreaterThan(3500_000);
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 });
   await makeDue();
@@ -330,7 +330,7 @@ test("ctx.schedule replace: the waiting call with the key becomes the new one; o
   const moved = await app.run(book, { booking: "b1", checkIn: "July 9", delay: 7200 }); // the dates changed
   await app.run(book, { booking: "b2", checkIn: "July 5", delay: 3600 }); // another booking keeps its own
   const waiting = (await rows()).sort((a, b) => String(a.replaceKey).localeCompare(String(b.replaceKey)));
-  expect(waiting.map((r) => [r.replaceKey, (r.delivery as { input: unknown }).input])).toEqual([
+  expect(waiting.map((r) => [r.replaceKey, (r.job as { input: unknown }).input])).toEqual([
     ["x.remind@b1", { at: "July 9" }],
     ["x.remind@b2", { at: "July 5" }],
   ]);
@@ -366,7 +366,7 @@ test("ctx.schedule replace: due now, it takes over the waiting row and runs once
   const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
   const app = registry.as({ actor: "ana" });
   await app.run(book, { at: "July 3", delay: 3600, twice: true });
-  expect((await rows()).map((r) => (r.delivery as { input: unknown }).input)).toEqual([{ at: "July 3" }]);
+  expect((await rows()).map((r) => (r.job as { input: unknown }).input)).toEqual([{ at: "July 3" }]);
   await app.run(book, { at: "now", delay: 0 });
   expect(ran).toEqual(["remind for now"]);
   expect(await rows()).toEqual([]); // the waiting one was replaced, then ran and was deleted
