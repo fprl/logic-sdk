@@ -450,7 +450,6 @@ test("testing: without begin it says how to set up the hooks; begin twice names 
 });
 
 test("long-lived process: concurrent requests never see each other's scope", async () => {
-  const { registry } = setup();
   const slow = query({
     input: z.object({ ms: z.number() }),
     handler: async ({ scope, run }, { ms }) => {
@@ -459,7 +458,6 @@ test("long-lived process: concurrent requests never see each other's scope", asy
     },
   });
   const d = createRegistry<Scope>({ modules: { items, log, slow: { slow } }, database: memoryDatabase() });
-  void registry;
   const results = await Promise.all(
     Array.from({ length: 40 }, (_, i) =>
       d.as({ actor: `u${i}`, locale: `l${i}` }).run(slow, { ms: (i * 7) % 13 }),
@@ -520,14 +518,14 @@ function regSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
   return { db, app: d.as({ actor: "a", locale: "es" }), d };
 }
 
-test("review #1: invalid emit + throw rejects cleanly, no unhandled rejection", async () => {
+test("invalid emit + throw rejects cleanly, no unhandled rejection", async () => {
   const { app } = regSetup();
   await expect(app.run(reg.badEmitThenThrow, {})).rejects.toMatchObject({ code: "reg.boom" });
   await tick();
   expect(unhandled.length).toEqual(0);
 });
 
-test("review #2: errors after commit never reach the caller (throwing onError, throwing waitUntil)", async () => {
+test("errors after commit never reach the caller (throwing onError, throwing waitUntil)", async () => {
   const { app, db } = regSetup({ onError: () => { throw new Error("onError exploded"); } });
   const quiet = console.error; console.error = () => {};
   try {
@@ -538,7 +536,7 @@ test("review #2: errors after commit never reach the caller (throwing onError, t
   expect(db.store.rows.items).toEqual([{ name: "listener-fails" }]);
 });
 
-test("review #3: emit takes the schema's input, listeners get its output", async () => {
+test("emit takes the schema's input, listeners get its output", async () => {
   const { app } = regSetup();
   seen.length = 0;
   await app.run(reg.stamp, { at: "2026-07-01T00:00:00Z" });

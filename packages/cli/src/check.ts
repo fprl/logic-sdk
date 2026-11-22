@@ -47,8 +47,9 @@ export function check(project: Project): Problem[] {
         continue;
       }
       if (to === f.module) continue;
-      if (!graph.has(f.module)) graph.set(f.module, new Map());
-      if (!graph.get(f.module)!.has(to)) graph.get(f.module)!.set(to, `${f.id} → ${e.to}`);
+      const edges = graph.get(f.module) ?? new Map<string, string>();
+      graph.set(f.module, edges);
+      if (!edges.has(to)) edges.set(to, `${f.id} → ${e.to}`);
     }
   for (const cycle of cycles(graph)) {
     const steps = cycle.map((m, i) => graph.get(m)!.get(cycle[(i + 1) % cycle.length]!)!);
@@ -81,7 +82,7 @@ export function check(project: Project): Problem[] {
         problems.push({
           code: "network-in-transaction",
           severity: "error",
-          message: `${f.id} is a ${kind} and calls fetch(). It can roll back, and a network call can't be undone.`,
+          message: `${fn.id} is a ${kind} and calls fetch(). It can roll back, and a network call can't be undone.`,
           at,
           fix: "Move the call to an action that runs the mutation, or emit an event and react in a listener.",
         });
@@ -90,7 +91,7 @@ export function check(project: Project): Problem[] {
       problems.push({
         code: "wall-clock",
         severity: "warning",
-        message: `${f.id} reads the clock directly, so tests can't freeze it.`,
+        message: `${fn.id} reads the clock directly, so tests can't freeze it.`,
         at,
         fix: "Use ctx.now() instead of new Date() or Date.now().",
       });

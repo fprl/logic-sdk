@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
-import { analyze, type Edge, type Loc } from "./analyze.ts";
+import type * as Core from "logic-sdk";
+import { analyze, type Edge, type Loc, type Source } from "./analyze.ts";
 
 export interface FnInfo {
   id: string;
@@ -56,13 +57,12 @@ export interface EventInfo {
 export type JsonSchema = Record<string, any>;
 export interface Project {
   root: string;
-  registryFile: string;
   modules: string[];
   functions: FnInfo[];
   listeners: ListenerInfo[];
   crons: CronInfo[];
   events: EventInfo[];
-  source: ReturnType<typeof analyze>;
+  source: Source;
 }
 
 /** An expected failure: printed as a diagnostic, exit code 1 (or 2 for usage). */
@@ -131,7 +131,7 @@ export async function loadProject(root: string): Promise<Project> {
   };
 
   // The app's own logic-sdk, so the CLI reads modules with the version the app runs.
-  const core = (await load("logic-sdk")) as { describeModules?: (m: Record<string, object>) => any };
+  const core = (await load("logic-sdk")) as Partial<typeof Core>;
   if (typeof core.describeModules !== "function")
     throw new CliError("core-too-old", "This app's logic-sdk has no describeModules().", "Update logic-sdk.");
 
@@ -145,7 +145,7 @@ export async function loadProject(root: string): Promise<Project> {
   for (const d of [...described.functions, ...described.events, ...described.listeners, ...described.crons]) idByExport.set(`${d.module}.${d.name}`, d.id);
   const real = <E extends { to: string }>(edges: E[]) => edges.map((e) => ({ ...e, to: idByExport.get(e.to) ?? e.to }));
   const src = (d: { module: string; name: string }) => source.fns.get(`${d.module}.${d.name}`);
-  const functions: FnInfo[] = described.functions.map((f: any) => {
+  const functions: FnInfo[] = described.functions.map((f) => {
     const s = src(f);
     return {
       id: f.id,
@@ -155,7 +155,7 @@ export async function loadProject(root: string): Promise<Project> {
       description: s?.doc ?? null,
       // the name as written in source; else the function's own name (`const member = …` names it), else "inline"
       authorize: f.fn.authorize ? (s?.authorize ?? (f.fn.authorize.name || "inline")) : null,
-      exposed: f.exposed === true,
+      exposed: f.exposed,
       takesInput: f.fn.input !== undefined,
       input: f.fn.input ? jsonSchemaOf(f.fn.input, "input") : null,
       output: f.fn.output ? jsonSchemaOf(f.fn.output, "output") : null,
@@ -168,7 +168,7 @@ export async function loadProject(root: string): Promise<Project> {
       calledBy: [],
     };
   });
-  const listeners: ListenerInfo[] = described.listeners.map((l: any) => ({
+  const listeners: ListenerInfo[] = described.listeners.map((l) => ({
     id: l.id,
     module: l.module,
     name: l.name,
@@ -182,7 +182,7 @@ export async function loadProject(root: string): Promise<Project> {
   for (const caller of [...functions, ...listeners])
     for (const edge of caller.runs) byId.get(edge.to)?.calledBy.push(caller.id);
 
-  const crons: CronInfo[] = described.crons.map((c: any) => ({
+  const crons: CronInfo[] = described.crons.map((c) => ({
     id: c.id,
     module: c.module,
     name: c.name,
@@ -194,7 +194,7 @@ export async function loadProject(root: string): Promise<Project> {
   }));
   for (const c of crons) byId.get(c.run)?.calledBy.push(c.id);
 
-  const events: EventInfo[] = described.events.map((e: any) => ({
+  const events: EventInfo[] = described.events.map((e) => ({
     id: e.id,
     module: e.module,
     name: e.name,
@@ -204,7 +204,6 @@ export async function loadProject(root: string): Promise<Project> {
 
   return {
     root,
-    registryFile: relative(root, registryFile),
     modules: Object.keys(modules),
     functions,
     listeners,

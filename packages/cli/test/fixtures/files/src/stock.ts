@@ -6,5 +6,5 @@ import { mutation } from "./init";
 export const reserve = mutation({
   id: "hold",
   input: z.object({ sku: z.string() }),
-  handler: async (_, { sku }) => ({ sku }),
+  handler: async (_, { sku }) => ({ sku, at: new Date().toISOString() }), // ! reads the clock
 });

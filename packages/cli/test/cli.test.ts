@@ -26,6 +26,7 @@ test("descriptions come from the JSDoc above each export: its first paragraph, o
   expect(of("availability.hold")).toEqual("Reserve a date range on a property's calendar"); // not the "Internal…" paragraph below it
   expect(of("enquiries.winOnBooking")).toEqual("Mark the enquiry won when its booking is confirmed"); // listeners too
   expect(cli(app, "show", "availability.hold", "--json").json().description).toEqual("Reserve a date range on a property's calendar");
+  expect(cli(app, "show", "enquiries.winOnBooking").out).toContain("Mark the enquiry won when its booking is confirmed");
 });
 
 test("list filters by module, kind and exposure", () => {
@@ -115,7 +116,8 @@ test("renamed definers (mutation: defineMutation) are checked like any other", (
 
 test("a module can be a single file, and explicit ids are what the CLI shows and links", () => {
   const r = cli(fixture("files"), "check", "--json");
-  expect(r.json()).toEqual({ errors: 0, warnings: 0, problems: [] }); // found in source by export name, not id
+  // found in source by export name, reported by id
+  expect(r.json()).toMatchObject({ errors: 0, warnings: 1, problems: [{ code: "wall-clock", message: expect.stringMatching(/^stock\.hold reads/) }] });
   expect(cli(fixture("files"), "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.hold"], emits: ["orders.created"] });
   expect(cli(fixture("files"), "show", "orders.created", "--json").json()).toMatchObject({ emittedBy: ["orders.place"], listeners: ["orders.email"] });
 });

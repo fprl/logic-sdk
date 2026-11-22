@@ -152,6 +152,18 @@ export const sendReceipt = listener({
 - **Only security rules get a runtime check.** The types reject a missing handler, a non-function policy or an async one; repeating those at runtime only reworded errors TypeScript already gives (an async policy is denied anyway, since a policy must return exactly `true`). What stays is `expose` without `authorize` or `output`, checked in `createRegistry` so it names the function ("orders.cancel has expose: true but no authorize"): an exposed function nobody authorizes is a hole for JS callers and casts, not just a type error. Config and event payloads share one plain-data check.
 - **What would change it:** several library-owned descriptive keys arriving (`title`, `tags`, `deprecated`), where a typed base would scale better than namespaces.
 
+#### Type cost of the setup
+
+`DrizzleDb` and meta per kind, against the setup before them (de15d86), on modules with zod, Drizzle queries and `AIMeta` (TypeScript 7.0.2, seven runs, median, 2026-11-22):
+
+| Definitions | Plain functions | Before | Now | Instantiations, before to now |
+| --- | --- | --- | --- | --- |
+| 150 | 0.224 s | 0.277 s | 0.274 s | +1.8% |
+| 300 | 0.284 s | 0.374 s | 0.377 s | +1.5% |
+| 900 | 0.643 s | 0.847 s | 0.781 s | +1.3% |
+
+Before and now differ by less than the noise between runs. An earlier +40% came from empty schemas and no Drizzle, where the library was most of the work. What would change it: a real app, or TypeScript 5 and 6 (not measured), showing more.
+
 ### No per-function middleware
 
 tRPC, oRPC and TanStack Start chain `.use(mw)` because they are the HTTP edge: middleware resolves the session or organization and adds it to ctx. Here that work happens once, at the entry, into `scope`, the way Phoenix 1.8 builds `%Scope{}` in a plug and passes it first to every context function. What's left per function is covered without a chain:
@@ -333,9 +345,9 @@ What would change it: long-lived Node becoming the main target (then pg-boss's m
 - **`retry(id)` revives failed rows only** and returns whether it did. A pending row belongs to its runner or a sweep, and resetting its attempts would break the fence and run it twice at once. Oban's `retry_job` ignores available and executing jobs the same way ([Oban](https://oban.hexdocs.pm/Oban.html)). `registry.jobs.retry` throws on `inProcess()`: sweeping nothing is harmless in a cron, but retrying an id on a transport that stores nothing is a bug.
 - **`expose` stays in the core, and adapters only narrow it.** It's the "may leave the process" boundary that makes `authorize` and `output` required, checked once in `createRegistry`. Adapters subtract with a `filter` (and a meta namespace when they have a per-function default, like `meta.ai.tool`), never add: an adapter publishing something not exposed would skip that check. trpc-to-openapi works the same way (a procedure reaches OpenAPI only with `meta.openapi`, on top of the router), and Convex chooses public vs internal in the core (`mutation` vs `internalMutation`). A `filter` for the fetch and oRPC adapters comes when someone needs one.
 
-### SQLite: not yet
+### SQLite: plain, on two connections (not built yet)
 
-It's the next database after Postgres (no MySQL for now), waiting on a driver that holds up. Checked on 2026-11-22:
+It's the next database after Postgres (no MySQL for now). What didn't hold up, checked on 2026-11-22:
 
 - **Synchronous drivers** (better-sqlite3, node:sqlite, bun:sqlite) commit before an async mutation finishes. Drizzle's types reject them in `drizzleAdapter`.
 - **A local libsql file** failed 9 of 10 concurrent mutations with `SQLITE_BUSY` (0.17.4). Queueing writers in the process isn't enough: a reader open at commit, or a second writer, leaves a lock or a connection that can't commit ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361), open and reported on 0.18.0).
@@ -347,7 +359,7 @@ What would change it: the two connections failing the shared adapter suite.
 
 ### The jobs table in SQL, one seam for every ORM
 
-Agreed on 2026-11-22, not built yet (ROADMAP, "Before 0.5.0"). The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. What would change it: a driver whose parameters or returned rows can't go through one such method.
+Agreed on 2026-11-22, API approved, not built yet (ROADMAP, "Before 0.5.0"). The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. What would change it: a driver whose parameters or returned rows can't go through one such method.
 
 ### Live tests on deployed platforms
 

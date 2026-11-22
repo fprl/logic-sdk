@@ -40,7 +40,8 @@ export function toFetchHandler<S extends object>(registry: Registry<S>, options:
   const onError = options.onError ?? ((e) => console.error("[logic-sdk] unexpected error", e));
 
   return async (request: Request, ...rest: any[]): Promise<Response> => {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
     if (!path.startsWith(base)) return json({ error: { kind: "not_found", code: "route_not_found" } }, 404);
     const id = path.slice(base.length);
 
@@ -56,7 +57,7 @@ export function toFetchHandler<S extends object>(registry: Registry<S>, options:
         const text = await request.text();
         input = text ? JSON.parse(text) : undefined;
       } else if (request.method === "GET" && entry.kind === "query") {
-        const raw = new URL(request.url).searchParams.get("input");
+        const raw = url.searchParams.get("input");
         input = raw ? JSON.parse(raw) : undefined;
       } else {
         const res = json({ error: { kind: "invalid", code: "method_not_allowed" } }, 405);

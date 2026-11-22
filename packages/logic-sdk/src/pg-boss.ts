@@ -202,7 +202,9 @@ export async function work(
   /** One job's try. `failed` is over (out of tries, or retrying can't help), so pg-boss mustn't retry it. */
   const settle = async (job: { id: string; data: Job; retryCount: number }): Promise<JobResult> => {
     let reason: unknown;
-    const fail = async (error: unknown) => void (reason = error); // kept by pg-boss as the failed job's output
+    const fail = async (error: unknown) => {
+      reason = error; // kept by pg-boss as the failed job's output
+    };
     try {
       const outcome = await registry.jobs.run(job.data, { attempt: job.retryCount + 1, fail });
       if (outcome === "failed") return { id: job.id, status: "deadletter", output: reason };

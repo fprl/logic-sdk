@@ -36,8 +36,10 @@ const access = (f: { authorize: string | null; exposed: boolean }) =>
   [f.authorize, f.exposed ? paint("green", "exposed") : dim("internal")].filter(Boolean).join(" ");
 /** "tasks.assign (scope: actor)": the run, and the scope keys it changes on purpose. */
 const runLabel = (e: { to: string; scope?: string[] }) => (e.scope ? `${e.to} (scope: ${e.scope.join(", ")})` : e.to);
-const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.filter((e) => e.scope).map((e) => ({ run: e.to, keys: e.scope! }));
-const plainFn = (f: FnInfo) => ({ ...f, runs: f.runs.map((e) => e.to), scopeChanges: scopeChanges(f.runs), emits: f.emits.map((e) => e.to) });
+const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.flatMap((e) => (e.scope ? [{ run: e.to, keys: e.scope }] : []));
+const plainRuns = <T extends FnInfo | ListenerInfo>(x: T) => ({ ...x, runs: x.runs.map((e) => e.to), scopeChanges: scopeChanges(x.runs) });
+const plainFn = (f: FnInfo) => ({ ...plainRuns(f), emits: f.emits.map((e) => e.to) });
+const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
@@ -80,7 +82,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const event = p.events.find((e) => e.id === name);
     if (!fn && !listener && !cron && !event) throw unknownName(p, name);
 
-    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? { ...listener, runs: listener.runs.map((e) => e.to), scopeChanges: scopeChanges(listener.runs) } : (cron ?? event));
+    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? plainRuns(listener) : (cron ?? event));
 
     const lines: string[] = [];
     const row = (label: string, value: string) => lines.push(`${dim(label.padEnd(12))}${value}`);
@@ -100,7 +102,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       row("called by", fn.calledBy.join(", ") || dim("nothing in this app (an entry point)"));
       if (fn.meta) row("meta", JSON.stringify(fn.meta));
     } else if (listener) {
-      lines.push(`${bold(listener.id)}  ${kind("listener")}`, dim(where(listener.at)), "");
+      lines.push(`${bold(listener.id)}  ${kind("listener")}`, ...(listener.description ? [listener.description] : []), dim(where(listener.at)), "");
       row("on", listener.event);
       if (listener.runs.length) row("runs", listener.runs.map(runLabel).join(", "));
     } else if (cron) {
@@ -205,11 +207,11 @@ const checkCommand = buildCommand({
     const errors = problems.filter((x) => x.severity === "error").length;
     if (errors) this.process.exitCode = 1;
     if (flags.json) return print(this, { errors, warnings: problems.length - errors, problems });
-    const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
     if (!problems.length)
       return out(this, `${paint("green", "✓")} ${count(p.functions.length, "function")}, ${count(p.listeners.length, "listener")}${p.crons.length ? `, ${count(p.crons.length, "cron")}` : ""} in ${count(p.modules.length, "module")}: no problems`);
     out(this, problems.map(diagnostic).join("\n\n"));
-    out(this, `\n${errors ? paint("red", `${errors} error${errors > 1 ? "s" : ""}`) : "0 errors"}, ${problems.length - errors} warning${problems.length - errors === 1 ? "" : "s"}`);
+    const total = count(errors, "error");
+    out(this, `\n${errors ? paint("red", total) : total}, ${count(problems.length - errors, "warning")}`);
   }),
 });
 
@@ -218,7 +220,7 @@ function unknownName(p: Project, name: string) {
   const close = names.filter((n) => n.includes(name) || name.includes(n.split(".")[1] ?? "")).slice(0, 3);
   return new CliError(
     "unknown-name",
-    `There's no function, listener or event called "${name}".`,
+    `There's no function, listener, cron or event called "${name}".`,
     close.length ? `Did you mean ${close.join(", ")}?` : "Run logic-sdk list to see every name.",
   );
 }
