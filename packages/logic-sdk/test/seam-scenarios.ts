@@ -26,7 +26,8 @@ export function seamScenarios(name: string, target: Target) {
     });
     afterAll(() => running.close());
 
-    const run = (text: string, params: unknown[] = []) => running.database.query(running.database.db, text, params);
+    // spread: postgres.js's rows are an Array subclass, which toMatchObject won't match to a plain one
+    const run = async (text: string, params: unknown[] = []) => [...(await running.database.query(running.database.db, text, params))];
 
     async function app(adapter?: (database: SqlDatabase) => Dispatcher) {
       const { database } = running;
