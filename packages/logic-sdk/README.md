@@ -18,7 +18,7 @@ Declare your types once, and who may do what:
 
 ```ts
 // src/logic.ts
-export const { query, mutation, action, event, on, createRegistry } = init<Config>();
+export const { query, mutation, action, event, listener, createRegistry } = init<Config>();
 
 // src/policies.ts: sync type guards over the scope
 export const anyone = () => true;
