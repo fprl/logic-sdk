@@ -64,7 +64,7 @@ export default {
 };
 ```
 
-**Node:** create the registry once at startup. Without `waitUntil`, a request waits for its listeners, so a graceful shutdown that drains requests drains them too. With the [outbox](/docs/adapters/drizzle#outbox) you can answer first, `waitUntil: () => {}`: a restart that cuts a listener off is swept up after its lease. Not with `inProcess()`: there, work still running at a restart is lost.
+**Node:** create the registry once at startup. Without `waitUntil`, a request waits for its listeners, so a graceful shutdown that drains requests drains them too. With the [outbox](/docs/adapters/drizzle#outbox) you can answer first, `waitUntil: () => {}`: a restart that cuts a listener off is swept up after its lease: retried if it has `attempts` left, else kept as failed for `registry.jobs.retry(id)`. Not with `inProcess()`: there, work still running at a restart is lost.
 
 ## Loops
 

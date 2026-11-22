@@ -533,7 +533,8 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
    * Serverless: let listeners finish after the response. Pass the platform's global:
    * `import { waitUntil } from "cloudflare:workers"` or `import { waitUntil } from "@vercel/functions"`.
    * Without it, `run` waits for listeners. On a long-lived server with the outbox, `() => {}` answers first (a restart
-   * is swept up); with `inProcess()`, don't: work still running at a restart is lost.
+   * is swept up after its lease: retried, or failed when it was out of attempts); with `inProcess()`, don't: work
+   * still running at a restart is lost.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Failures after commit land here (listeners, dispatcher). They never fail the caller. */
