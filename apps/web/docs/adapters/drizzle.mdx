@@ -31,7 +31,7 @@ Without Drizzle, write the two sides yourself: `db: ReadWrite<MyReader, MyTx>`, 
 
 ## Retries
 
-The adapter tells the registry which failures are worth retrying: Postgres deadlocks (`40P01`) and serialization failures (`40001`). See [Transactions](/docs/concepts/transactions#lost-races-are-retried).
+The adapter tells the registry which failures are worth retrying: Postgres deadlocks (`40P01`) and serialization failures (`40001`). Three tries by default; `drizzleAdapter(db, { transactionAttempts: 5 })` changes it. See [Transactions](/docs/concepts/transactions#lost-races-are-retried).
 
 ## `sqlState`
 

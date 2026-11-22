@@ -725,12 +725,12 @@ test("a mutation that loses a race (deadlock) is re-run in a fresh transaction; 
   expect(services.log).toEqual(["added again (items.added, es)"]);
 });
 
-test("retries stop after `attempts`, and errors that aren't retryable are never retried", async () => {
+test("retries stop after `transactionAttempts`, and errors that aren't retryable are never retried", async () => {
   let calls = 0;
   const db = memoryDatabase();
   const alwaysDeadlocks = { ...db, retryable: () => true,
     transaction: async () => { calls++; throw Object.assign(new Error("deadlock detected"), { code: "40P01" }); } };
-  const r = createRegistry<Scope>({ modules: { items, log }, database: alwaysDeadlocks, services: { log: [] }, retry: { attempts: 2 } });
+  const r = createRegistry<Scope>({ modules: { items, log }, database: { ...alwaysDeadlocks, transactionAttempts: 2 }, services: { log: [] } });
   await expect(r.as({ actor: "a", locale: "es" }).run(add, { name: "x" })).rejects.toThrow(/deadlock/);
   expect(calls).toEqual(2);
 
