@@ -57,6 +57,15 @@ createRegistry({
 
 With your own adapter, set `transactionAttempts` next to `retryable`.
 
+## Lock rows in one order
+
+Two transactions that lock the same rows in opposite orders deadlock, and retries only make that rarer. Write them in one order, by key:
+
+```ts
+const items = input.items.toSorted((a, b) => (a.sku < b.sku ? -1 : 1));
+for (const item of items) await takeStock(ctx, item);
+```
+
 ## Retries don't replace locks
 
 When a rule depends on rows that don't exist yet, like "no two bookings overlap", two transactions can both pass the check. Lock first, then check:
