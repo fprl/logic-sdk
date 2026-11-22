@@ -27,7 +27,7 @@ const result = await generateText({
 Every tool call goes through `caller.run`. That means an agent gets exactly what a person with the same scope gets:
 
 - **`authorize` runs.** An agent bound to a guest can't confirm bookings.
-- **One transaction per call**, with retries on lost races.
+- **One transaction per call**, retried on lost races if you set [`transactionAttempts`](/docs/concepts/transactions#lost-races).
 - **Events after commit**, so listeners send the email once the data is safe.
 - **Only `expose: true` functions can be tools**, at the type level too.
 

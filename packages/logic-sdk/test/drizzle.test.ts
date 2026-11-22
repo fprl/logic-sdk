@@ -17,14 +17,14 @@ const deadlocks = mutation({
   },
 });
 
-test("a deadlock gets three tries by default, or drizzleAdapter's transactionAttempts, in tests too", async () => {
+test("a deadlock gets one try by default, or drizzleAdapter's transactionAttempts, in tests too", async () => {
   const modules = { x: { deadlocks } };
   const standard = createRegistry({ modules, database: drizzleAdapter(db) });
   const twice = createRegistry({ modules, database: drizzleAdapter(db, { transactionAttempts: 2 }) });
 
   tries = 0;
   await expect(standard.as({}).run(deadlocks)).rejects.toThrow();
-  expect(tries).toBe(3);
+  expect(tries).toBe(1);
 
   tries = 0;
   await expect(twice.as({}).run(deadlocks)).rejects.toThrow();

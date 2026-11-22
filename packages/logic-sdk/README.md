@@ -95,7 +95,7 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 - **One transaction across modules.** A failure anywhere rolls back everything, even if someone catches it.
 - **Side effects after commit.** Mutations emit events; listeners send the email once the data is safe.
 - **Jobs, four ways.** Your Postgres as the queue (`databaseQueue`), Cloudflare Queues alone, an outbox in front of a queue, or pg-boss. All but in-process can run a job twice, so make them idempotent.
-- **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `drizzleAdapter(db, { transactionAttempts })`.
+- **Lost races, retried if you ask.** `drizzleAdapter(db, { transactionAttempts: 3 })` re-runs a mutation after a deadlock or serialization failure. The default is 1, like Laravel.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
 - **Internal by default.** Only `expose: true` functions reach HTTP, RPC or AI tools, with a required policy and output contract.

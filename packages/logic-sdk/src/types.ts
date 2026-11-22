@@ -415,7 +415,7 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   retryable?(error: unknown): boolean;
   /**
    * Tries in total for a top-level mutation whose transaction is `retryable`, each in a fresh one, like Laravel's
-   * `DB::transaction(fn, attempts)`. Default 3; 1 turns it off. A job's own tries are its `attempts`.
+   * `DB::transaction(fn, attempts)`. Default 1, like Laravel's: no retry. A job's own tries are its `attempts`.
    */
   transactionAttempts?: number;
 }

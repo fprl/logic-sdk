@@ -371,7 +371,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
-  const transactionAttempts = Math.max(1, options.database?.transactionAttempts ?? 3); // the app's, so a test's nested adapter keeps it
+  const transactionAttempts = Math.max(1, options.database?.transactionAttempts ?? 1); // the app's, so a test's nested adapter keeps it
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
     o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.source} failed`, e));

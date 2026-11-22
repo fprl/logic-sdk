@@ -25,7 +25,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **Events only leave after commit.** No email for a booking that rolled back.
 - ✅ **Nothing after commit can fail the caller.** Listener, dispatcher, `waitUntil` and `onError` failures are all reported, never thrown.
 - ✅ **No side effects in a transaction**, at the type level: mutations and queries get no `services`. So you never hold a transaction open across a Stripe call, and mutations are safe to re-run.
-- ✅ **Automatic retry on deadlocks and serialization failures** (40001/40P01), which follows from the rule above.
+- ✅ **Safe retry on deadlocks and serialization failures** (40001/40P01) with one option, `transactionAttempts`, which follows from the rule above.
 
 *Instead you'd:* write `db.transaction` everywhere, pass `tx` through every helper, keep an after-commit array per request, and remember all of this in every PR.
 

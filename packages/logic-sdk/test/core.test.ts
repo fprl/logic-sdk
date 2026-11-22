@@ -711,7 +711,7 @@ test("an adapter that retries the transaction delivers each event once", async (
 test("a mutation that loses a race (deadlock) is re-run in a fresh transaction; events go out once", async () => {
   const db = memoryDatabase();
   let attempts = 0;
-  const racy = { ...db, retryable: (e: unknown) => (e as { code?: string }).code === "40P01",
+  const racy = { ...db, transactionAttempts: 2, retryable: (e: unknown) => (e as { code?: string }).code === "40P01",
     transaction: <T>(fn: (tx: Store) => Promise<T>) => db.transaction(async (tx) => {
       const out = await fn(tx);
       if (++attempts === 1) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
@@ -735,7 +735,7 @@ test("retries stop after `transactionAttempts`, and errors that aren't retryable
   expect(calls).toEqual(2);
 
   calls = 0;
-  const r2 = createRegistry<Scope>({ modules: { items, log }, database: { ...alwaysDeadlocks, retryable: () => false }, services: { log: [] } });
+  const r2 = createRegistry<Scope>({ modules: { items, log }, database: { ...alwaysDeadlocks, transactionAttempts: 2, retryable: () => false }, services: { log: [] } });
   await expect(r2.as({ actor: "a", locale: "es" }).run(add, { name: "x" })).rejects.toThrow(/deadlock/);
   expect(calls).toEqual(1);
 });

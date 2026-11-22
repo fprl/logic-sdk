@@ -36,13 +36,13 @@ try {
 
 Postgres does the same after a failed statement. See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
 
-## Lost races are retried
+## Lost races
 
-Sometimes Postgres aborts a transaction because it lost a race with another one: a deadlock (`40P01`) or a serialization failure (`40001`). The registry then runs the whole mutation again, in a fresh transaction.
+Sometimes Postgres aborts a transaction because it lost a race with another one: a deadlock (`40P01`) or a serialization failure (`40001`). By default that error reaches the caller, as in Laravel. Set `transactionAttempts` and the registry runs the whole mutation again, in a fresh transaction, after a short random pause.
 
-- Up to **3 attempts**, with a short random pause between them.
+- **Default 1**: no retry, like Laravel's `DB::transaction`.
 - **Safe**, because mutations have no side effects and their events are rebuilt on each attempt.
-- **Familiar**: Laravel does the same with `DB::transaction(fn, attempts)`, and Convex re-runs conflicting mutations automatically.
+- **Familiar**: Laravel's `DB::transaction(fn, attempts: 3)`, set once for your database.
 - **Not a job retry**: a listener's `attempts` decide how often a job runs. Each of those runs can retry its own transactions.
 
 It's a database setting, so it goes on the database adapter:
@@ -50,12 +50,20 @@ It's a database setting, so it goes on the database adapter:
 ```ts
 createRegistry({
   modules,
-  // 1 turns retries off
-  database: drizzleAdapter(db, { transactionAttempts: 5 }),
+  database: drizzleAdapter(db, { transactionAttempts: 3 }),
 });
 ```
 
 With your own adapter, set `transactionAttempts` next to `retryable`.
+
+## Lock rows in one order
+
+Two transactions that lock the same rows in opposite orders deadlock. Write them in one order, by key:
+
+```ts
+const items = input.items.toSorted((a, b) => a.sku.localeCompare(b.sku));
+for (const item of items) await takeStock(ctx, item);
+```
 
 ## Retries don't replace locks
 
