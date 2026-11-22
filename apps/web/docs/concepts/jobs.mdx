@@ -66,7 +66,7 @@ await registry.jobs.sweep();                                          // a cron 
 await registry.jobs.retry(id);                                        // put a failed job back in line
 ```
 
-- **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means it's over: the listener is out of `attempts`, or retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when the listener has tries left and a retry might help. Every failure goes to `onError` with the job id, the attempt, and `outcome`: `"retry"`, `"failed"` or `"discarded"`, so you can alert on the last one only.
+- **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means it's over: the listener is out of `attempts`, or retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when the listener has tries left and a retry might help. Every failure goes to `onError` with `source` (the listener, cron or function), the `job` itself, the attempt, and `outcome`: `"retry"`, `"failed"` or `"discarded"`, so you can alert on the last one only.
 - **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, and so does pg-boss, which maintains itself, so one cron handler works with any of them.
 - **`retry` only revives failed jobs** and returns whether it did. A pending one belongs to its runner, and resetting it could run it twice at once. It throws on `inProcess()`, which stores none.
 

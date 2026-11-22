@@ -116,9 +116,9 @@ export function makeJobs(deps: JobsDeps) {
     const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
-    const loop = () => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing (a loop?)`);
-    if (deepEvent) report(loop(), { listener: "(dispatcher)", envelope: deepEvent });
-    else if (deepCall) report(loop(), infoOf(deepCall));
+    const loop = (what: string) => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing ${what} (a loop?)`);
+    if (deepEvent) report(loop(deepEvent.name), { source: "(dispatcher)" });
+    else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
         const job = deliveryOf(l, e);
@@ -130,11 +130,16 @@ export function makeJobs(deps: JobsDeps) {
     return [...deliveries, ...calls.filter(fits)];
   }
 
+  /** An adapter that couldn't take a commit's jobs: each one may be lost, so each is reported. */
+  const reportEach = (error: unknown, jobs: Job[]) => {
+    for (const job of jobs) report(error, { source: "(dispatcher)", job });
+  };
+
   /** What `onError` hears about a job. */
   const infoOf = (job: Job, attempt?: number): FailureInfo =>
     job.kind === "delivery"
-      ? { listener: job.listener, envelope: job.envelope, delivery: job.id, attempt }
-      : { listener: job.kind === "cron" ? job.cron : job.fn, envelope: undefined, delivery: job.id, attempt };
+      ? { source: job.listener, job, attempt }
+      : { source: job.kind === "cron" ? job.cron : job.fn, job, attempt };
 
   /** Who a stored job runs as: `jobs.scope.load` rebuilds it; null means discard it (reported). */
   async function scopeOf(job: Job, stored: object, attempt: number): Promise<object | null> {
@@ -151,7 +156,8 @@ export function makeJobs(deps: JobsDeps) {
    */
   async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
     const info = infoOf(job, attempt);
-    const kind: string = job.kind; // read before narrowing: a job queued by another version can have a kind this one doesn't know
+    // read before narrowing: a job queued by another version can have a kind this one doesn't know
+    const { id, kind }: { id: string; kind: string } = job;
     const failed = async (error: unknown) => {
       report(error, { ...info, outcome: "failed" });
       await fail?.(error);
@@ -197,7 +203,7 @@ export function makeJobs(deps: JobsDeps) {
         return "done";
       });
     }
-    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${info.delivery} has kind ${JSON.stringify(kind)}, which this version can't run.`));
+    if (job.kind !== "delivery") return failed(new Error(`[logic-sdk] job ${id} has kind ${JSON.stringify(kind)}, which this version can't run.`));
     const l = listenerById.get(job.listener);
     if (!l) return missing("listener", job.listener);
     const { envelope } = job;
@@ -244,7 +250,7 @@ export function makeJobs(deps: JobsDeps) {
         if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like outbox(db)) need `database`.");
         await database.transaction((tx) => enqueue(tx, jobs));
       }
-      await dispatcher.deliver(jobs, runner).catch((e) => report(e, { listener: "(dispatcher)", envelope: undefined }));
+      await dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
       return jobs.map((job) => job.cron);
     },
     sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
@@ -254,5 +260,5 @@ export function makeJobs(deps: JobsDeps) {
     },
   };
 
-  return { toJobs, runner, jobs, due, checkHold };
+  return { toJobs, runner, jobs, due, checkHold, reportEach };
 }

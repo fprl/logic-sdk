@@ -431,13 +431,15 @@ export interface Dispatcher {
   fail?(job: Job, error: unknown): Promise<void>;
 }
 
-/** What `onError` gets with a failure after commit. `delivery`, `attempt` and `outcome` are set when a listener's job failed. */
+/**
+ * What `onError` gets with a failure after commit. `job`, `attempt` and `outcome` are set when a job failed: the job
+ * itself, like Laravel's `JobFailed` and Oban's exception telemetry.
+ */
 export interface FailureInfo {
-  /** The listener, cron or scheduled function that failed (or the part of the registry, like `"(dispatcher)"`). */
-  listener: string;
-  envelope: Envelope | undefined;
-  /** The job's id. */
-  delivery?: string;
+  /** The listener, cron or scheduled function that failed, or the part of the registry (`"(dispatcher)"`). */
+  source: string;
+  /** The job that failed, or that the adapter couldn't take (`"(dispatcher)"`). */
+  job?: Job;
   attempt?: number;
   /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
   outcome?: "retry" | "failed" | "discarded";

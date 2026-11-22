@@ -230,10 +230,20 @@ test("output strips keys the schema doesn't name, so a returned row can't leak a
 
 test("listener failure never fails the caller; goes to onError", async () => {
   const errors: string[] = [];
-  const { app, db } = setup({ onError: (e, info) => errors.push(`${info.listener}: ${(e as Error).message}`) });
+  const { app, db } = setup({ onError: (e, info) => errors.push(`${info.source}: ${(e as Error).message}`) });
   await app.run(items.add, { name: "listener-fails" });
   expect(db.store.rows.items).toEqual([{ name: "listener-fails" }]);
   expect(errors).toEqual(["log.onAdded: listener exploded"]);
+});
+
+test("an adapter that can't take the jobs: each is reported with the job itself, and the caller still succeeds", async () => {
+  const reported: FailureInfo[] = [];
+  const { app } = setup({
+    onError: (_e, info) => void reported.push(info),
+    jobs: { adapter: { deliver: async () => { throw new Error("queue down"); } }, scope: { load: (saved) => saved } },
+  });
+  expect(await app.run(items.add, { name: "q" })).toBeDefined();
+  expect(reported).toEqual([expect.objectContaining({ source: "(dispatcher)", job: expect.objectContaining({ kind: "delivery", listener: "log.onAdded" }) })]);
 });
 
 test("waitUntil, set once on the registry: run returns after commit, listeners finish later", async () => {
@@ -568,7 +578,7 @@ test("registry.jobs.run: a throw retries while the job has tries left; rules and
 
   expect(await r.jobs.run(job({ kind: "fine" }))).toEqual("done");
   await expect(r.jobs.run(job({ kind: "boom" }), { attempt: 2 })).rejects.toThrow("exploded"); // tries left: the queue redelivers
-  expect(reported.at(-1)).toMatchObject({ listener: "x.react", delivery: "x.react@e", attempt: 2, outcome: "retry" });
+  expect(reported.at(-1)).toMatchObject({ source: "x.react", job: { id: "x.react@e" }, attempt: 2, outcome: "retry" });
   expect(await r.jobs.run(job({ kind: "boom" }), { attempt: 3 })).toEqual("failed"); // the last try
   expect(reported.at(-1)).toMatchObject({ attempt: 3, outcome: "failed" });
 
@@ -582,7 +592,7 @@ test("registry.jobs.run: a throw retries while the job has tries left; rules and
   await expect(r.jobs.run(job({ kind: "taken" }))).rejects.toMatchObject({ kind: "conflict" }); // a lost race retries
   expect(await r.jobs.run(job({ nope: 1 }))).toEqual("failed"); // the payload no longer matches its schema
   expect(await r.jobs.run(job({ kind: "fine" }, "x.gone"))).toEqual("failed"); // renamed or removed: kept for jobs.retry
-  expect(reported.at(-1)).toMatchObject({ listener: "x.gone", outcome: "failed" });
+  expect(reported.at(-1)).toMatchObject({ source: "x.gone", outcome: "failed" });
 });
 
 test("listener: attempts is a whole number of tries, delay is seconds", () => {
@@ -929,7 +939,7 @@ test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, wit
   const [, broken] = sent;
   await expect(registry.jobs.run(broken!, { attempt: 1 })).rejects.toThrow("smtp down"); // a try left
   expect(await registry.jobs.run(broken!, { attempt: 2 })).toBe("failed");
-  expect(reported.at(-1)).toMatchObject({ listener: "reports.broken", delivery: "reports.broken@20261123T0900Z", outcome: "failed" });
+  expect(reported.at(-1)).toMatchObject({ source: "reports.broken", job: { id: "reports.broken@20261123T0900Z" }, outcome: "failed" });
   expect(await registry.jobs.run({ kind: "cron", id: "reports.gone@x", cron: "reports.gone", scheduledAt: "", attempts: 1 })).toBe("failed"); // renamed or removed
 });
 

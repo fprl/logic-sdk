@@ -369,7 +369,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const attempts = Math.max(1, options.retry?.attempts ?? 3);
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
-    o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.listener} failed`, e));
+    o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.source} failed`, e));
   const report = (e: unknown, info: FailureInfo) => {
     try {
       reportRaw(e, info);
@@ -515,7 +515,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toJobs, runner, jobs, due, checkHold } = makeJobs({
+  const { toJobs, runner, jobs, due, checkHold, reportEach } = makeJobs({
     listeners,
     events,
     crons,
@@ -617,18 +617,18 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     try {
       for (const e of outbox) o.record?.(e);
       if (!jobs.length) return;
-      const delivery = dispatcher.deliver(jobs, runner).catch((e) => report(e, { listener: "(dispatcher)", envelope: outbox[0] }));
+      const delivery = dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
       if (waitUntil) {
         try {
           waitUntil(delivery);
           return;
         } catch (e) {
-          report(e, { listener: "(waitUntil)", envelope: outbox[0] });
+          report(e, { source: "(waitUntil)" });
         }
       }
       await delivery;
     } catch (e) {
-      report(e, { listener: "(after commit)", envelope: outbox[0] });
+      report(e, { source: "(after commit)" });
     }
   }
 
