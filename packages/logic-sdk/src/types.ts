@@ -532,7 +532,7 @@ export interface Overrides {
   database?: DatabaseAdapter<unknown, unknown>;
   services?: object;
   /** Merged over the registry's config, section by section. */
-  config?: object;
+  config?: unknown;
   adapter?: Dispatcher;
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;

@@ -156,7 +156,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     const derived = internal(registry).derive({
       database: db !== undefined && database?.nest ? database.nest(db) : database,
       services: options.services,
-      config: options.config as object | undefined,
+      config: options.config,
       now: clock,
       stubs,
       record: (e) => events.push(e),

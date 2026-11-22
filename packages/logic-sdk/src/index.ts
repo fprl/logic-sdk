@@ -645,7 +645,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     [INTERNAL]: {
       options,
       config,
-      derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) as object | undefined }),
+      derive: (more: Overrides) => build<S, Mods, Cf>(options, { ...o, ...more, config: mergeConfig(o.config, more.config) }),
       envelope: (event, payload, scope) => envelopeOf(event, payload, scope, 1),
       due,
     },
