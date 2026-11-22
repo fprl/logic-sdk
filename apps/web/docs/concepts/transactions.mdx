@@ -42,7 +42,6 @@ Sometimes Postgres aborts a transaction because it lost a race with another one:
 
 - **Default 1**: no retry, like Laravel's `DB::transaction`.
 - **Safe**, because mutations have no side effects and their events are rebuilt on each attempt.
-- **Familiar**: Laravel's `DB::transaction(fn, attempts: 3)`, set once for your database.
 - **Not a job retry**: a listener's `attempts` decide how often a job runs. Each of those runs can retry its own transactions.
 
 It's a database setting, so it goes on the database adapter:
