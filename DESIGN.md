@@ -280,7 +280,7 @@ Never a correctness option in `meta.<adapter>`: switching adapters would mean re
 
 - **the core enforces what it can** (`attempts`, in `jobs.run`), so adapters only map outcomes
 - an adapter refuses what it can't honour in **`check({ listeners, database })`**, at `createRegistry` (Cloudflare alone refuses a `delay` over 24 hours; the outbox in front holds it instead)
-- **`inProcess()` and inline tests ignore `attempts` and `delay`:** one try, right away, like Laravel's sync queue (`SyncQueue::later` ignores the delay, and sync jobs aren't retried). Not "emulates everything": that was this file's earlier claim, and it wasn't true.
+- **`inProcess()` and inline tests ignore `attempts` and `delay`:** one try, right away (a throw is `failed`: until 2026-11-22 it was reported as a `retry`, and none came), like Laravel's sync queue (`SyncQueue::later` ignores the delay, and sync jobs aren't retried). Not "emulates everything": that was this file's earlier claim, and it wasn't true.
 
 ### The jobs model: Laravel, as it runs on SQS
 

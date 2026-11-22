@@ -1214,3 +1214,26 @@ test("testing: drain runs each waiting job at the time it was due, so one that r
   await expect(t.jobs.drain({ until: "garbage" })).rejects.toThrow(/needs a valid date/);
   await t.rollback();
 });
+
+test("inProcess() and inline tests try once: a job with attempts left is failed, never a retry that won't come", async () => {
+  const { mutation, event, listener, createRegistry } = init<{ scope: object; db: Store }>();
+  const happened = event({ payload: z.object({}) });
+  const go = mutation({ async handler(ctx) { ctx.emit(happened, {}); } });
+  let tries = 0;
+  const flaky = listener({ event: () => happened, attempts: 3, async handler() { tries++; throw new Error("down"); } });
+  const outcomes: (string | undefined)[] = [];
+  const registry = createRegistry({
+    modules: { x: { happened, go, flaky } },
+    database: memoryDatabase(),
+    onError: (_error, info) => void outcomes.push(info.outcome),
+  });
+  await registry.as({}).run(go);
+
+  const t = createTestRegistry(registry);
+  await t.begin();
+  await expect(t.as({}).run(go)).rejects.toThrow("down");
+  await t.rollback();
+
+  expect(tries).toBe(2);
+  expect(outcomes).toEqual(["failed", "failed"]);
+});

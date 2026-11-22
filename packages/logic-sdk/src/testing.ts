@@ -99,7 +99,7 @@ const testJobs = (mode: TestOptions["jobs"], app: Dispatcher | undefined, queued
         if (waiting >= 0) scheduled.splice(waiting, 1);
       }
       const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
-      if (!waits) await runner.run(job).catch(() => {}); // reported, so the test sees it
+      if (!waits) await runner.run({ ...job, attempts: 1 }); // one try, like inProcess(): reported, so the test sees it
       else if (job.kind === "call") scheduled.push(job);
       else if (job.kind === "delivery") queued.push(job);
     }
