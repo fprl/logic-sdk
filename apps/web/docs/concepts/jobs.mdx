@@ -89,7 +89,7 @@ export const sendReceipt = listener({
 - **A last try that never finished** (the process crashed, or the job ran past the time `databaseQueue` keeps extending its lease) is `failed` without running again, as Laravel's worker does.
 - **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
 - **`delay`** is stamped on the job as `runAt`. `databaseQueue` and `outbox` keep the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
-- **`inProcess()` tries once and can't hold a job:** `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue(db)`. Cloudflare alone holds up to 24 hours.
+- **`inProcess()` tries once and can't hold a job.** What throws is `failed`, whatever its `attempts`. And `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue(db)`. Cloudflare alone holds up to 24 hours.
 
 ## Scheduled calls
 

@@ -26,7 +26,8 @@ import type {
 
 const IN_PROCESS: Dispatcher = {
   async deliver(jobs, { run }) {
-    for (const job of jobs) await run(job).catch(() => {}); // already reported; nothing retries in-process
+    // one try, whatever `attempts` says: what throws has failed, so onError never hears of a retry that won't come
+    for (const job of jobs) await run({ ...job, attempts: 1 });
   },
 };
 /**
