@@ -46,7 +46,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - **Done: pg-boss** (`logic-sdk/pg-boss`: `pgBoss(boss)`, `work(registry, boss)`, a queue per listener and cron). Per-key order (`key_strict_fifo`) waits for `key`.
    - **Next:** Inngest (one Inngest function per listener, from `registry.definitions`) before the adapter contract is called stable. `key`, `dedupe` and `timeout` land with those adapters, refused in `check` where they can't be honoured. Drizzle 1.0 (RC) only, like the rest of the library.
    - **Done:** the outbox's claim tested with concurrent sweepers on real Postgres (CI sets `DATABASE_URL` for every workspace).
-   - **Later:** a SQLite outbox (libsql: Drizzle's synchronous SQLite drivers can't run async mutations).
+   - **Later:** a SQLite outbox, once a driver holds up (DESIGN.md, "SQLite: not yet").
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `outbox()` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `attempts`, `delay` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
    - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with the outbox (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).

@@ -12,7 +12,7 @@ createRegistry({
 });
 ```
 
-`drizzleAdapter(db)` takes any Drizzle database with async interactive transactions: node-postgres, postgres.js, PGlite, Neon (websocket), Hyperdrive and libsql.
+`drizzleAdapter(db)` takes any Drizzle database with async interactive transactions: node-postgres, postgres.js, PGlite, Neon (websocket) and Hyperdrive. For SQLite, see [below](#not-d1-http-drivers-or-sqlite-yet).
 
 ## Types
 
@@ -78,8 +78,10 @@ export default {
 - **[Crons](/docs/concepts/crons) run once per minute** across servers: re-export `cronRunsTable` next to `outboxTable` when you have crons.
 - **At least once.** A crash between a listener finishing and its row being deleted runs it again, so a listener that charges or emails should record `ctx.event.id` and skip it if it has seen it. That's yours, as in Rails, Laravel and Oban.
 
-## Not D1, HTTP drivers, or synchronous SQLite
+## Not D1, HTTP drivers, or SQLite yet
 
 Cloudflare D1 rejects `BEGIN` and `SAVEPOINT`, and HTTP drivers can't hold a transaction open. `createRegistry` refuses to start when there are mutations but no transactional adapter. On Workers, use Postgres through Hyperdrive.
 
-Drizzle's better-sqlite3, bun:sqlite, node:sqlite and Durable Objects drivers run transactions synchronously: they commit before an async mutation finishes, so a failed mutation would keep its writes. Drizzle's types reject them in `drizzleAdapter`. For SQLite, use libsql. The outbox is Postgres-only for now.
+Drizzle's better-sqlite3, bun:sqlite, node:sqlite and Durable Objects drivers run transactions synchronously: they commit before an async mutation finishes, so a failed mutation would keep its writes. Drizzle's types reject them in `drizzleAdapter`.
+
+Don't use a local libsql file either, though it typechecks: mutations that overlap fail with `SQLITE_BUSY`, and can leave the database locked ([352](https://github.com/tursodatabase/libsql-client-ts/issues/352), [361](https://github.com/tursodatabase/libsql-client-ts/issues/361)). Remote Turso is untested. Use Postgres for now: the outbox needs it anyway.
