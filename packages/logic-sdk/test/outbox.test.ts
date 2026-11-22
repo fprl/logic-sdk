@@ -13,7 +13,7 @@ await pg.exec(`
   CREATE TABLE logic_outbox (
     id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
     attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
-    last_error text, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
+    receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
   );
   CREATE INDEX logic_outbox_due ON logic_outbox (available_at) WHERE status = 'pending';
   CREATE UNIQUE INDEX logic_outbox_replace ON logic_outbox (replace_key) WHERE status = 'pending' and attempts = 0;
@@ -45,7 +45,7 @@ const react = listener({
     ran.push(`${name}#${ctx.event.attempt}`);
     if (next === "throw") throw new Error("smtp down");
     if (next === "deny") throw ctx.errors.reject("nope");
-    if (next === "lose-lease") await db.update(outboxTable).set({ attempts: sql`${outboxTable.attempts} + 1` }); // a sweep took it over
+    if (next === "lose-lease") await db.update(outboxTable).set({ attempts: sql`${outboxTable.attempts} + 1`, receipt: "a sweep's" }); // a sweep took it over
   },
 });
 
@@ -76,7 +76,7 @@ test("a failure keeps the row with a backoff and the error; a sweep after the ba
   next = "throw";
   await app.run(add, { name: "lamp" });
   const [row] = await rows();
-  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "smtp down" });
+  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: expect.stringContaining("smtp down") });
   expect(row!.availableAt.getTime()).toBeGreaterThan(Date.now()); // e^1 seconds from now
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // not due yet
   next = "ok";
@@ -111,18 +111,18 @@ test("a rule saying no is failed at once, no retries", async () => {
   expect(await rows()).toMatchObject([{ status: "failed", attempts: 1 }]);
 });
 
-test("a runner that crashed after commit: its lease expires and a sweep takes over", async () => {
+test("a runner that crashed after commit: a sweep takes over once its pickup time is over", async () => {
   const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still leased
+  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still its request's to run
   const [row] = await rows(); // the row is the job: what was enqueued is what runs
   expect(row!.job).toMatchObject({ id: row!.id, listener: "x.react", envelope: { name: "x.added", payload: { name: "rug" }, depth: 1 } });
-  await makeDue(); // the lease ran out
+  await makeDue(); // the pickup time is over
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["rug#1"]); // never started, so this is its first try
 });
 
-test("a slow runner can't undo a newer claim: completion writes are fenced on attempts", async () => {
+test("a slow runner can't undo a newer claim: completion writes are fenced on the receipt", async () => {
   const { app } = setup();
   next = "lose-lease";
   await app.run(add, { name: "vase" });
@@ -178,7 +178,7 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
   via.down = true;
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
   const [row] = await rows();
-  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: "queue unavailable" });
+  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: expect.stringContaining("queue unavailable") });
   expect(reported).toEqual([expect.objectContaining({ source: "x.react", job: expect.objectContaining({ id: row!.id }), attempt: 1 })]);
   await makeDue();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 }); // second handoff fails too
@@ -233,7 +233,7 @@ test("via: a job that fails for good in the consumer comes back as a failed row,
   next = "throw";
   await app.run(add, { name: "lamp" });
   const [row] = await rows();
-  expect(row).toMatchObject({ status: "failed", lastError: "smtp down" });
+  expect(row).toMatchObject({ status: "failed", lastError: expect.stringContaining("smtp down") });
   next = "ok";
   expect(await registry.jobs.retry(row!.id)).toBe(true);
 });
@@ -274,7 +274,7 @@ test("a crash between commit and the first try: the sweep's claim is the first t
   const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: died, scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(await rows()).toMatchObject([{ status: "pending", attempts: 0 }]);
-  await makeDue(); // the lease ran out
+  await makeDue(); // the pickup time is over
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["once desk"]);
 });
@@ -386,4 +386,67 @@ test("retry of a failed call drops its key, so it doesn't collide with the one w
   const byId = Object.fromEntries((await rows()).map((r) => [r.id, [r.status, r.replaceKey]]));
   expect(byId[failed]).toEqual(["pending", null]); // back in line, no longer replaceable
   expect(Object.values(byId)).toContainEqual(["pending", "x.remind@b1"]); // the one waiting kept its key
+});
+
+test("a commit's jobs are claimed one at a time: while one runs, the next hasn't spent its attempt", async () => {
+  let whileFirstRan: number[] = [];
+  const first = listener({ event: () => added, async handler() { whileFirstRan = (await rows()).map((r) => r.attempts).sort(); } });
+  const second = listener({ event: () => added, async handler() { ran.push("second"); } });
+  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(whileFirstRan).toEqual([0, 1]);
+  expect(ran).toEqual(["second"]);
+  expect(await rows()).toEqual([]);
+});
+
+test("a slow first job doesn't fail the next: a sweep runs that one meanwhile, as its first try", async () => {
+  let swept: unknown;
+  const first = listener({
+    event: () => added,
+    async handler() {
+      await db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` }).where(sql`attempts = 0`); // past its pickup time
+      swept = await registry.jobs.sweep();
+    },
+  });
+  const second = listener({ event: () => added, async handler(ctx) { ran.push(`second#${ctx.event.attempt}`); } });
+  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
+  expect(swept).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
+  expect(ran).toEqual(["second#1"]);
+  expect(await rows()).toEqual([]);
+});
+
+for (const when of ["waiting to run", "running again"] as const)
+  test(`after retry(id), the runner that lost the job can't finish it while it's ${when}`, async () => {
+    const once = listener({
+      event: () => added,
+      async handler() {
+        const [row] = await rows();
+        await db.update(outboxTable).set({ status: "failed" }); // its lease ran out and a sweep failed it
+        await registry.jobs.retry(row!.id);
+        if (when === "running again") await db.update(outboxTable).set({ attempts: 1, receipt: "the new run's" }); // the same attempt number again
+      },
+    });
+    const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+    await registry.as({ actor: "ana" }).run(add, { name: "desk" }); // the first run returns, done
+    expect(await rows()).toMatchObject([{ status: "pending" }]);
+  });
+
+test("a crash right after commit waits for the pickup time, not a whole lease", async () => {
+  const { app } = setup({ ...outbox(db), deliver: async () => {} });
+  await app.run(add, { name: "rug" });
+  const wait = (await rows())[0]!.availableAt.getTime() - Date.now();
+  expect(wait).toBeGreaterThan(25_000);
+  expect(wait).toBeLessThan(35_000);
+});
+
+test("a failed row says when, and where it threw; retry clears both", async () => {
+  const { app, registry } = setup();
+  next = "deny";
+  await app.run(add, { name: "sofa" });
+  const [row] = await rows();
+  expect(row!.failedAt).toBeInstanceOf(Date);
+  expect(row!.lastError).toMatch(/\n\s+at /); // the stack
+  expect(await registry.jobs.retry(row!.id)).toBe(true);
+  expect(await rows()).toMatchObject([{ failedAt: null, lastError: null }]);
 });

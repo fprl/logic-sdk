@@ -45,6 +45,15 @@ export function sqlState(error: unknown): string | undefined {
  * Outbox: events written in the mutation's transaction, delivered after commit, retried until done
  * ──────────────────────────────────────────────────────────────────────────── */
 
+/** Seconds a job due now waits for the request that queued it, before a sweep may take it: how soon a crash after commit is noticed. */
+const PICKUP = 30;
+
+/** Who owns a job while it runs. */
+interface Claim {
+  receipt: string;
+  attempt: number;
+}
+
 /** Rows not claimed yet: what `replace` may still replace. */
 const waiting = sql`status = 'pending' and attempts = 0`;
 
@@ -65,7 +74,11 @@ export const outboxTable = pgTable(
     attempts: integer("attempts").notNull().default(0),
     /** Due from then on. While claimed: when the lease ends and a sweep may take it over. */
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    /** The claim that owns it: a new one each time it's claimed, like SQS's receipt handle. Only it can finish the job. */
+    receipt: text("receipt"),
+    /** The last failure, with its stack. */
     lastError: text("last_error"),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
     /** A scheduled call's `replace` key, `<function id>@<key>`: a newer call with it replaces this row while it waits. */
     replaceKey: text("replace_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -138,52 +151,53 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
   const inSeconds = (seconds: number) => sql`now() + make_interval(secs => ${seconds})`;
   /**
    * Writes only land on rows still pending under this claim: a slow runner can't undo a newer runner's work, and a
-   * handoff that finishes late can't delete the failure a consumer already recorded.
+   * handoff that finishes late can't delete the failure a consumer already recorded. By receipt, not attempt number:
+   * `retry(id)` starts those again at 1.
    */
-  const mine = (ids: string[], attempt: number) => and(inArray(t.id, ids), eq(t.attempts, attempt), eq(t.status, "pending"));
+  const mine = (ids: string[], { receipt }: Claim) => and(inArray(t.id, ids), eq(t.receipt, receipt), eq(t.status, "pending"));
   const via = options.via;
 
-  const markFailed = (ids: string[], attempt: number, error: unknown) =>
-    db.update(t).set({ status: "failed", lastError: messageOf(error) }).where(mine(ids, attempt));
-  const backOff = (ids: string[], attempt: number, error: unknown) =>
-    db.update(t).set({ availableAt: inSeconds(backoff(attempt)), lastError: messageOf(error) }).where(mine(ids, attempt));
+  const asFailed = (error: unknown) => ({ status: "failed" as const, lastError: describe(error), failedAt: sql`now()` });
+  const markFailed = (ids: string[], claim: Claim, error: unknown) => db.update(t).set(asFailed(error)).where(mine(ids, claim));
+  const backOff = (ids: string[], claim: Claim, error: unknown) =>
+    db.update(t).set({ availableAt: inSeconds(backoff(claim.attempt)), lastError: describe(error) }).where(mine(ids, claim));
 
   /**
    * Run one claimed job here and record how it went. The core decides: `failed` (its `fail` wrote the row), a throw
    * (tries left: back off), or done and discarded (delete the row).
    */
-  async function run(job: Job, attempt: number, runner: Runner): Promise<keyof SweepResult> {
+  async function run(job: Job, claim: Claim, runner: Runner): Promise<keyof SweepResult> {
     let outcome: DeliveryOutcome;
     try {
       outcome = await runner.run(job, {
-        attempt,
+        attempt: claim.attempt,
         fail: async (error) => {
-          await markFailed([job.id], attempt, error);
+          await markFailed([job.id], claim, error);
         },
       });
     } catch (e) {
-      await backOff([job.id], attempt, e);
+      await backOff([job.id], claim, e);
       return "retrying";
     }
-    if (outcome !== "failed") await db.delete(t).where(mine([job.id], attempt));
+    if (outcome !== "failed") await db.delete(t).where(mine([job.id], claim));
     return outcome;
   }
 
   /** Hand claimed jobs to `via` in one send. Done once the queue has them; a failed send keeps them all for a retry. */
-  async function handOff(queue: Dispatcher, jobs: Job[], attempt: number, runner: Runner): Promise<keyof SweepResult> {
+  async function handOff(queue: Dispatcher, jobs: Job[], claim: Claim, runner: Runner): Promise<keyof SweepResult> {
     const ids = jobs.map((j) => j.id);
     try {
       await queue.deliver(jobs, runner);
     } catch (e) {
-      for (const job of jobs) runner.report(e, job, attempt); // the queue's failure, not the listener's: run never saw it
-      if (attempt >= maxAttempts) {
-        await markFailed(ids, attempt, e);
+      for (const job of jobs) runner.report(e, job, claim.attempt); // the queue's failure, not the listener's: run never saw it
+      if (claim.attempt >= maxAttempts) {
+        await markFailed(ids, claim, e);
         return "failed";
       }
-      await backOff(ids, attempt, e);
+      await backOff(ids, claim, e);
       return "retrying";
     }
-    await db.delete(t).where(mine(ids, attempt));
+    await db.delete(t).where(mine(ids, claim));
     return "done";
   }
 
@@ -199,7 +213,19 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     return new Set(first.map((row) => row.id));
   }
 
-  const settle = (job: Job, attempt: number, runner: Runner) => (via ? handOff(via, [job], attempt, runner) : run(job, attempt, runner));
+  const settle = (job: Job, claim: Claim, runner: Runner) => (via ? handOff(via, [job], claim, runner) : run(job, claim, runner));
+
+  /** The first claim of jobs just committed, by the request that queued them: the ones no sweep took meanwhile. */
+  async function claimNew(jobs: Job[]): Promise<{ claim: Claim; won: Job[] }> {
+    const claim = { receipt: crypto.randomUUID(), attempt: 1 };
+    const rows = await db
+      .update(t)
+      .set({ attempts: 1, receipt: claim.receipt, availableAt: inSeconds(lease) })
+      .where(and(inArray(t.id, jobs.map((j) => j.id)), eq(t.attempts, 0), eq(t.status, "pending")))
+      .returning({ id: t.id });
+    const ids = new Set(rows.map((row) => row.id));
+    return { claim, won: jobs.filter((j) => ids.has(j.id)) }; // in emit order: RETURNING has none
+  }
 
   return {
     holds: true, // rows wait until they're due, however long, so `via`'s limits on delays don't apply
@@ -213,8 +239,8 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
         );
     },
     /**
-     * Inside the mutation's transaction: one unclaimed row per job. Due now: leased, so a sweep leaves it to this request.
-     * Delayed: available from `runAt`, for a sweep.
+     * Inside the mutation's transaction: one unclaimed row per job. Due now: a sweep leaves it `PICKUP` seconds to this
+     * request. Delayed: available from `runAt`, for a sweep.
      */
     async enqueue(tx: unknown, jobs: Job[]) {
       const client = tx as PgClient; // SAFETY: check() refuses a database that isn't this db, so tx is its transaction
@@ -223,7 +249,7 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
         id: j.id,
         job: j,
         attempts: 0,
-        availableAt: j.runAt ? new Date(j.runAt) : inSeconds(lease),
+        availableAt: j.runAt ? new Date(j.runAt) : inSeconds(PICKUP),
         replaceKey: replaceKeyOf(j) ?? null,
       });
       const rows = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id)).map(row);
@@ -245,23 +271,26 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           });
     },
     /**
-     * After commit, in this request: claim the jobs that are due (one update), then run them or hand them over. A crash
-     * before the claim leaves them unclaimed, so the sweep's claim is their first try.
+     * After commit, in this request: each job is claimed just before it runs, so a slow or dead one doesn't spend the
+     * others' attempt. Under `via` they're claimed together, for one send. What isn't claimed yet when the process dies
+     * is a sweep's, as a first try.
      */
-    async deliver(deliveries, runner) {
-      const ids = deliveries.filter((d) => !d.runAt).map((d) => d.id);
-      if (!ids.length) return;
-      const claimed = await db
-        .update(t)
-        .set({ attempts: 1, availableAt: inSeconds(lease) }) // the lease starts now: enqueue's now() was the transaction's start
-        .where(and(inArray(t.id, ids), eq(t.attempts, 0), eq(t.status, "pending")))
-        .returning({ id: t.id });
-      const mineNow = new Set(claimed.map((row) => row.id));
-      const due = deliveries.filter((d) => mineNow.has(d.id)); // in emit order: RETURNING has none
+    async deliver(jobs, runner) {
+      const due = jobs.filter((j) => !j.runAt);
       if (!due.length) return;
-      if (via) await handOff(via, due, 1, runner);
-      // one job's bookkeeping error (a lost connection) mustn't stop the others: the sweep sorts it out
-      else for (const d of due) await run(d, 1, runner).catch((e) => runner.report(e, d, 1));
+      if (via) {
+        const { claim, won } = await claimNew(due);
+        if (won.length) await handOff(via, won, claim, runner);
+        return;
+      }
+      for (const job of due) {
+        try {
+          const { claim, won } = await claimNew([job]);
+          if (won.length) await run(job, claim, runner);
+        } catch (e) {
+          runner.report(e, job, 1); // its bookkeeping failed (a lost connection): a sweep sorts it out, and the others still run
+        }
+      }
     },
     /** One at a time, so a job the queue rejects (too big) can't hold back the others. */
     async sweep(runner, { limit = 100 } = {}) {
@@ -274,16 +303,17 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
           .orderBy(t.availableAt)
           .limit(1)
           .for("update", { skipLocked: true });
+        const receipt = crypto.randomUUID();
         const [row] = await db
           .update(t)
-          .set({ attempts: sql`${t.attempts} + 1`, availableAt: inSeconds(lease) })
-          .where(inArray(t.id, due))
-          .returning({ job: t.job, attempts: t.attempts });
+          .set({ attempts: sql`${t.attempts} + 1`, receipt, availableAt: inSeconds(lease) })
+          .where(eq(t.id, due)) // `=`, not `IN`: Postgres may run an IN subquery once per row, and lock a new row each time
+          .returning({ job: t.job, attempt: t.attempts });
         if (!row) break;
         try {
-          result[await settle(row.job, row.attempts, runner)]++;
+          result[await settle(row.job, { receipt, attempt: row.attempt }, runner)]++;
         } catch (e) {
-          runner.report(e, row.job, row.attempts); // its bookkeeping failed (a lost connection): its lease brings it back
+          runner.report(e, row.job, row.attempt); // its bookkeeping failed (a lost connection): its lease brings it back
         }
       }
       return result;
@@ -292,21 +322,22 @@ export function outbox(db: PgClient, options: OutboxOptions = {}): Outbox {
     async retry(id) {
       const revived = await db
         .update(t)
-        // its key goes: it has run, so it's no longer a call a newer one replaces (and one may be waiting with it)
-        .set({ status: "pending", attempts: 0, availableAt: sql`now()`, lastError: null, replaceKey: null })
+        // its receipt goes, so the runner that lost it can't finish the new run. Its key goes: it has run, so it's no
+        // longer a call a newer one replaces (and one may be waiting with it)
+        .set({ status: "pending", attempts: 0, receipt: null, availableAt: sql`now()`, lastError: null, failedAt: null, replaceKey: null })
         .where(and(eq(t.id, id), eq(t.status, "failed")))
         .returning({ id: t.id });
       return revived.length > 0;
     },
     /** A job that failed for good in a queue consumer: keep it as a failed row, so you can query it and `retry` it. */
     async fail(job, error) {
-      const lastError = messageOf(error);
+      const failure = asFailed(error);
       await db
         .insert(t)
-        .values({ id: job.id, job, status: "failed", lastError })
-        .onConflictDoUpdate({ target: t.id, set: { status: "failed", lastError } });
+        .values({ id: job.id, job, ...failure })
+        .onConflictDoUpdate({ target: t.id, set: failure });
     },
   };
 }
 
-const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const describe = (e: unknown) => (e instanceof Error ? (e.stack ?? e.message) : String(e)); // a stack starts with the message

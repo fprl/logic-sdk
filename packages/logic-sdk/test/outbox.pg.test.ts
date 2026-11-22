@@ -14,14 +14,22 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
   const schema = `logic_sdk_test_${crypto.randomUUID().replaceAll("-", "")}`;
   const admin = postgres(url, { max: 1, onnotice: () => {} });
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
-  const client = postgres(url, { max: 10, onnotice: () => {}, connection: { search_path: schema } });
+  const client = postgres(url, { max: 10, onnotice: () => {}, connection: {
+    search_path: schema,
+    // plans that run a claim's subquery once per row, where `id IN (... LIMIT 1 ...)` claims many rows and runs one
+    enable_hashjoin: "off",
+    enable_mergejoin: "off",
+    enable_hashagg: "off",
+    enable_sort: "off",
+    enable_material: "off",
+  } });
   try {
     const db = drizzle({ client });
     await db.execute(sql`
       CREATE TABLE logic_outbox (
         id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
         attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
-        last_error text, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
+        receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
       )`);
     await db.execute(sql`CREATE UNIQUE INDEX logic_outbox_replace ON logic_outbox (replace_key) WHERE status = 'pending' and attempts = 0`);
 
@@ -42,6 +50,7 @@ test.skipIf(!url)("sweepers on separate connections at once: every job runs exac
       return { id: `x.count@e${n}`, job: { kind: "delivery" as const, id: `x.count@e${n}`, listener: "x.count", envelope, attempts: 1 } };
     });
     await db.insert(outboxTable).values(jobs); // due now, unclaimed
+    await db.execute(sql`ANALYZE logic_outbox`);
 
     const results = await Promise.all(Array.from({ length: 6 }, () => registry.jobs.sweep()));
 
