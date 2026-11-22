@@ -1,5 +1,5 @@
-// The jobs table on SQLite (3.42 or later, for `unixepoch('subsec')`), in SQL. With Drizzle, import from `logic-sdk/drizzle/sqlite` instead: the
-// same two functions, plus the table for your schema. Times are whole milliseconds since 1970, on SQLite's clock.
+// The jobs table on SQLite (3.42 or later, for `unixepoch('subsec')`), in SQL. With Drizzle, import from
+// `logic-sdk/drizzle/sqlite` instead: the same two functions, plus the table for your schema. Times are whole milliseconds since 1970, on SQLite's clock.
 // Every statement returns rows: better-sqlite3's `all()` refuses one that doesn't, so one `query` fits every driver.
 import { storedJobs, type DatabaseQueueOptions, type JobsSql, type OutboxOptions, type StoredJobs } from "./stored-jobs.ts";
 import type { Dispatcher, SqlDatabase } from "./index.ts";

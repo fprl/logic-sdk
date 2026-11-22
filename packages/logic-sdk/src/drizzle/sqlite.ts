@@ -6,7 +6,7 @@ export { databaseQueue, jobsSchema, outbox, type DatabaseQueueOptions, type Outb
 
 /** A Drizzle database on a synchronous SQLite driver: node:sqlite, bun:sqlite, better-sqlite3. */
 interface SyncSqlite {
-  all(query: SQL): unknown;
+  all<T>(query: SQL): T[];
   run(query: SQL): unknown;
   $client: { close(): unknown };
 }
@@ -102,7 +102,7 @@ const toSql = (text: string, params: unknown[]) =>
   sql.join(text.split("?").flatMap((part, i) => (i ? [sql.param(params[i - 1]), sql.raw(part)] : [sql.raw(part)])));
 
 const rowsOf = (db: Pick<SyncSqlite, "all">, text: string, params: unknown[]) =>
-  db.all(toSql(text, params)) as Record<string, unknown>[]; // SAFETY: Drizzle's `all` on raw SQL returns rows as objects
+  db.all<Record<string, unknown>>(toSql(text, params));
 
 /** SQLite rolls some failures back by itself (a full disk, `RAISE(ROLLBACK)`): then there's nothing to undo, and the error that did it is the one to report. */
 function undo(db: Pick<SyncSqlite, "run">, ...statements: string[]) {
@@ -111,12 +111,12 @@ function undo(db: Pick<SyncSqlite, "run">, ...statements: string[]) {
   } catch {}
 }
 
-/** Both mistakes work until the first rollback or read, so they fail at startup. */
+/** Refused at startup: either mistake would otherwise show up later, as missing writes or a closed connection. */
 function checkOpen<Db extends SyncSqlite>(open: () => Db, reader: Db) {
   const another = open();
   if (another === reader)
     throw new Error('[logic-sdk] drizzleAdapter needs a function that opens a new connection each time: drizzleAdapter(() => drizzle("app.db")).');
-  const [main] = another.all(sql`PRAGMA database_list`) as { file: string }[]; // SAFETY: the pragma's columns
+  const [main] = another.all<{ file: string }>(sql`PRAGMA database_list`);
   another.$client.close();
   if (!main?.file)
     throw new Error("[logic-sdk] drizzleAdapter needs SQLite on a disk: an in-memory database is a different one on each connection. Use a temporary file in tests.");
@@ -158,7 +158,10 @@ function turns() {
     last = ahead.then(() => done.promise);
     try {
       const giveUpAt = () => Math.max(arrived, startedAt) + BUSY_TIMEOUT;
-      while (!(await settlesBy(ahead, giveUpAt()))) if (Date.now() >= giveUpAt()) throw new Error(HELD);
+      while (!(await settlesBy(ahead, giveUpAt()))) {
+        // the one ahead may have changed while we waited: the line moved
+        if (Date.now() >= giveUpAt()) throw new Error(HELD);
+      }
       startedAt = Date.now();
       return await work();
     } finally {
@@ -168,7 +171,7 @@ function turns() {
 }
 
 const HELD =
-  "[logic-sdk] Waited 5 seconds for a transaction in this process, and SQLite writes one at a time. Does a mutation await a call made with registry.as(scope).run instead of ctx.run, or a slow request?";
+  "[logic-sdk] Waited 5 seconds for a transaction in this process, and SQLite writes one at a time. Does a mutation await registry.as(scope).run instead of ctx.run, or do slow work that belongs in an action?";
 
 /** Whether `promise` settles by then. The timer is cleared, so a process with nothing else to do can exit. */
 const settlesBy = (promise: Promise<void>, time: number) =>

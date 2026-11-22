@@ -5,13 +5,14 @@ import { databaseQueue, drizzleAdapter, type DrizzleDb } from "../src/drizzle/sq
 import { init, type Schema } from "../src/index.ts";
 
 const [mode, file = "", startAt = "0"] = process.argv.slice(2);
-const anything: Schema = { "~standard": { version: 1, vendor: "test", validate: (value) => ({ value }) } };
+// no zod: plain Node runs this file
+const Added: Schema<{ id: string }, { id: string }> = { "~standard": { version: 1, vendor: "test", validate: (value) => ({ value: value as { id: string } }) } };
 while (Date.now() < Number(startAt)); // every process starts in the same millisecond
 
 const open = () => drizzle(file);
 const database = drizzleAdapter(open);
 const { mutation, event, listener, createRegistry } = init<{ scope: object; db: DrizzleDb<ReturnType<typeof open>> }>();
-const added = event({ payload: anything });
+const added = event({ payload: Added });
 const add = mutation({
   async handler(ctx) {
     const id = crypto.randomUUID();
@@ -24,8 +25,8 @@ const add = mutation({
   },
 });
 const record = mutation({
-  input: anything,
-  async handler(ctx, { id }: any) {
+  input: Added,
+  async handler(ctx, { id }) {
     ctx.db.run(sql`insert into runs (id) values (${id})`);
   },
 });
