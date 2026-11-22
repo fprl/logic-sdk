@@ -54,7 +54,7 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
 15. **Try it in a real app,** then release on an explicit go.
 
-Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, drop `transactions: "interactive"` from `DatabaseAdapter`, and refuse `retry: { attempts }` under 1 as listeners do.
+Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `retry: { attempts }` under 1 as listeners do.
 
 Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
