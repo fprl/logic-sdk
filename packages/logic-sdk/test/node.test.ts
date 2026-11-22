@@ -34,13 +34,13 @@ test("ticks on every minute, on the minute", () => {
   void stop();
 });
 
-test("a slow tick or sweep never skips a minute", () => {
+test("a slow tick or sweep never holds back the next", () => {
   jest.useFakeTimers({ now: new Date("2026-11-23T09:00:00Z") });
   const { registry, ticked, sweeps } = fake({ tickTakes: 5 * 60_000, sweepTakes: 5 * 60_000 });
-  const stop = startTicking(registry, { sweepEvery: 10 });
+  const stop = startTicking(registry, { sweepEvery: 60 });
   jest.advanceTimersByTime(4 * 60_000);
   expect(ticked).toEqual(["09:01", "09:02", "09:03", "09:04"]);
-  expect(sweeps()).toBe(1); // one at a time: the first is still running
+  expect(sweeps()).toBe(4); // the first is still running, and the others didn't wait for it
   void stop();
 });
 
@@ -158,4 +158,29 @@ test("ticks stuck on an unreachable database don't pile up: past ten, a minute i
     expect.stringMatching(/09:12/),
   ]);
   void stop();
+});
+
+test("a hung job doesn't stop the sweeps, and hung sweeps don't pile up: past ten, one is skipped and reported", async () => {
+  jest.useFakeTimers({ now: new Date("2026-11-23T09:00:00Z") });
+  let sweeps = 0;
+  const first = Promise.withResolvers<void>();
+  const errors: string[] = [];
+  const registry = {
+    jobs: {
+      tick: async () => [],
+      sweep: () => {
+        const hung = sweeps++ === 0 ? first.promise : new Promise<void>(() => {}); // a job that never returns
+        return hung.then(() => ({ done: 0, failed: 0, discarded: 0, retrying: 0 }));
+      },
+    },
+  };
+  const stop = startTicking(registry, { sweepEvery: 1, onError: (e) => errors.push((e as Error).message) });
+  jest.advanceTimersByTime(11_000);
+  expect(sweeps).toBe(10);
+  expect(errors).toEqual([expect.stringMatching(/skipped a sweep: 10 earlier sweeps are still running/)]);
+  first.resolve();
+  await flush();
+  jest.advanceTimersByTime(1_000);
+  expect(sweeps).toBe(11); // room again
+  void stop({ timeout: 0 });
 });

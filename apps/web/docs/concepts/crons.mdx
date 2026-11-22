@@ -35,7 +35,7 @@ process.on("SIGTERM", async () => {
 });
 ```
 
-- **It ticks on the minute without waiting for the last tick,** and sweeps on its own loop, so a slow cron or sweep doesn't hold back the next minute.
+- **It ticks on the minute and sweeps every `sweepEvery` seconds, without waiting for the last,** so a slow cron or a hung job doesn't hold back the rest. Ten of either still running means something's stuck: the next is skipped and reported to `onError`.
 - **Ticks don't pile up:** with ten still running (stuck on an unreachable database, or ten slow crons overlapping), the next minute is skipped and reported to `onError`, so a backlog of stale minutes doesn't all run when the database comes back.
 
 **Cloudflare:** `"* * * * *"` for all of them, or one trigger per cron. Cloudflare numbers weekdays 1 = Sunday (we use classic cron's 1 = Monday), so write weekdays as names, in your code and in the trigger:
