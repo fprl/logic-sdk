@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { z } from "zod";
-import { init, type ForListeners, type ReadWrite } from "../src/index.ts";
+import { inProcess, init, type Dispatcher, type ForListeners, type ReadWrite } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
@@ -335,4 +335,20 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   outbox(db);
   // @ts-expect-error maxAttempts counts sends, and a database queue sends nothing
   databaseQueue(db, { maxAttempts: 3 });
+}
+
+// an adapter that keeps jobs needs jobs.scope
+{
+  const { createRegistry } = init<{ scope: { userId: string; role: string } }>();
+  const queue: Dispatcher = { async deliver() {} };
+  createRegistry({ modules: {}, jobs: { adapter: inProcess() } });
+  createRegistry({ modules: {}, jobs: { adapter: queue, scope: { load: (saved) => saved } } });
+  createRegistry({
+    modules: {},
+    jobs: { adapter: queue, scope: { store: (s) => ({ id: s.userId }), load: (saved) => ({ userId: saved.id, role: "today" }) } },
+  });
+  // @ts-expect-error who would its jobs run as?
+  createRegistry({ modules: {}, jobs: { adapter: queue } });
+  // @ts-expect-error an adapter picked per env may be the one that keeps jobs
+  createRegistry({ modules: {}, jobs: { adapter: Math.random() ? queue : inProcess() } });
 }

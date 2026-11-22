@@ -217,10 +217,10 @@ Configured once, where the registry is created:
 
 ```ts
 jobs: { adapter: inProcess() }                                  // default: zero infra, lost on a crash
-jobs: { adapter: cloudflareQueue(env.JOBS) }                    // sent after commit: the Rails/Laravel model, lossy
-jobs: { adapter: databaseQueue(db) }                                   // durable, Postgres only
-jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)) } // durable handoff, plus queue retries, DLQ, concurrency
-jobs: { adapter: pgBoss(boss) }                                 // transactional natively, no outbox needed
+jobs: { adapter: cloudflareQueue(env.JOBS), scope }             // sent after commit: the Rails/Laravel model, lossy
+jobs: { adapter: databaseQueue(db), scope }                     // durable, Postgres only
+jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope } // durable handoff, plus queue retries, DLQ, concurrency
+jobs: { adapter: pgBoss(boss), scope }                          // transactional natively, no outbox needed
 ```
 
 - **Ship the lossy mode.** It's the Rails 8.2 and Laravel `after_commit` model, and fine for consequences you can lose (a live update, a cache warm-up). Fizzy uses it on purpose.
@@ -494,6 +494,7 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
    - **`store` is a projection:** keep ids, drop what shouldn't sit in a jobs table or a third-party queue (emails, session data).
    - **`load` rebuilds fresh,** so every `ctx.run` re-checks policies with today's roles. `null` discards: a `"discarded"` outcome, reported to `onError`, the row deleted and counted by `sweep`. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` discard silently and are opt-in; returning `null` is the opt-in. Fable argued for `failed` instead (visible, retryable), so offboarding can't silently eat work; we followed the stacks and report it. A throw retries.
    - Crons resolve their scope in code and store nothing.
+   - **TypeScript asks for `scope` with those adapters too** (2026-11-22, the owner after a Fable check). Startup is late when the adapter is picked per host or env: tests pass on `inProcess()`, the deploy throws (per request on Workers), and the CLI never builds the registry. It asks for `scope`, not `load`: requiring `load` reported a missing one as a wrong `store`. It costs a brand on `inProcess()`'s return. What would change it: users fighting the union's error.
    - **`load` is required with every adapter but `inProcess()`** (the outbox, `cloudflareQueue`, pg-boss, anything hand-rolled). Keyed on "not inProcess()" rather than on `holds`, so an adapter that forwards jobs to a queue and forgets to declare anything still gets the check (Fable). The default snapshot is what goes stale, and the stacks that carry a "who" into jobs rebuild it: AshOban's `actor_persister` (`store(actor)` / `lookup(json)`, nearly our shape, and the one stack that also re-authorizes inside jobs; its guide warns the actor's rights may no longer hold "even across retries"), stancl/tenancy and Spatie (re-find the tenant on `JobProcessing`), Rails' GlobalID and Laravel's `SerializesModels` (store ids, re-find at run). Sidekiq's `CurrentAttributes` carries a snapshot, opt-in. Convex carries nothing, so its scheduled functions run as trusted code. Considered: jobs run as the system with the actor as data (Convex's model); rejected because every policy a listener touches would need a system grant, and a user's event could trigger work they couldn't do themselves. `inProcess()` stays optional: nothing waits. The escape hatch is written down, `load: (saved) => saved`. What would change it: apps where nearly every scope is immutable ids and the line is pure ceremony; then a check warning instead.
 5. **Old payloads after a deploy.** Payloads are validated again at delivery, so a schema change can turn queued messages into poison that retries forever. Laravel stores exhausted jobs in `failed_jobs` (`queue:retry` re-runs them) and can discard jobs whose model is gone; Oban marks jobs `discarded` after `max_attempts`; Solid Queue doesn't auto-retry a job whose process died. We need the same: a failed state you can list and retry, and a versioning rule for payloads.
 6. **A real event depth on the durable path.** `Envelope` needs `depth` and `attempt`; today `registry.dispatch` starts every stored envelope at depth 1, which loses the loop limit across hops. (Listener `meta` in `wrap` landed with `listener({...})`.)

@@ -893,7 +893,9 @@ test("jobs.scope.load failing counts as a try: at the default of one, the job fa
 test("jobs.scope: any adapter but inProcess() keeps jobs to run later, so it needs load: a job runs with today's roles", () => {
   const later = { holds: true as const, async deliver() {} };
   const forwards = { async deliver() {} }; // sends to a queue: it keeps them too
+  // @ts-expect-error the types ask for scope; createRegistry still checks, for JS and a scope without load
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later } })).toThrow(/keeps jobs to run later, so set jobs\.scope\.load/);
+  // @ts-expect-error the same, for an adapter that only forwards
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: forwards } })).toThrow(/jobs\.scope\.load/);
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later, scope: { load: (saved) => saved } } })).not.toThrow(); // keeping it as it was is a choice you write down
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: inProcess() } })).not.toThrow(); // runs now, in this process: nothing waits

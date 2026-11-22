@@ -504,13 +504,30 @@ export interface JobScope<S = object, T = any> {
   load?: (stored: T) => S | null | Promise<S | null>;
 }
 
-/** `createRegistry({ jobs })`: where background work goes, and what every adapter applies. */
-export interface JobsOptions<S = object, T = any> {
-  /** `inProcess()` (default), or a durable one like `databaseQueue(db)`. Its own options go in its factory. */
-  adapter?: Dispatcher;
-  /** Applied by the registry in every adapter, `inProcess()` and tests included. */
-  scope?: JobScope<S, T>;
+/** Marks `inProcess()` for TypeScript: the one adapter that keeps no jobs, so needs no `jobs.scope`. */
+export const RUNS_NOW: unique symbol = Symbol.for("logic-sdk.runsNow");
+/** What `inProcess()` returns. */
+export interface InProcess extends Dispatcher {
+  readonly [RUNS_NOW]: true;
 }
+
+/**
+ * `createRegistry({ jobs })`: where background work goes, and what every adapter applies. `load` inside `scope` is
+ * checked at startup: requiring it here would report a missing one as a wrong `store`.
+ */
+export type JobsOptions<S = object, T = any> =
+  | {
+      /** `inProcess()` (default), or a durable one like `databaseQueue(db)`. Its own options go in its factory. */
+      adapter?: InProcess;
+      /** Applied by the registry in every adapter, `inProcess()` and tests included. */
+      scope?: JobScope<S, T>;
+    }
+  | {
+      /** An adapter that keeps jobs to run later, like `databaseQueue(db)`. */
+      adapter?: Dispatcher;
+      /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
+      scope: JobScope<S, T>;
+    };
 
 export interface Call<M = unknown> {
   id: string;
