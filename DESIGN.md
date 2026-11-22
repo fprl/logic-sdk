@@ -293,11 +293,13 @@ Settled on 2026-11-22. **What happens to a job once it's queued follows one mode
 - **Crash:** nobody extends, the time runs out, and the next sweep retries the job, or keeps it as failed when it has no attempts left. No supervisor and no list of live processes: Workers and Vercel have neither.
 - **Failed:** kept until someone retries or deletes it, like Laravel's failed jobs.
 
-The rule: a question about a queued job's life (claim, extend, retry, fail, order) is answered by what Laravel on SQS does. Other stacks can still teach us what surrounds it (inserting in the transaction, `replace`, cron dedupe, names), not change it. One addition the database gives us: a job that is a mutation can be finished in its own transaction, which SQS can't do.
+The rule: a question about a queued job's life (claim, extend, retry, fail, order) is answered by what Laravel on SQS does. Other stacks can still teach us what surrounds it (inserting in the transaction, `replace`, cron dedupe, names), not change it.
 
 Not chosen: a fixed time with no extension ([Oban's Lifeline](https://github.com/oban-bg/oban/blob/main/lib/oban/lifeline.ex), an hour by default) has to outlast the longest job on any platform, so a crash waits that long, and a longer job is failed or run twice while it works. Solid Queue's model (a job belongs to a live process, watched by a supervisor) needs long-lived processes. Graphile Worker's `runOnce` doesn't release a crashed job's lock ([runner](https://github.com/graphile/worker/blob/main/src/runner.ts)), and that lock [lasts at least four hours](https://worker.graphile.org/docs/error-handling).
 
-Where the outbox doesn't follow it yet: a mutation job isn't finished in its own transaction. The sections below describe the code as it is.
+**At least once: the work, then a separate write that marks the job done,** as [Laravel](https://github.com/laravel/framework/blob/v13.43.0/src/Illuminate/Queue/CallQueuedHandler.php) and [Solid Queue](https://github.com/rails/solid_queue/blob/main/app/models/solid_queue/claimed_execution.rb) do. A crash in between fails a job that succeeded (no attempts left) or runs it again, so jobs are written to be safe to run twice. Considered: finishing a job that is a mutation inside that mutation's transaction, with a `complete` option for adapters. It worked in a prototype, and was dropped (the user, and a blind Fable check): it covers scheduled calls and crons that are mutations, on the outbox only, never listeners or queues, so jobs must be safe to run twice anyway. What would change it: real reports of duplicates from that gap; then it's opt-in, like [River](https://riverqueue.com/docs/transactional-job-completion).
+
+One place that gap is wider than Laravel's: without `waitUntil`, a job waits for the jobs it queued before it's marked done, where Laravel only queues them. Measured: 516 ms with a 500 ms listener, 3 ms with `waitUntil`.
 
 Evidence so far: renewal timers keep ticking during a job and inside `waitUntil` on workerd run locally. Deployed Workers and Vercel are untested.
 
