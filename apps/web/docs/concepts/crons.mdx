@@ -65,7 +65,9 @@ async scheduled(controller, env, ctx) {
 ```ts
 // app/api/tick/route.ts
 export async function POST(request: Request) {
-  if (request.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
+  const secret = process.env.CRON_SECRET;
+  // without the first check, an unset secret would let `Bearer undefined` in
+  if (!secret || request.headers.get("authorization") !== `Bearer ${secret}`) {
     return new Response("Unauthorized", { status: 401 });
   }
   const at = request.headers.get("ce-vssscheduledat"); // the scheduled time, without jitter
