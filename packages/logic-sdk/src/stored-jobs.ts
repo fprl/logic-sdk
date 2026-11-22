@@ -162,6 +162,14 @@ export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxO
     return "done";
   }
 
+  /** A cron's minute runs once: records the ticks no one recorded yet and returns their ids. Prunes old ones. */
+  async function recordTicks(tx: unknown, ticks: Job[]): Promise<Set<unknown>> {
+    if (!ticks.length) return new Set();
+    const first = await database.query(tx, sql.recordTicks, [list(ticks.map((j) => j.id))]);
+    await database.query(tx, sql.pruneTicks, []);
+    return new Set(first.map((row) => row.id));
+  }
+
   const settle = (job: Job, claim: Claim, runner: Runner) => (via ? handOff(via, [job], claim, runner) : run(job, claim, runner));
 
   /** The first claim of jobs just committed, by the request that queued them: the ones no sweep took meanwhile. */
@@ -188,14 +196,9 @@ export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxO
      * request. Delayed: available from `runAt`, for a sweep. A cron's minute runs once: only ticks nobody recorded yet.
      */
     async enqueue(tx, jobs) {
-      const ticks = jobs.filter((j) => j.kind === "cron").map((j) => j.id);
-      const first = new Set<unknown>();
-      if (ticks.length) {
-        for (const row of await database.query(tx, sql.recordTicks, [list(ticks)])) first.add(row.id);
-        await database.query(tx, sql.pruneTicks, []);
-      }
+      const firstTicks = await recordTicks(tx, jobs.filter((j) => j.kind === "cron"));
       const rows = jobs
-        .filter((j) => j.kind !== "cron" || first.has(j.id))
+        .filter((j) => j.kind !== "cron" || firstTicks.has(j.id))
         .map((j) => ({ id: j.id, job: j, at: j.runAt ? Date.parse(j.runAt) : null, key: replaceKeyOf(j) ?? null }))
         // in key order, so two transactions replacing the same keys lock them in the same order and can't deadlock
         .sort((a, b) => byText(a.key ?? "", b.key ?? ""));
