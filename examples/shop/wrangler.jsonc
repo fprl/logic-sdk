@@ -5,8 +5,19 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "vars": { "APP_URL": "http://localhost:8787", "MAX_ITEMS": "10" },
-  // Cloudflare's crons are UTC, and the digest is 8:00 Madrid time, so tick hourly and let the code decide
-  "triggers": { "crons": ["0 * * * *"] },
+  // every minute: the outbox's sweep, and the crons (the code decides which are due, in their own time zone)
+  "triggers": { "crons": ["* * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "logic-shop-jobs" }], // npx wrangler queues create logic-shop-jobs
+    "consumers": [
+      {
+        "queue": "logic-shop-jobs",
+        "max_batch_size": 1, // a job per invocation
+        "max_batch_timeout": 1, // don't hold one back
+        "max_retries": 10 // at least the largest attempts
+      }
+    ]
+  },
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",

@@ -1,4 +1,5 @@
-import { drizzleAdapter } from "logic-sdk/drizzle";
+import type { Dispatcher } from "logic-sdk";
+import { databaseQueue, drizzleAdapter } from "logic-sdk/drizzle";
 import * as catalog from "./catalog";
 import { createRegistry, type Db, type Mailer, type Settings } from "./logic";
 import * as orders from "./orders";
@@ -8,6 +9,8 @@ export const createShop = (options: {
   db: Db;
   settings: Settings;
   mailer?: Mailer;
+  /** Where this host's jobs go. Default: the database is the queue. */
+  jobs?: Dispatcher;
   waitUntil?: (promise: Promise<unknown>) => void;
 }) =>
   createRegistry({
@@ -15,6 +18,11 @@ export const createShop = (options: {
     database: drizzleAdapter(options.db),
     services: { mailer: options.mailer ?? consoleMailer },
     config: options.settings,
+    jobs: {
+      adapter: options.jobs ?? databaseQueue(options.db),
+      // demo auth has no users table. In your app: `store` the ids, `load` the user with today's role
+      scope: { load: (saved) => saved },
+    },
     waitUntil: options.waitUntil,
   });
 
