@@ -100,16 +100,14 @@ export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxO
    * runner's job is free a lease later. Returns the stop, which waits for the extension on its way: landing after a
    * backoff, it would replace the backoff.
    */
-  function keepExtending(job: Job, claim: Claim, runner: Runner): () => Promise<void> {
+  function keepExtending(job: Job, claim: Claim, runner: Runner): () => Promise<unknown> {
     const until = Date.now() + MAX_EXTEND * 1000;
-    let extending = Promise.resolve();
+    let extending: Promise<unknown> = Promise.resolve();
     const timer = setInterval(
       () => {
         if (Date.now() >= until) return clearInterval(timer);
         extending = extending
-          .then(async () => {
-            await query(sql.extend, [lease, list([job.id]), claim.receipt]);
-          })
+          .then(() => query(sql.extend, [lease, list([job.id]), claim.receipt]))
           .catch((e) => runner.report(e, job, claim.attempt));
       },
       (lease * 1000) / 3,

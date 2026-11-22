@@ -16,7 +16,7 @@ export type DrizzleTx<Db extends Transactional> = Parameters<Parameters<Db["tran
 /** What queries get: the database minus write methods. A type-level guard, not a runtime one. */
 export type DrizzleReader<Db> = Omit<
   Db,
-  "insert" | "update" | "delete" | "execute" | "transaction" | "batch" | "run" | "refreshMaterializedView"
+  "insert" | "update" | "delete" | "execute" | "transaction" | "batch" | "refreshMaterializedView"
 >;
 
 /**
@@ -61,9 +61,6 @@ export function sqlState(error: unknown): string | undefined {
   return undefined;
 }
 
-/** Rows not claimed yet: what `replace` may still replace. */
-const waiting = sql`status = 'pending' and attempts = 0`;
-
 /**
  * The table behind `databaseQueue` and `outbox` (Postgres), Laravel's `jobs`. Re-export it from your schema so
  * drizzle-kit adds it to your migrations: `export { jobsTable } from "logic-sdk/drizzle/pg";`. One row per pending job;
@@ -93,7 +90,7 @@ export const jobsTable = pgTable(
   (t) => [
     index("logic_jobs_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
     // one waiting call per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
-    uniqueIndex("logic_jobs_replace").on(t.replaceKey).where(waiting),
+    uniqueIndex("logic_jobs_replace").on(t.replaceKey).where(sql`status = 'pending' and attempts = 0`),
   ],
 );
 
