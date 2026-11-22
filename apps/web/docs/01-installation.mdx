@@ -14,7 +14,10 @@ Any [Standard Schema](https://standardschema.dev) library works for `input` and 
 | Import | What it gives you |
 |---|---|
 | `logic-sdk` | `init`, the definers, `createRegistry`, errors |
-| `logic-sdk/drizzle` | `drizzleAdapter(db)`, the database adapter |
+| `logic-sdk/drizzle` | `drizzleAdapter(db)`, and jobs in your Postgres: `databaseQueue`, `outbox` |
+| `logic-sdk/cloudflare` | `cloudflareQueue`, `handleQueue`, `handleScheduled` |
+| `logic-sdk/pg-boss` | `pgBoss(boss)` and `work(registry, boss)` |
+| `logic-sdk/node` | `startTicking`, crons and sweeps in a long-running process |
 | `logic-sdk/fetch` | `toFetchHandler`, a web-standard HTTP handler, and `unauthenticated` |
 | `logic-sdk/orpc` | `toORPCRouter`, a typed oRPC v2 router |
 | `logic-sdk/ai` | `toAITool` and `toAITools`, AI SDK tools for agents |

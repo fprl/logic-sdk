@@ -61,6 +61,18 @@ pgBoss(boss)  durable, Postgres: pg-boss inserts inside your transaction
 - **One page per adapter:** [database queue](/docs/adapters/drizzle#database-queue), [outbox](/docs/adapters/drizzle#outbox), [pg-boss](/docs/adapters/pg-boss), [Cloudflare](/docs/adapters/cloudflare).
 - **The adapter's own options go in its factory:** `databaseQueue(db, { lease, backoff })`, `outbox(db, queue, { maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
 
+## What each one guarantees
+
+| | Crash right after commit | Job failed for good | `delay`, `ctx.schedule` | `replace` | A cron ticked twice |
+|---|---|---|---|---|---|
+| `inProcess()` | lost | only `onError` | refused (one try) | no | runs twice |
+| `databaseQueue` | kept | kept as `failed` | yes | yes | runs once |
+| `cloudflareQueue` alone | lost, if not sent yet | only `onError` | up to 24 hours | no | runs twice |
+| `outbox` + Cloudflare | kept | kept as `failed` | yes | yes | runs once |
+| `pgBoss` | kept | kept for 7 days | yes | yes | runs once |
+
+All but `inProcess()` can run a job twice. On Cloudflare, "failed for good" needs [`max_retries`](/docs/adapters/cloudflare#set-max_retries-to-at-least-your-largest-attempts) at least your largest `attempts`. These are tested on Postgres and against a fake Cloudflare queue. Deployed Workers, Queues and Vercel aren't tested yet.
+
 ## Running, sweeping, retrying
 
 ```ts
@@ -134,9 +146,9 @@ export const sendAll = listener({
 });
 ```
 
-- **Optional.** The default is the export name, as before.
+- **Optional.** The default is the export name.
 - **Local to the module:** in a `notifications` module, `id: "send"` is `notifications.send`. Write `"send"`, not `"notifications.send"`: the module key is added for you.
-- **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls will store function ids.
+- **On every definer:** `query`, `mutation`, `action`, `event`, `listener`. Events need it as much as listeners, and scheduled calls store function ids.
 - **Unique:** a clash throws at `createRegistry`.
 - **Deploy new code before what calls it.** In a rolling deploy, an old process can pick up a job for a listener only the new code has, and it fails at once (kept; `registry.jobs.retry(id)` runs it). Ship a new listener one deploy before the code that emits its event.
 - **Where else it shows:** the [fetch adapter](/docs/adapters/fetch)'s routes and error codes (`notifications.send.forbidden`) use the id. oRPC routers and AI tools keep the export name, because their types come from your modules' export names.
@@ -167,6 +179,7 @@ For writing an adapter:
 - **Every adapter but `inProcess()` needs `jobs.scope.load`:** the registry assumes yours keeps jobs, so `createRegistry` asks the app to rebuild the scope they run as.
 - **`replaces: true`** says `enqueue` replaces a waiting call with the same replace key (`replaceKeyOf(job)`: `<fn>@<key>`), one not started yet. Without it, `ctx.schedule` with `replace` is refused.
 - **`holds: true | { max }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`check({ listeners, database })`** runs at `createRegistry`: refuse what you can't honour. **`fail(job, error)`** keeps a job that failed for good in a queue consumer (`outbox` writes a `failed` row); a consumer can pass its own instead, `registry.jobs.run(job, { attempt, fail })`.
+- **The adapter contract isn't stable yet:** it can change before 1.0, until more adapters have used it.
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the job is out of its `attempts`. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.
 - **Listeners get `ctx.event`** (`id`, `name`, `payload`, `occurredAt`, `attempt`), without the stored scope: `ctx.scope` is the one they run as.

@@ -108,7 +108,7 @@
         "@logic-sdk/cli": ">=0.4.0 <0.5.0",
         "@orpc/server": ">=2.0.0-beta.51 <3",
         "ai": ">=7 <8",
-        "drizzle-orm": ">=1.0.0-rc.5 <2",
+        "drizzle-orm": ">=1.0.0-rc.6 <2",
         "pg-boss": ">=12.39.0 <13",
       },
       "optionalPeers": [
