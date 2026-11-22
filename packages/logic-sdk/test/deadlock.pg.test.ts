@@ -21,16 +21,16 @@ test.skipIf(!url)("two mutations deadlock: the default runs the loser again, one
     let holding = 0;
     const bothHold = Promise.withResolvers<void>();
     const lockBoth = mutation({
-      input: z.object({ first: z.string(), then: z.string() }),
-      async handler(ctx, { first, then }) {
+      input: z.object({ first: z.string(), next: z.string() }),
+      async handler(ctx, { first, next }) {
         await ctx.db.execute(sql`select id from logic_deadlock.rows where id = ${first} for update`);
         if (++holding === 2) bothHold.resolve();
         await bothHold.promise; // each holds what the other wants next
-        await ctx.db.execute(sql`select id from logic_deadlock.rows where id = ${then} for update`);
+        await ctx.db.execute(sql`select id from logic_deadlock.rows where id = ${next} for update`);
       },
     });
     const app = createRegistry({ modules: { x: { lockBoth } }, database: drizzleAdapter(db, { transactionAttempts }) }).as({});
-    const outcomes = await Promise.allSettled([app.run(lockBoth, { first: "a", then: "b" }), app.run(lockBoth, { first: "b", then: "a" })]);
+    const outcomes = await Promise.allSettled([app.run(lockBoth, { first: "a", next: "b" }), app.run(lockBoth, { first: "b", next: "a" })]);
     return outcomes.map((o) => (o.status === "fulfilled" ? "committed" : sqlState(o.reason))).sort();
   }
 
