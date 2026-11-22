@@ -1,6 +1,6 @@
 # Logic SDK
 
-**Business logic for TypeScript apps, as queries, mutations, actions and events.**
+**Business logic for TypeScript apps, as queries, mutations, actions, events, jobs and crons.**
 
 Write the layer between your routes and your database once, as plain declarations. Call it from an HTTP route, a Server Action, a queue worker, a script, a test or an AI agent: same rules, same transaction, same events.
 
@@ -71,10 +71,30 @@ const caller = registry.as({ actor, accountId });
 await caller.run(bookings.confirm, { bookingId });
 ```
 
+Work that must not be lost goes through a jobs adapter. Listeners, scheduled calls and crons all use it:
+
+```ts
+export const registry = createRegistry({
+  modules: { bookings, availability },
+  database: drizzleAdapter(db),
+  jobs: { adapter: databaseQueue(db), scope: { store, load } },
+});
+
+// a listener, with tries
+export const sendConfirmation = listener({ event: () => confirmed, attempts: 3, handler });
+
+// a cron
+export const morningDigest = cron({ schedule: "0 8 * * MON-FRI", run: sendDigest, scope: asSystem("digest") });
+
+// later, from a mutation, committed with it
+ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
+```
+
 ## What you get
 
 - **One transaction across modules.** A failure anywhere rolls back everything, even if someone catches it.
 - **Side effects after commit.** Mutations emit events; listeners send the email once the data is safe.
+- **Jobs, four ways.** Your Postgres as the queue (`databaseQueue`), Cloudflare Queues alone, an outbox in front of a queue, or pg-boss. All but in-process can run a job twice, so make them idempotent.
 - **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
@@ -89,7 +109,10 @@ await caller.run(bookings.confirm, { bookingId });
 
 | Import | |
 |---|---|
-| `logic-sdk/drizzle` | The database adapter |
+| `logic-sdk/drizzle` | The database adapter, `databaseQueue` and `outbox` |
+| `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
+| `logic-sdk/pg-boss` | Jobs in pg-boss |
+| `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |
 | `logic-sdk/fetch` | A web-standard HTTP handler for exposed functions |
 | `logic-sdk/orpc` | A typed oRPC v2 router and client |
 | `logic-sdk/ai` | AI SDK tools: agents run your functions with the same rules |

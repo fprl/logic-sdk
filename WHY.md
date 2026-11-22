@@ -25,7 +25,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **Events only leave after commit.** No email for a booking that rolled back.
 - ✅ **Nothing after commit can fail the caller.** Listener, dispatcher, `waitUntil` and `onError` failures are all reported, never thrown.
 - ✅ **No side effects in a transaction**, at the type level: mutations and queries get no `services`. So you never hold a transaction open across a Stripe call, and mutations are safe to re-run.
-- 🛠 Automatic retry on deadlocks and serialization failures (40001/40P01), which follows from the rule above.
+- ✅ **Automatic retry on deadlocks and serialization failures** (40001/40P01), which follows from the rule above.
 
 *Instead you'd:* write `db.transaction` everywhere, pass `tx` through every helper, keep an after-commit array per request, and remember all of this in every PR.
 
@@ -55,18 +55,18 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **Runs on Node, Bun and Cloudflare Workers.** No `node:` imports, no AsyncLocalStorage.
 - ✅ **Adapters:** fetch handler, oRPC v2 (typed client, OpenAPI and MCP through oRPC).
 - ✅ **Database adapter seam:** Drizzle today.
-- ✅ **Dispatcher seam:** in-process today, 🛠 Postgres queue and pg-boss later, with no changes to mutations or listeners.
+- ✅ **Jobs adapters:** in-process, your Postgres as the queue, Cloudflare Queues (alone or behind an outbox) and pg-boss, with no changes to mutations or listeners.
 
 ## 6. One way to call your logic, from anywhere
 
 - ✅ **`registry.as(scope).run(fn, input)`** is the same call from HTTP, RPC, a cron job, a script, a test or a webhook.
 - ✅ **The same validation, authorization, transactions and events apply** on every path.
-- 🛠 `toAITool(caller, fn)` and `toAITools(registry, caller, { filter })`: an AI agent calls the same functions with the same rules, and only the ones you opt in.
+- ✅ **`toAITool(caller, fn)` and `toAITools(registry, caller)`:** an AI agent calls the same functions with the same rules, and only the ones you opt in.
 
 ## 7. Observable
 
 - ✅ **`wrap(call, next)`** sees every call, including denied and invalid ones, with id, kind, depth and scope. One hook covers logging, tracing, metrics and audit.
-- 🛠 `logic-sdk graph` prints who runs what and which events reach which listeners. `logic-sdk inspect` shows a live call tree.
+- ✅ **`logic-sdk graph`** prints who runs what and which events reach which listeners.
 
 ## 8. Errors that mean something
 
@@ -76,8 +76,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 ## 9. Built for AI-written code
 
 - ✅ **Uniform shape, a one-sentence JSDoc on every function, an agent skill.** An agent can't invent a new architecture per feature.
-- ✅ **The lint rule blocks cross-module imports.**
-- 🛠 Skills shipped in the package (TanStack Intent), and `logic-sdk check`, which fails on cycles and on side effects in mutations. The agent writes the code; the lib verifies it followed the rules.
+- ✅ **The agent skill ships in the package, and `logic-sdk check` enforces the rules:** no cross-module imports, no cycles, no `fetch` in a transaction. The agent writes the code; the lib verifies it followed the rules.
 
 ## What you give up
 

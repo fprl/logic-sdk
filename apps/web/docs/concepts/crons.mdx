@@ -86,7 +86,7 @@ export async function POST(request: Request) {
 
 ## Once, on several servers
 
-**`databaseQueue`, `outbox` and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it.
+**`databaseQueue`, `outbox` and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it. `cloudflareQueue` alone runs it once per tick: a trigger delivered twice runs it twice.
 
 Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter](/docs/concepts/jobs):
 

@@ -69,4 +69,4 @@ await work(registry, boss, {
 - **A crash on the last try** is failed by pg-boss's supervisor when `expireInSeconds` runs out, without running again and without reaching `onError`: logic-sdk never sees it. On an earlier try, pg-boss retries it.
 - **`replace`** deletes the waiting call (pg-boss's `created` state) in your transaction and inserts the new one under its own id, so `retry(id)` with the id `ctx.schedule` returned works. A call that started (`active`, or `retry` after a failure) isn't touched.
 - **No per-key order yet:** jobs run in parallel per queue, as pg-boss's workers fetch them.
-- **At least once,** like every adapter: a listener that charges or emails should record `ctx.event.id` and skip it if it has seen it.
+- **At least once,** like every adapter: a listener that charges or emails should keep `ctx.event.id` in a record of its own (two listeners share an event's id) and skip it if it has seen it.

@@ -79,7 +79,7 @@ export default {
 - **One registry per jobs table.** A sweep takes any due row, so a second registry with other modules on the same table fails the first's jobs as "isn't a registered listener". Different logic on the same data is modules in one registry, told apart by scope and policies. The same registry built again (per request, on several servers) is fine.
 - **A discarded job** (`jobs.scope.load` returned `null`) is deleted, and `sweep` counts it as `discarded`. See [Jobs](/docs/concepts/jobs#who-a-job-runs-as).
 - **[Crons](/docs/concepts/crons) run once per minute** across servers: re-export `cronRunsTable` next to `jobsTable` when you have crons.
-- **At least once.** The work and marking the job done are two writes. A crash between them runs the job again, or marks it `failed` though it worked when it's out of attempts (look before you `retry(id)` it). So make jobs safe to run twice, scheduled mutations and crons included, as in Rails and Laravel. A listener that charges or emails records `ctx.event.id` and skips it if it has seen it. A mutation uses a key of its own:
+- **At least once.** The work and marking the job done are two writes. A crash between them runs the job again, or marks it `failed` though it worked when it's out of attempts (look before you `retry(id)` it). So make jobs safe to run twice, scheduled mutations and crons included, as in Rails and Laravel. A listener that charges or emails keeps `ctx.event.id` in a record of its own (two listeners share an event's id) and skips it if it has seen it. A mutation uses a key of its own:
 
   ```ts
   // unique index on credits.orderId: a second run changes nothing

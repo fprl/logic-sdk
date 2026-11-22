@@ -257,9 +257,9 @@ export const expireCarts = cron({
 |---|---|
 | `attempts` | tries in total, the first included (default 1) |
 | `delay` | run it N seconds after the event |
-| `key` | same key runs one at a time, in order (per conversation, per account) |
-| `dedupe` | never run twice for the same event; defaults to event id plus listener id |
-| `timeout` | give up after N seconds |
+| `key` (planned) | same key runs one at a time, in order (per conversation, per account) |
+| `dedupe` (planned) | never run twice for the same event; defaults to event id plus listener id |
+| `timeout` (planned) | give up after N seconds |
 
 Transport side: concurrency caps, the backoff curve, the DLQ, batch size, retention.
 
