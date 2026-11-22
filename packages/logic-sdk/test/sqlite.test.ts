@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
-import { sql } from "drizzle-orm";
+import { is, SQL, sql } from "drizzle-orm";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import { drizzle as nodeSqlite } from "drizzle-orm/node-sqlite";
-import { getTableConfig, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { getTableConfig, SQLiteDialect, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
@@ -75,8 +75,7 @@ seamScenarios("jobs table: node:sqlite, no ORM", {
 
 const drivers = {
   "node:sqlite": (file: string) => nodeSqlite(file),
-  // as one type for the loop below: the two share Drizzle's async SQLite database
-  "bun:sqlite": (file: string) => bunSqlite({ client: new Database(file) }) as unknown as ReturnType<typeof nodeSqlite>,
+  "bun:sqlite": (file: string) => bunSqlite({ client: new Database(file) }),
 };
 
 for (const [driver, connect] of Object.entries(drivers)) {
@@ -283,13 +282,23 @@ describe("SQLite: processes on one file (Node)", () => {
   });
 });
 
+/** SQLite drops an expression's outer brackets. */
+const bare = (expression: string) => expression.replace(/^\((.*)\)$/, "$1");
+
+/** A Drizzle column's default, as SQLite reports it. */
+function defaultInSql(value: unknown) {
+  if (value === undefined) return null;
+  if (is(value, SQL)) return bare(new SQLiteDialect().sqlToQuery(value).sql);
+  return typeof value === "string" ? `'${value}'` : String(value);
+}
+
 test("SQLite's jobsSchema is the table Drizzle users re-export", () => {
   const db = new DatabaseSync(newFile());
   for (const table of [jobsTable, cronRunsTable]) {
     const { name, columns, indexes } = getTableConfig(table);
     const real = db.prepare(`pragma table_info(${name})`).all() as { name: string; type: string; notnull: number; dflt_value: string | null }[];
-    expect(real.map((c) => ({ name: c.name, type: c.type.toLowerCase(), required: c.notnull === 1, defaulted: c.dflt_value !== null }))).toEqual(
-      columns.map((c) => ({ name: c.name, type: c.getSQLType(), required: c.notNull, defaulted: c.hasDefault })),
+    expect(real.map((c) => ({ name: c.name, type: c.type.toLowerCase(), required: c.notnull === 1, default: c.dflt_value && bare(c.dflt_value) }))).toEqual(
+      columns.map((c) => ({ name: c.name, type: c.getSQLType(), required: c.notNull, default: defaultInSql(c.default) })),
     );
     const made = db.prepare("select name from sqlite_master where type = 'index' and tbl_name = ? and sql is not null order by name").all(name) as { name: string }[];
     expect(made.map((i) => i.name)).toEqual(indexes.map((i) => i.config.name).sort());
