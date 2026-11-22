@@ -34,6 +34,22 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 - **Published:** `logic-sdk` and `@logic-sdk/cli` on npm through trusted publishing from github.com/fprl/logic-sdk.
 - **Repo:** Bun workspaces like files-sdk; `bun test` for core; `examples/shop` (one app on Node, Workers and Next.js; its Worker tested in workerd) and `examples/bookings` (six modules; Vitest, PGlite or real Postgres with `DATABASE_URL`, a real race test); docs site on Blume; oxlint repo-wide.
 
+## Before 0.5.0
+
+Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
+
+1. **The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. Drizzle keeps `databaseQueue(db)` and its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
+2. **SQLite, plain (API).** node:sqlite on a disk: one connection writes, a transaction at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
+3. **One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
+4. **The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
+5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
+6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error.
+7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them.
+8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
+9. **Rolling deploys:** an old process fails a new listener's job at once. A recorded decision (DESIGN.md, "A job this code can't run"): revisit with the owner, don't change it quietly (API).
+10. **Casts and `!` left in the CLI,** and the type cost of per-kind meta (about 40% more instantiations on 1,200 functions).
+11. **Try it in a real app,** then release on an explicit go.
+
 ## Next
 
 1. **Use it in a real app.** What feels clunky there decides what comes next.
@@ -46,7 +62,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
    - **Done: pg-boss** (`logic-sdk/pg-boss`: `pgBoss(boss)`, `work(registry, boss)`, a queue per listener and cron). Per-key order (`key_strict_fifo`) waits for `key`.
    - **Next:** Inngest (one Inngest function per listener, from `registry.definitions`) before the adapter contract is called stable. `key`, `dedupe` and `timeout` land with those adapters, refused in `check` where they can't be honoured. Drizzle 1.0 (RC) only, like the rest of the library.
    - **Done:** the database queue's claim tested with concurrent sweepers on real Postgres (CI sets `DATABASE_URL` for every workspace).
-   - **Later:** a SQLite database queue, once a driver holds up (DESIGN.md, "SQLite: not yet").
+   - **SQLite and other ORMs:** see "Before 0.5.0".
    - **Then the ladder, in order:** `pgBoss(boss)` (transactional natively), `databaseQueue(db)` (rows in the transaction, flush through `waitUntil`, sweeper), then `cloudflareQueue` and `vercelQueue`, alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider. Each dispatcher declares its guarantee.
    - **Listener options:** `attempts`, `delay` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
    - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with the outbox (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).
