@@ -5,7 +5,7 @@ import { createShop, settingsFrom } from "../registry";
 
 // Next.js: one shop and one pool for the server (dev hot reload opens a new pool per reload; fine for a demo).
 // Listeners run after the response, through Next's `after`.
-const shop = createShop({
+export const shop = createShop({
   db: drizzle({ client: postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5442/postgres") }),
   settings: settingsFrom(process.env),
   waitUntil: (promise) => after(() => promise),

@@ -22,7 +22,8 @@ export type Settings = {
 };
 
 export interface Mailer {
-  send(mail: { to: string; subject: string; text: string }): Promise<void>;
+  /** `idempotencyKey`: the same key again doesn't send again (Resend and others take one). */
+  send(mail: { to: string; subject: string; text: string; idempotencyKey?: string }): Promise<void>;
 }
 
 type Config = {

@@ -15,5 +15,5 @@ const app = createApi(() => shop);
 
 serve({ fetch: app.fetch, port: 3000 }, (info) => console.log(`http://localhost:${info.port}`));
 
-// the crons in code (orders.morningDigest), on the minute. One server: inProcess() runs each once.
+// every minute: the crons in code (orders.morningDigest), and the jobs a crash or a failure left in the table
 startTicking(shop);

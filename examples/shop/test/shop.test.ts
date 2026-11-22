@@ -25,7 +25,12 @@ test("ana pays catalog prices, stock goes down, and the receipt goes out after c
   expect(order.items[0]).toEqual({ sku: "mug", name: "Logic mug", price: 12_00, quantity: 2 });
   expect(await stock("mug")).toBe(8);
   expect(mailer.sent).toEqual([
-    { to: "ana", subject: "Thanks for your order (€49.00)", text: `Order ${order.id} is placed. See your orders at https://shop.test` },
+    {
+      to: "ana",
+      subject: "Thanks for your order (€49.00)",
+      text: `Order ${order.id} is placed. See your orders at https://shop.test`,
+      idempotencyKey: expect.stringMatching(/^receipt:/),
+    },
   ]);
 });
 
