@@ -27,7 +27,7 @@ const encoder = new TextEncoder();
 
 /**
  * Send jobs to a Cloudflare Queue after commit. Alone it's lossy (a Worker that dies between commit and send loses
- * them); inside the outbox it's durable: `jobs: { adapter: outbox(db, { via: cloudflareQueue(env.JOBS) }), scope: { store, load } }`.
+ * them); behind an outbox it's durable: `jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope: { store, load } }`.
  * Run them with `handleQueue(registry, batch)` in your consumer.
  */
 export function cloudflareQueue(queue: QueueBinding): Dispatcher {
@@ -80,14 +80,14 @@ export async function handleQueue(registry: { jobs: Pick<Jobs, "run"> }, batch: 
       await registry.jobs.run(message.body, { attempt: message.attempts });
       message.ack();
     } catch {
-      // already reported to onError. The outbox's curve, so a listener's tries aren't spent back to back.
+      // already reported to onError. databaseQueue's curve, so a listener's tries aren't spent back to back.
       message.retry({ delaySeconds: Math.ceil(Math.exp(Math.min(message.attempts, 10))) });
     }
   }
 }
 
 /**
- * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (the outbox's retries,
+ * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (databaseQueue's retries,
  * delayed jobs, and sends a crash left behind). Use `"* * * * *"`, or one trigger per cron: Cloudflare numbers weekdays
  * 1 = Sunday, so write them as names (`MON`) in both places.
  *

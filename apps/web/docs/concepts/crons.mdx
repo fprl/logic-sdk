@@ -76,7 +76,7 @@ export async function POST(request: Request) {
 ```
 
 - **A trigger only says when to tick;** `tick` matches the time, not which trigger fired. So one trigger per cron and one every minute both work.
-- **With the outbox, you need a regular trigger anyway:** the request runs a commit's jobs itself, but retries, delayed jobs and what a crash left behind wait for a sweep, and the trigger's interval is how long they wait. That trigger ticks your crons too, so per-cron triggers only make sense without the outbox, where a trigger delivered twice runs the cron twice.
+- **With `databaseQueue`, you need a regular trigger anyway:** the request runs a commit's jobs itself, but retries, delayed jobs and what a crash left behind wait for a sweep, and the trigger's interval is how long they wait. That trigger ticks your crons too, so per-cron triggers only make sense without it, where a trigger delivered twice runs the cron twice.
 - **Every minute never needs touching,** and it's Laravel's setup: one system cron entry, `* * * * * php artisan schedule:run`. It costs about 43,000 calls a month: nothing on Cloudflare's paid plan, cents on Vercel Pro.
 - **One trigger per cron calls less,** but keep the lists in step: a cron with no trigger never runs, and nothing can tell you, since logic-sdk doesn't read `wrangler.jsonc` or `vercel.json`.
 - **The platform's own limits apply:**
@@ -86,20 +86,20 @@ export async function POST(request: Request) {
 
 ## Once, on several servers
 
-**The outbox and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it.
+**`databaseQueue`, `outbox` and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it.
 
 Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter](/docs/concepts/jobs):
 
-- **With `outbox(db)`, a minute runs once,** however many servers tick it, and a trigger delivered twice runs once too. Re-export the runs table next to the outbox's, like Solid Queue's recurring executions:
+- **With `databaseQueue` or `outbox`, a minute runs once,** however many servers tick it, and a trigger delivered twice runs once too. Re-export the runs table next to the jobs table, like Solid Queue's recurring executions:
 
 ```ts
 // db/schema.ts
-export { outboxTable, cronRunsTable } from "logic-sdk/drizzle";
+export { jobsTable, cronRunsTable } from "logic-sdk/drizzle";
 ```
 
 - **With `pgBoss(boss)`, a minute runs once** too: its pg-boss id is derived from `<cron id>@<minute>`, and pg-boss skips an insert whose id it already has (finished jobs are kept 7 days).
-- **With `inProcess()`, every server that ticks runs it,** like Laravel without `onOneServer()`. Fine for one server, or for a platform trigger; use the outbox for more.
-- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by the outbox and pg-boss, reported to `onError` with the cron's id.
+- **With `inProcess()`, every server that ticks runs it,** like Laravel without `onOneServer()`. Fine for one server, or for a platform trigger; use `databaseQueue` for more.
+- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by `databaseQueue`, `outbox` and pg-boss, reported to `onError` with the cron's id.
 
 ## Schedules
 

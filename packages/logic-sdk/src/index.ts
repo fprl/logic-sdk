@@ -107,7 +107,7 @@ export { inProcess, replaceKeyOf } from "./jobs.ts";
  * ──────────────────────────────────────────────────────────────────────────── */
 
 type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Omit<RegistryOptions<Mods>, "wrap" | "jobs"> & {
-  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
+  /** Background work: `jobs: { adapter: databaseQueue(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions<ScopeOf<C>, T>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call<CallMetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
@@ -180,7 +180,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       event: () => EventDef<unknown, O>;
       /**
        * Tries in total, the first included, like Laravel's `$tries`. Default 1: a retry repeats side effects, so opt in.
-       * Once they're used, the job is `failed` (kept by the outbox, retried with `registry.jobs.retry(id)`).
+       * Once they're used, the job is `failed` (kept by `databaseQueue`, `outbox` and pg-boss, retried with `registry.jobs.retry(id)`).
        */
       attempts?: number;
       /** Seconds after the event before the first try. Needs an adapter that holds jobs: `inProcess()` is refused. */
@@ -227,7 +227,7 @@ interface TxState {
   db: unknown;
   doomed: boolean;
   reason: unknown;
-  outbox: Envelope[];
+  events: Envelope[];
   /** What `ctx.schedule` asked for, enqueued with the events at commit. */
   calls: CallJob[];
   pending: Promise<void>[];
@@ -461,7 +461,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       emit: (event, payload) => {
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
-        tx.outbox.push(envelope);
+        tx.events.push(envelope);
         checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`);
       },
       schedule: (fn, input, { at, delay, attempts = 1, replace }) => {
@@ -473,7 +473,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         if (replace !== undefined) {
           if (!replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty key.`);
           if (!dispatcher.replaces)
-            throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use outbox(db).`);
+            throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use databaseQueue(db), or outbox(db, queue) in front of your queue.`);
         }
         // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
         const waits = seconds > 0;
@@ -587,20 +587,20 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       // top-level mutation: open the transaction, commit, then deliver events.
       // A lost race (deadlock, serialization failure) re-runs it in a fresh transaction.
       const input = await prepare();
-      let committed: { out: unknown; outbox: Envelope[]; jobs: Job[] };
+      let committed: { out: unknown; events: Envelope[]; jobs: Job[] };
       for (let attempt = 1; ; attempt++) {
         let state: TxState | undefined;
         try {
           // SAFETY: createRegistry refuses mutations without a database that has interactive transactions
           committed = await database!.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
-            const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, outbox: [], calls: [], pending: [] });
+            const tx: TxState = (state = { db: txDb, doomed: false, reason: undefined, events: [], calls: [], pending: [] });
             const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
-            const jobs = toJobs(tx.outbox, tx.calls);
+            const jobs = toJobs(tx.events, tx.calls);
             if (jobs.length) await dispatcher.enqueue?.(txDb, jobs);
-            return { out, outbox: tx.outbox, jobs };
+            return { out, events: tx.events, jobs };
           });
           break;
         } catch (e) {
@@ -616,14 +616,14 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       }
 
       // committed. Nothing below may fail the caller.
-      if (committed.outbox.length || committed.jobs.length) await afterCommit(committed.outbox, committed.jobs);
+      if (committed.events.length || committed.jobs.length) await afterCommit(committed.events, committed.jobs);
       return committed.out;
     });
   }
 
-  async function afterCommit(outbox: Envelope[], jobs: Job[]) {
+  async function afterCommit(emitted: Envelope[], jobs: Job[]) {
     try {
-      for (const e of outbox) o.record?.(e);
+      for (const e of emitted) o.record?.(e);
       if (!jobs.length) return;
       const delivery = dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
       if (waitUntil) {

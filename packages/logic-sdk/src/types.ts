@@ -423,7 +423,7 @@ export interface RunJobOptions {
   attempt?: number;
   /**
    * Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it. Default: the adapter's
-   * `fail` (the outbox writes a failed row).
+   * `fail` (`databaseQueue` and `outbox` write a failed row).
    */
   fail?: (error: unknown) => Promise<void>;
 }
@@ -452,13 +452,13 @@ export interface Dispatcher {
   holds?: true | { max: number };
   /**
    * Can replace a call waiting to run: `enqueue` gets a call with `replace`, and a pending call to the same `fn` with
-   * the same key that hasn't started is replaced by it. The outbox can; a queue that already has the message can't.
+   * the same key that hasn't started is replaced by it. `databaseQueue` and `outbox` can; a queue that already has the message can't.
    * Without it, `ctx.schedule` with `replace` is refused.
    */
   replaces?: true;
   /** At `createRegistry`: refuse a setup this adapter can't honour (a database it doesn't share). */
   check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
-  /** Inside the transaction, before commit. In-process: nothing. Outbox: insert one row per delivery with `tx`. */
+  /** Inside the transaction, before commit. In-process: nothing. `databaseQueue` and `outbox`: insert one row per job with `tx`. */
   enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
   deliver(jobs: Job[], runner: Runner): Promise<void>;
@@ -468,7 +468,7 @@ export interface Dispatcher {
   retry?(id: string): Promise<boolean>;
   /**
    * Keep a job that failed for good after it left the adapter: `registry.jobs.run` calls it from a queue consumer, so
-   * the outbox stores the failure Cloudflare would otherwise drop. Not called for jobs the adapter ran itself.
+   * `outbox` stores the failure Cloudflare would otherwise drop. Not called for jobs the adapter ran itself.
    */
   fail?(job: Job, error: unknown): Promise<void>;
 }
@@ -501,7 +501,7 @@ export interface JobScope<S = object, T = any> {
 
 /** `createRegistry({ jobs })`: where background work goes, and what every adapter applies. */
 export interface JobsOptions<S = object, T = any> {
-  /** `inProcess()` (default), or a durable one like `outbox(db)`. Its own options go in its factory. */
+  /** `inProcess()` (default), or a durable one like `databaseQueue(db)`. Its own options go in its factory. */
   adapter?: Dispatcher;
   /** Applied by the registry in every adapter, `inProcess()` and tests included. */
   scope?: JobScope<S, T>;
@@ -525,14 +525,14 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
-  /** Background work: `jobs: { adapter: outbox(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
+  /** Background work: `jobs: { adapter: databaseQueue(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
   /**
    * Serverless: let listeners finish after the response. Pass the platform's global:
    * `import { waitUntil } from "cloudflare:workers"` or `import { waitUntil } from "@vercel/functions"`.
-   * Without it, `run` waits for listeners. On a long-lived server with the outbox, `() => {}` answers first (a restart
+   * Without it, `run` waits for listeners. On a long-lived server with `databaseQueue`, `() => {}` answers first (a restart
    * is swept up after its lease: retried, or failed when it was out of attempts); with `inProcess()`, don't: work
    * still running at a restart is lost.
    */
@@ -603,17 +603,17 @@ export interface Jobs {
   /**
    * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
    * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
-   * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (the outbox keeps it).
+   * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (`databaseQueue` and `outbox` keep it).
    */
   run(job: Job, options?: RunJobOptions): Promise<DeliveryOutcome>;
   /**
    * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
    * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run
-   * goes through your jobs adapter, and with `outbox(db)` a minute that's ticked twice still runs each cron once.
+   * goes through your jobs adapter, and with `databaseQueue` or `outbox` a minute that's ticked twice still runs each cron once.
    */
   tick(at?: Date): Promise<string[]>;
   /**
-   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `outbox(db)`, that's
+   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `databaseQueue(db)`, that's
    * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing, or maintain themselves
    * (pg-boss), resolve zeros.
    */

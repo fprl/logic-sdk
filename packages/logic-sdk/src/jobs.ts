@@ -31,7 +31,7 @@ const IN_PROCESS: Dispatcher = {
 };
 /**
  * Default adapter: runs each job right after commit, in this process, one try (like Laravel's sync queue). It can't
- * hold a job for later, so a `delay` or a waiting `ctx.schedule` is refused. Lost on crash: use an outbox when that matters.
+ * hold a job for later, so a `delay` or a waiting `ctx.schedule` is refused. Lost on crash: use `databaseQueue` when that matters.
  */
 export const inProcess = (): Dispatcher => IN_PROCESS;
 /** `inProcess()`: runs each job right after commit, in this process, so no scope waits at rest. */
@@ -102,9 +102,9 @@ export function makeJobs(deps: JobsDeps) {
   function checkHold(what: string, seconds: number) {
     const { holds } = dispatcher;
     if (!holds)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use outbox(db).`);
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use databaseQueue(db).`);
     if (holds !== true && seconds > holds.max)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${holds.max}s. Put outbox(db) in front: it holds them as long as needed.`);
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${holds.max}s. Put an outbox in front, outbox(db, queue): it holds them as long as needed.`);
   }
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
@@ -247,7 +247,7 @@ export function makeJobs(deps: JobsDeps) {
       const jobs = due(at);
       if (!jobs.length) return [];
       if (enqueue) {
-        if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like outbox(db)) need `database`.");
+        if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like databaseQueue(db)) need `database`.");
         await database.transaction((tx) => enqueue(tx, jobs));
       }
       await dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
@@ -255,7 +255,7 @@ export function makeJobs(deps: JobsDeps) {
     },
     sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
     async retry(id) {
-      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). outbox(db) and pgBoss(boss) do.`);
+      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(db), outbox(db, queue) and pgBoss(boss) do.`);
       return dispatcher.retry(id);
     },
   };

@@ -102,7 +102,7 @@ export function pgBoss(boss: PgBoss): Dispatcher {
   async function replaceWaiting(db: Db, keys: string[]) {
     // in key order, so two transactions replacing the same keys lock them in the same order and can't deadlock
     for (const key of [...new Set(keys)].sort()) {
-      // one replacer per key at a time, so the second sees the first's call and replaces it (the outbox's unique index)
+      // one replacer per key at a time, so the second sees the first's call and replaces it (databaseQueue's unique index)
       await db.executeSql("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`logic-sdk.replace:${key}`]);
       // a no-op edit that locks the key's queued jobs: a worker's fetch skips locked rows, so none starts while we look
       const { jobs: locked } = await boss.update(CALLS_QUEUE, undefined, { singletonKey: key, match: "all", db });
@@ -221,7 +221,7 @@ export async function work(
   }
 
   // a renamed or removed listener leaves its queue with no worker, and pg-boss's retention deletes those jobs unrun:
-  // say so, like a job the outbox can't find code for (it fails at once, kept)
+  // say so, like a job databaseQueue can't find code for (it fails at once, kept)
   const ours = new Set(queues.map((q) => q.name));
   for (const q of await boss.getQueues())
     if (q.name.startsWith(PREFIX) && !ours.has(q.name) && q.queuedCount > 0)

@@ -1,6 +1,6 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
 import type { AIMeta } from "../src/ai.ts";
-import { drizzleAdapter, type DrizzleDb } from "../src/drizzle.ts";
+import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle.ts";
 import type { PgBossMeta } from "../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
@@ -323,4 +323,16 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   admin.action({ meta: { pgBoss: {} }, handler: async () => 1 });
   // @ts-expect-error nothing here is read on listeners, so there's no meta to set
   admin.listener({ event: () => changed, meta: { anything: 1 }, handler: async () => 1 });
+}
+
+// three ways: the database is the queue, the queue alone, or an outbox in front of a queue
+{
+  const db = {} as PgliteDatabase;
+  const queue = { async deliver() {} };
+  databaseQueue(db, { lease: 60 });
+  outbox(db, queue, { maxAttempts: 3 });
+  // @ts-expect-error an outbox is in front of a queue
+  outbox(db);
+  // @ts-expect-error maxAttempts counts sends, and a database queue sends nothing
+  databaseQueue(db, { maxAttempts: 3 });
 }

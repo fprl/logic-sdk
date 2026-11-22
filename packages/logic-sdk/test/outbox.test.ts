@@ -4,19 +4,19 @@ import { drizzle } from "drizzle-orm/pglite";
 import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, setSystemTime, test } from "bun:test";
 import { z } from "zod";
-import { cronRunsTable, drizzleAdapter, outbox, outboxTable, type DrizzleTx } from "../src/drizzle.ts";
+import { cronRunsTable, databaseQueue, drizzleAdapter, jobsTable, outbox, type DrizzleTx } from "../src/drizzle.ts";
 import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
 
-// The real Postgres engine, in process. The DDL is what drizzle-kit generates from outboxTable.
+// The real Postgres engine, in process. The DDL is what drizzle-kit generates from jobsTable.
 const pg = new PGlite();
 await pg.exec(`
-  CREATE TABLE logic_outbox (
+  CREATE TABLE logic_jobs (
     id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
     attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
     receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
   );
-  CREATE INDEX logic_outbox_due ON logic_outbox (available_at) WHERE status = 'pending';
-  CREATE UNIQUE INDEX logic_outbox_replace ON logic_outbox (replace_key) WHERE status = 'pending' and attempts = 0;
+  CREATE INDEX logic_jobs_due ON logic_jobs (available_at) WHERE status = 'pending';
+  CREATE UNIQUE INDEX logic_jobs_replace ON logic_jobs (replace_key) WHERE status = 'pending' and attempts = 0;
   CREATE TABLE logic_cron_runs (id text PRIMARY KEY, ran_at timestamptz DEFAULT now() NOT NULL);
   CREATE TABLE items (name text PRIMARY KEY);
 `);
@@ -45,19 +45,19 @@ const react = listener({
     ran.push(`${name}#${ctx.event.attempt}`);
     if (next === "throw") throw new Error("smtp down");
     if (next === "deny") throw ctx.errors.reject("nope");
-    if (next === "lose-lease") await db.update(outboxTable).set({ attempts: sql`${outboxTable.attempts} + 1`, receipt: "a sweep's" }); // a sweep took it over
+    if (next === "lose-lease") await db.update(jobsTable).set({ attempts: sql`${jobsTable.attempts} + 1`, receipt: "a sweep's" }); // a sweep took it over
   },
 });
 
-const rows = () => db.select().from(outboxTable);
-const makeDue = () => db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` });
-function setup(jobs: Dispatcher = outbox(db)) {
+const rows = () => db.select().from(jobsTable);
+const makeDue = () => db.update(jobsTable).set({ availableAt: sql`now() - interval '1 second'` });
+function setup(jobs: Dispatcher = databaseQueue(db)) {
   const registry = createRegistry({ modules: { x: { added, add, react } }, database: drizzleAdapter(db), jobs: { adapter: jobs, scope: { load: (saved) => saved } }, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }
 
 beforeEach(async () => {
-  await pg.exec("TRUNCATE logic_outbox, logic_cron_runs, items");
+  await pg.exec("TRUNCATE logic_jobs, logic_cron_runs, items");
   next = "ok";
   ran.length = 0;
 });
@@ -72,7 +72,7 @@ test("a committed event is delivered and its row deleted; a rolled-back one neve
 });
 
 test("a failure keeps the row with a backoff and the error; a sweep after the backoff delivers it", async () => {
-  const { app, registry } = setup(outbox(db, { maxAttempts: 3 }));
+  const { app, registry } = setup();
   next = "throw";
   await app.run(add, { name: "lamp" });
   const [row] = await rows();
@@ -112,7 +112,7 @@ test("a rule saying no is failed at once, no retries", async () => {
 });
 
 test("a runner that crashed after commit: a sweep takes over once its pickup time is over", async () => {
-  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
+  const { app, registry } = setup({ ...databaseQueue(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // still its request's to run
   const [row] = await rows(); // the row is the job: what was enqueued is what runs
@@ -135,7 +135,7 @@ test("a job whose scope can't be loaded is discarded: its row is deleted and the
     modules: { x: { added, add, react } },
     database: drizzleAdapter(db),
     onError: () => {},
-    jobs: { adapter: outbox(db), scope: { load: (s) => (gone ? null : s) } },
+    jobs: { adapter: databaseQueue(db), scope: { load: (s) => (gone ? null : s) } },
   });
   next = "throw";
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" }); // first try fails: the row waits for a retry
@@ -157,23 +157,23 @@ const fakeVia = () => {
   return via;
 };
 
-test("via: the row makes the handoff durable; once the queue has it, the row is gone and nothing runs here", async () => {
+test("outbox: the row makes the handoff durable; once the queue has it, the row is gone and nothing runs here", async () => {
   const via = fakeVia();
-  const { app } = setup(outbox(db, { via }));
+  const { app } = setup(outbox(db, via));
   await app.run(add, { name: "desk" });
   expect(via.got).toHaveLength(1);
   expect(ran).toEqual([]); // the consumer runs it, not this request
   expect(await rows()).toEqual([]);
 });
 
-test("via: a failed handoff keeps the row, reaches onError, and the sweep sends it again; out of attempts it's failed", async () => {
+test("outbox: a failed handoff keeps the row, reaches onError, and the sweep sends it again; out of attempts it's failed", async () => {
   const via = fakeVia();
   const reported: FailureInfo[] = [];
   const registry = createRegistry({
     modules: { x: { added, add, react } },
     database: drizzleAdapter(db),
     onError: (_e, info) => reported.push(info),
-    jobs: { adapter: outbox(db, { via, maxAttempts: 2 }), scope: { load: (saved) => saved } }, // two failed sends, then failed
+    jobs: { adapter: outbox(db, via, { maxAttempts: 2 }), scope: { load: (saved) => saved } }, // two failed sends, then failed
   });
   via.down = true;
   await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
@@ -190,9 +190,9 @@ test("via: a failed handoff keeps the row, reaches onError, and the sweep sends 
 });
 
 test("a last try that never finished is failed on the next sweep, without running again", async () => {
-  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} }); // committed, then the process died
+  const { app, registry } = setup({ ...databaseQueue(db), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
-  await db.update(outboxTable).set({ attempts: 2 }); // it died on its second and last try too
+  await db.update(jobsTable).set({ attempts: 2 }); // it died on its second and last try too
   await makeDue();
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
   expect(ran).toEqual([]);
@@ -201,7 +201,7 @@ test("a last try that never finished is failed on the next sweep, without runnin
 
 test("delay: the row waits unclaimed until it's due, then a sweep runs it", async () => {
   const later = listener({ event: () => added, delay: 60, async handler(_ctx, { name }) { ran.push(`later ${name}`); } });
-  const registry = createRegistry({ modules: { x: { added, add, react, later } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, react, later } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(ran).toEqual(["desk#1"]); // react ran; later waits
   const [row] = await rows();
@@ -213,22 +213,22 @@ test("delay: the row waits unclaimed until it's due, then a sweep runs it", asyn
   expect(ran).toEqual(["desk#1", "later desk"]);
 });
 
-test("via: the jobs of one commit go in one send", async () => {
+test("outbox: the jobs of one commit go in one send", async () => {
   const also = listener({ event: () => added, async handler() {} });
   const via = fakeVia();
-  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { via }), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, via), scope: { load: (saved) => saved } } });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(via.sends).toBe(1);
   expect(via.got).toHaveLength(2);
   expect(await rows()).toEqual([]);
 });
 
-test("via: a job that fails for good in the consumer comes back as a failed row, even if the handoff's delete lands after", async () => {
+test("outbox: a job that fails for good in the consumer comes back as a failed row, even if the handoff's delete lands after", async () => {
   let consumer: ReturnType<typeof setup>["registry"] | undefined;
   const via = { async deliver(jobs: Delivery[]) {
     for (const job of jobs) await consumer!.jobs.run(job, { attempt: 2 }); // the queue ran it before this request deleted the row
   } };
-  const { app, registry } = setup(outbox(db, { via }));
+  const { app, registry } = setup(outbox(db, via));
   consumer = registry;
   next = "throw";
   await app.run(add, { name: "lamp" });
@@ -238,27 +238,27 @@ test("via: a job that fails for good in the consumer comes back as a failed row,
   expect(await registry.jobs.retry(row!.id)).toBe(true);
 });
 
-test("outbox(db) must share the registry's database: it writes in the mutation's transaction", () => {
+test("databaseQueue(db) must share the registry's database: it writes in the mutation's transaction", () => {
   const other = drizzle({ client: pg });
-  expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: outbox(other), scope: { load: (saved) => saved } } })).toThrow(/must use the same database as `database`/);
+  expect(() => createRegistry({ modules: {}, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(other), scope: { load: (saved) => saved } } })).toThrow(/must use the same database as `database`/);
 });
 
 test("a job whose listener was renamed or removed is failed at once with why, and retry runs it once the code is back", async () => {
   const { registry } = setup();
   const envelope = { id: "e", name: "x.added", payload: { name: "gone" }, scope: { actor: "ana" }, occurredAt: "", depth: 1 };
-  await db.insert(outboxTable).values({ id: "x.react@e", job: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
+  await db.insert(jobsTable).values({ id: "x.react@e", job: { kind: "delivery", id: "x.react@e", listener: "x.removed", envelope, attempts: 1 } });
   expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 });
   expect(await rows()).toMatchObject([{ status: "failed", lastError: expect.stringMatching(/x\.removed isn't a registered listener/) }]);
   // the code is back (here: the row points at a listener that exists)
-  await db.update(outboxTable).set({ job: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 1 } });
+  await db.update(jobsTable).set({ job: { kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 1 } });
   expect(await registry.jobs.retry("x.react@e")).toBe(true);
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["gone#1"]);
 });
 
-test("a listener's attempts beyond maxAttempts still get their tries", async () => {
+test("a listener's attempts decide its tries, however many", async () => {
   const stubborn = listener({ event: () => added, attempts: 4, async handler() { ran.push("stubborn"); throw new Error("still down"); } });
-  const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { maxAttempts: 2 }), scope: { load: (saved) => saved } }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, stubborn } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   for (let i = 0; i < 3; i++) {
     await makeDue();
@@ -270,7 +270,7 @@ test("a listener's attempts beyond maxAttempts still get their tries", async () 
 
 test("a crash between commit and the first try: the sweep's claim is the first try, so a one-try listener still runs", async () => {
   const once = listener({ event: () => added, async handler(_ctx, { name }) { ran.push(`once ${name}`); } });
-  const died = { ...outbox(db), deliver: async () => {} }; // committed, then the process died before delivering
+  const died = { ...databaseQueue(db), deliver: async () => {} }; // committed, then the process died before delivering
   const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: died, scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(await rows()).toMatchObject([{ status: "pending", attempts: 0 }]);
@@ -280,7 +280,7 @@ test("a crash between commit and the first try: the sweep's claim is the first t
 });
 
 test("sweep({ limit }) claims at most that many", async () => {
-  const { app, registry } = setup({ ...outbox(db), deliver: async () => {} });
+  const { app, registry } = setup({ ...databaseQueue(db), deliver: async () => {} });
   await app.run(add, { name: "a" });
   await app.run(add, { name: "b" });
   await makeDue();
@@ -291,7 +291,7 @@ test("sweep({ limit }) claims at most that many", async () => {
 test("crons: several servers ticking the same minute run each cron once, and old runs are pruned", async () => {
   const tidy = mutation({ async handler(ctx) { await ctx.db.insert(items).values({ name: `tidied ${ran.length}` }); ran.push("tidy"); } });
   const nightly = cron({ schedule: "0 3 * * *", run: tidy, scope: { actor: "system" } });
-  const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
   await db.insert(cronRunsTable).values({ id: "x.nightly@old", ranAt: new Date("2026-01-01T00:00:00Z") });
 
   const at = new Date("2026-11-23T03:00:00Z");
@@ -305,7 +305,7 @@ test("crons: several servers ticking the same minute run each cron once, and old
 test("ctx.schedule: the row waits, unclaimed, until it's due; then a sweep runs it", async () => {
   const remind = action({ input: z.object({ who: z.string() }), async handler(_ctx, { who }) { ran.push(`remind ${who}`); } });
   const book = mutation({ async handler(ctx) { ctx.schedule(remind, { who: "guest" }, { delay: 3600 }); } });
-  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(book);
   const [row] = await rows();
   expect(row).toMatchObject({ id: expect.stringMatching(/^x\.remind@/), status: "pending", attempts: 0, job: { kind: "call", fn: "x.remind", attempts: 1, depth: 0 } });
@@ -324,7 +324,7 @@ test("ctx.schedule replace: the waiting call with the key becomes the new one; o
       return ctx.schedule(remind, { at: checkIn }, { delay, replace: booking });
     },
   });
-  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
   const app = registry.as({ actor: "ana" });
   await app.run(book, { booking: "b1", checkIn: "July 3", delay: 3600 });
   const moved = await app.run(book, { booking: "b1", checkIn: "July 9", delay: 7200 }); // the dates changed
@@ -337,7 +337,7 @@ test("ctx.schedule replace: the waiting call with the key becomes the new one; o
   expect(waiting[0]!.id).toBe(moved); // the id ctx.schedule returned
   expect(waiting[0]!.availableAt.getTime() - Date.now()).toBeGreaterThan(7000_000);
 
-  await db.update(outboxTable).set({ attempts: 1 }); // claimed: both have started
+  await db.update(jobsTable).set({ attempts: 1 }); // claimed: both have started
   await app.run(book, { booking: "b1", checkIn: "July 10", delay: 0 }); // so this one runs on its own
   expect(ran).toEqual(["remind for July 10"]);
   expect((await rows()).filter((r) => r.replaceKey === "x.remind@b1")).toHaveLength(1); // the started one stays
@@ -351,7 +351,7 @@ test("ctx.schedule replace: only adapters that can replace take it", async () =>
     database: drizzleAdapter(db),
     jobs: { adapter: { holds: true, async deliver() {} }, scope: { load: (saved) => saved } },
   });
-  await expect(sent.as({ actor: "ana" }).run(book)).rejects.toThrow(/replaces a waiting call, but your jobs adapter can't replace one it already has\. Use outbox\(db\)/);
+  await expect(sent.as({ actor: "ana" }).run(book)).rejects.toThrow(/replaces a waiting call, but your jobs adapter can't replace one it already has\. Use databaseQueue\(db\)/);
 });
 
 test("ctx.schedule replace: due now, it takes over the waiting row and runs once, under the new id", async () => {
@@ -363,7 +363,7 @@ test("ctx.schedule replace: due now, it takes over the waiting row and runs once
       return ctx.schedule(remind, { at }, { delay, replace: "b1" });
     },
   });
-  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
   const app = registry.as({ actor: "ana" });
   await app.run(book, { at: "July 3", delay: 3600, twice: true });
   expect((await rows()).map((r) => (r.job as { input: unknown }).input)).toEqual([{ at: "July 3" }]);
@@ -378,7 +378,7 @@ test("retry of a failed call drops its key, so it doesn't collide with the one w
     input: z.object({ fail: z.boolean(), delay: z.number() }),
     async handler(ctx, { fail, delay }) { return ctx.schedule(remind, { fail }, { delay, replace: "b1" }); },
   });
-  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { remind, book } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } }, onError: () => {} });
   const app = registry.as({ actor: "ana" });
   const failed = await app.run(book, { fail: true, delay: 0 }); // runs now and fails for good: kept
   await app.run(book, { fail: false, delay: 3600 }); // the booking moved: a new one waits with the key
@@ -392,7 +392,7 @@ test("a commit's jobs are claimed one at a time: while one runs, the next hasn't
   let whileFirstRan: number[] = [];
   const first = listener({ event: () => added, async handler() { whileFirstRan = (await rows()).map((r) => r.attempts).sort(); } });
   const second = listener({ event: () => added, async handler() { ran.push("second"); } });
-  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(whileFirstRan).toEqual([0, 1]);
   expect(ran).toEqual(["second"]);
@@ -404,12 +404,12 @@ test("a slow first job doesn't fail the next: a sweep runs that one meanwhile, a
   const first = listener({
     event: () => added,
     async handler() {
-      await db.update(outboxTable).set({ availableAt: sql`now() - interval '1 second'` }).where(sql`attempts = 0`); // past its pickup time
+      await db.update(jobsTable).set({ availableAt: sql`now() - interval '1 second'` }).where(sql`attempts = 0`); // past its pickup time
       swept = await registry.jobs.sweep();
     },
   });
   const second = listener({ event: () => added, async handler(ctx) { ran.push(`second#${ctx.event.attempt}`); } });
-  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { added, add, first, second } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(swept).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["second#1"]);
@@ -422,18 +422,18 @@ for (const when of ["waiting to run", "running again"] as const)
       event: () => added,
       async handler() {
         const [row] = await rows();
-        await db.update(outboxTable).set({ status: "failed" }); // its lease ran out and a sweep failed it
+        await db.update(jobsTable).set({ status: "failed" }); // its lease ran out and a sweep failed it
         await registry.jobs.retry(row!.id);
-        if (when === "running again") await db.update(outboxTable).set({ attempts: 1, receipt: "the new run's" }); // the same attempt number again
+        if (when === "running again") await db.update(jobsTable).set({ attempts: 1, receipt: "the new run's" }); // the same attempt number again
       },
     });
-    const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db), scope: { load: (saved) => saved } } });
+    const registry = createRegistry({ modules: { x: { added, add, once } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db), scope: { load: (saved) => saved } } });
     await registry.as({ actor: "ana" }).run(add, { name: "desk" }); // the first run returns, done
     expect(await rows()).toMatchObject([{ status: "pending" }]);
   });
 
 test("a crash right after commit waits for the pickup time, not a whole lease", async () => {
-  const { app } = setup({ ...outbox(db), deliver: async () => {} });
+  const { app } = setup({ ...databaseQueue(db), deliver: async () => {} });
   await app.run(add, { name: "rug" });
   const wait = (await rows())[0]!.availableAt.getTime() - Date.now();
   expect(wait).toBeGreaterThan(25_000);
@@ -463,7 +463,7 @@ test("a job slower than its lease stays its runner's: the lease extends while it
       ran.push("slow");
     },
   });
-  const registry = createRegistry({ modules: { x: { added, add, slow } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.45 }), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { added, add, slow } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db, { lease: 0.45 }), scope: { load: (saved) => saved } } });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   expect(swept).toEqual({ done: 0, failed: 0, discarded: 0, retrying: 0 }); // nothing was free to take
   expect(ran).toEqual(["slow"]);
@@ -482,7 +482,7 @@ test("extending stops after 15 minutes, so a hung job is taken over in the end",
       before.push((await rows())[0]!.availableAt.toISOString());
     },
   });
-  const registry = createRegistry({ modules: { x: { added, add, hung } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.15 }), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { added, add, hung } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db, { lease: 0.15 }), scope: { load: (saved) => saved } } });
   try {
     await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   } finally {
@@ -494,7 +494,7 @@ test("extending stops after 15 minutes, so a hung job is taken over in the end",
 
 test("a retry's backoff stands: no extension lands after it", async () => {
   const flaky = listener({ event: () => added, attempts: 2, async handler() { await sleep(120); throw new Error("down"); } });
-  const registry = createRegistry({ modules: { x: { added, add, flaky } }, database: drizzleAdapter(db), jobs: { adapter: outbox(db, { lease: 0.15, backoff: () => 600 }), scope: { load: (saved) => saved } }, onError: () => {} });
+  const registry = createRegistry({ modules: { x: { added, add, flaky } }, database: drizzleAdapter(db), jobs: { adapter: databaseQueue(db, { lease: 0.15, backoff: () => 600 }), scope: { load: (saved) => saved } }, onError: () => {} });
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   await sleep(120);
   expect((await rows())[0]!.availableAt.getTime() - Date.now()).toBeGreaterThan(590_000);

@@ -51,7 +51,7 @@ t.stub(availability.hold, async () => {
 
 ## Jobs in tests
 
-Your app's adapter (an outbox, a queue) is never used in tests. Like Oban's `testing: :inline | :manual`, you pick one of two modes:
+Your app's adapter (a database queue, an outbox, Cloudflare) is never used in tests. Like Oban's `testing: :inline | :manual`, you pick one of two modes:
 
 ```ts
 const t = createTestRegistry(registry, { jobs: "manual" }); // default: "inline"
@@ -78,7 +78,7 @@ test("the receipt email", async () => {
 - **`tick(at)`** runs the [crons](/docs/concepts/crons) due at that minute, inline in both modes.
 - **`perform`** runs one listener by hand, as if its event had been emitted as `scope`: Oban's `perform_job`, Rails' `perform_now`.
 - **What waits, waits for `drain()`,** in both modes: a listener's `delay` (in `t.jobs.queued`) and `ctx.schedule` (in `t.jobs.scheduled`). `drain()` runs what's due at the test's `now`; `drain({ until })` runs what's due by then, each job at the time it was due (that's what its `ctx.now()` reads), like Rails' `perform_enqueued_jobs(at:)` and Oban's `with_scheduled`.
-- **The test registry holds what your app's adapter holds:** on `inProcess()`, `ctx.schedule` throws in tests too, as it would in production. Build it from the registry your app runs, so `createRegistry`'s checks (like `jobs.scope.load` for an outbox) run in tests too.
+- **The test registry holds what your app's adapter holds:** on `inProcess()`, `ctx.schedule` throws in tests too, as it would in production. Build it from the registry your app runs, so `createRegistry`'s checks (like `jobs.scope.load` for a database queue) run in tests too.
 - **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it; one that ran through `t.registry` (an adapter's call) makes `rollback` throw. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw.
 
 ```ts
