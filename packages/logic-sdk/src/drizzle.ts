@@ -22,13 +22,7 @@ export type DrizzleReader<Db> = Omit<
  */
 export type DrizzleDb<Db extends Transactional> = ReadWrite<DrizzleReader<DrizzleTx<Db>>, DrizzleTx<Db>>;
 
-export interface DrizzleAdapterOptions {
-  /**
-   * Tries in total for a mutation whose transaction lost a race (a deadlock or a serialization failure), like Laravel's
-   * `DB::transaction(fn, attempts)`. Default 3; 1 turns it off.
-   */
-  transactionAttempts?: number;
-}
+export type DrizzleAdapterOptions = Pick<DatabaseAdapter, "transactionAttempts">;
 
 /**
  * Use a Drizzle database for mutations. Needs a driver with async interactive transactions: node-postgres, postgres.js,
@@ -45,7 +39,7 @@ export function drizzleAdapter<Db extends Transactional>(
     transactions: "interactive",
     transactionAttempts: options.transactionAttempts,
     transaction: (fn) => db.transaction(fn),
-    nest: (tx) => drizzleAdapter(tx, options),
+    nest: (tx) => drizzleAdapter(tx),
     retryable: (e) => RETRYABLE.has(sqlState(e) ?? ""),
   };
 }

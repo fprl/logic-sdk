@@ -740,6 +740,18 @@ test("retries stop after `transactionAttempts`, and errors that aren't retryable
   expect(calls).toEqual(1);
 });
 
+test("a test registry keeps the app's transactionAttempts, whatever its adapter's nest returns", async () => {
+  let calls = 0;
+  const db = memoryDatabase();
+  const tx = { ...db, retryable: () => true, transaction: async () => { calls++; throw new Error("deadlock detected"); } };
+  const database = { ...db, transactionAttempts: 5, nest: () => tx };
+  const t = createTestRegistry(createRegistry<Scope>({ modules: { items, log }, database, services: { log: [] } }));
+  await t.begin();
+  await expect(t.as({ actor: "a", locale: "es" }).run(add, { name: "x" })).rejects.toThrow(/deadlock/);
+  expect(calls).toEqual(5);
+  await t.rollback();
+});
+
 test("listener loops stop at maxEventDepth (default 8 hops) and are reported once, not thrown", async () => {
   const ping = event({ payload: z.object({ n: z.number() }) });
   const bump = mutation({ input: z.object({ n: z.number() }), handler: async ({ emit }, { n }) => emit(ping, { n }) });
