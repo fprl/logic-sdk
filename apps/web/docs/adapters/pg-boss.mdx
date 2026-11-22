@@ -6,7 +6,7 @@ description: Jobs in pg-boss, inserted in your mutation's transaction.
 ```ts
 // registry.ts
 import { PgBoss } from "pg-boss";
-import { drizzleAdapter } from "logic-sdk/drizzle";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 import { pgBoss } from "logic-sdk/pg-boss";
 
 export const boss = new PgBoss(process.env.DATABASE_URL!);

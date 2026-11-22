@@ -1,0 +1,43 @@
+---
+title: Other ORMs
+description: Prisma, or anything that can run SQL in a transaction, with the same jobs.
+---
+
+A database adapter is a small object. `transaction` gives you mutations. `query` adds jobs in your database: it runs one SQL statement, on the database or inside the transaction it's given.
+
+```ts
+import type { DatabaseAdapter } from "logic-sdk";
+import { databaseQueue } from "logic-sdk/postgres";
+
+const database = {
+  db: prisma,
+  transactions: "interactive",
+  transaction: (fn) => prisma.$transaction(fn),
+  query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
+} satisfies DatabaseAdapter<PrismaClient, Prisma.TransactionClient>;
+
+createRegistry({
+  modules,
+  database,
+  jobs: { adapter: databaseQueue(database), scope: { store, load } },
+});
+```
+
+- **`outbox(database, queue)` has the same shape,** from the same import.
+- **`query` gets `$1`, `$2`… and only strings and numbers,** and resolves the rows as objects. The SQL casts them itself, so your driver doesn't have to guess a type.
+- **The type of your database** is `db: ReadWrite<PrismaClient, Prisma.TransactionClient>` in `Config`: what queries get, and what mutations get.
+- **`nest` is for the test registry** (a transaction inside a transaction, as a savepoint). Without it `createTestRegistry` can't roll back each test.
+- **`retryable` says which errors lost a race** (a deadlock, `40P01`, or a serialization failure, `40001`), so the mutation [runs again](/docs/concepts/transactions#lost-races-are-retried). Without it none does.
+- **Prisma's interactive transactions time out after 5 seconds by default,** so a slower mutation needs a `timeout` in your `$transaction`.
+
+## The tables
+
+`jobsSchema` is the SQL for your migrations: `logic_jobs`, and `logic_cron_runs` for crons.
+
+```ts
+import { jobsSchema } from "logic-sdk/postgres";
+
+console.log(jobsSchema); // paste it into a migration
+```
+
+The library's tests run the whole table through adapters written like this one, on PGlite and on postgres.js, with no ORM. Prisma itself isn't tested.

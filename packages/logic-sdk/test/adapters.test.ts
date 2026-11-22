@@ -10,7 +10,7 @@ import { fromPglite, PgBoss } from "pg-boss";
 import postgres from "postgres";
 import { z } from "zod";
 import { cloudflareQueue, handleQueue } from "../src/cloudflare.ts";
-import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle.ts";
+import { databaseQueue, drizzleAdapter, jobsSchema, outbox, type DrizzleDb } from "../src/drizzle/pg.ts";
 import { inProcess, init, type Dispatcher, type FailureInfo, type Job, type Registry } from "../src/index.ts";
 import { pgBoss, work, type PgBossMeta } from "../src/pg-boss.ts";
 
@@ -94,15 +94,9 @@ async function openDatabase(url?: string) {
   const pglite = url ? undefined : new PGlite();
   const client = url ? postgres(url, { max: 1, onnotice: () => {} }) : undefined;
   const db: Db = client ? drizzlePostgres({ client }) : drizzlePglite({ client: pglite! });
-  const temporary = sql.raw(url ? "TEMP" : "");
-  await db.execute(sql`CREATE ${temporary} TABLE logic_jobs (
-    id text PRIMARY KEY, job jsonb NOT NULL, status text DEFAULT 'pending' NOT NULL,
-    attempts integer DEFAULT 0 NOT NULL, available_at timestamptz DEFAULT now() NOT NULL,
-    receipt text, last_error text, failed_at timestamptz, replace_key text, created_at timestamptz DEFAULT now() NOT NULL
-  )`);
-  await db.execute(sql`CREATE UNIQUE INDEX logic_jobs_replace ON logic_jobs (replace_key) WHERE status = 'pending' and attempts = 0`);
-  await db.execute(sql`CREATE ${temporary} TABLE logic_cron_runs (id text PRIMARY KEY, ran_at timestamptz DEFAULT now() NOT NULL)`);
-  await db.execute(sql`CREATE ${temporary} TABLE adapter_orders (tag text NOT NULL)`);
+  const tables = `${jobsSchema} CREATE TABLE adapter_orders (tag text NOT NULL);`;
+  if (client) await client.unsafe(tables.replaceAll("CREATE TABLE", "CREATE TEMP TABLE"));
+  else await pglite!.exec(tables);
   return { db, pglite, close: async () => void (await (client ? client.end() : pglite!.close())) };
 }
 
@@ -146,7 +140,7 @@ async function openInProcess(url?: string): Promise<Running> {
 
 async function openDatabaseQueue(url?: string): Promise<Running> {
   const { db, close } = await openDatabase(url);
-  return { db, close, adapter: databaseQueue(db), settle: (registry) => sweepAll(db, registry) };
+  return { db, close, adapter: databaseQueue(drizzleAdapter(db)), settle: (registry) => sweepAll(db, registry) };
 }
 
 async function openCloudflare(url?: string): Promise<Running> {
@@ -168,7 +162,7 @@ async function openOutbox(url?: string): Promise<Running> {
   return {
     db,
     close,
-    adapter: outbox(db, cloudflareQueue(queue)),
+    adapter: outbox(drizzleAdapter(db), cloudflareQueue(queue)),
     async settle(registry) {
       await sweepAll(db, registry);
       while (queue.size) await queue.deliverAll(registry);

@@ -1,5 +1,5 @@
 import { init, type MutationCtx as Mutation, type QueryCtx as Query } from "logic-sdk";
-import type { DrizzleDb } from "logic-sdk/drizzle";
+import type { DrizzleDb } from "logic-sdk/drizzle/pg";
 import type { PgAsyncDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Scope } from "./scope";
 import type { Services } from "./services";

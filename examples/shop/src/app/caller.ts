@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/postgres-js";
+import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 import { after } from "next/server";
 import postgres from "postgres";
 import { createShop, settingsFrom } from "../registry";
@@ -6,7 +7,7 @@ import { createShop, settingsFrom } from "../registry";
 // Next.js: one shop and one pool for the server (dev hot reload opens a new pool per reload; fine for a demo).
 // Listeners run after the response, through Next's `after`.
 export const shop = createShop({
-  db: drizzle({ client: postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5442/postgres") }),
+  database: drizzleAdapter(drizzle({ client: postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5442/postgres") })),
   settings: settingsFrom(process.env),
   waitUntil: (promise) => after(() => promise),
 });

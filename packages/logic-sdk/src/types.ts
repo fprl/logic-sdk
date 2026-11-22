@@ -418,6 +418,16 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
    * `DB::transaction(fn, attempts)`. Default 3; 1 turns it off. A job's own tries are its `attempts`.
    */
   transactionAttempts?: number;
+  /**
+   * One SQL statement, `$1` parameters on Postgres, on the database or on a transaction of it. Resolves the rows it
+   * returns. `databaseQueue` and `outbox` run their table through it, so any ORM that can run SQL has them.
+   */
+  query?(client: Db | Tx, text: string, params: unknown[]): Promise<Record<string, unknown>[]>;
+}
+
+/** A database adapter with `query`: what `databaseQueue(database)` and `outbox(database, queue)` take. */
+export interface SqlDatabase<Db = any, Tx = any> extends DatabaseAdapter<Db, Tx> {
+  query(client: Db | Tx, text: string, params: unknown[]): Promise<Record<string, unknown>[]>;
 }
 
 /** Runs one job: resolves when it's done or failed for good (acknowledge it), throws when a retry might help. */
@@ -517,13 +527,13 @@ export interface InProcess extends Dispatcher {
  */
 export type JobsOptions<S = object, T = any> =
   | {
-      /** `inProcess()` (default), or a durable one like `databaseQueue(db)`. Its own options go in its factory. */
+      /** `inProcess()` (default), or a durable one like `databaseQueue(database)`. Its own options go in its factory. */
       adapter?: InProcess;
       /** Applied by the registry in every adapter, `inProcess()` and tests included. */
       scope?: JobScope<S, T>;
     }
   | {
-      /** An adapter that keeps jobs to run later, like `databaseQueue(db)`. */
+      /** An adapter that keeps jobs to run later, like `databaseQueue(database)`. */
       adapter?: Dispatcher;
       /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
       scope: JobScope<S, T>;
@@ -547,7 +557,7 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   services?: object;
   /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
   config?: object;
-  /** Background work: `jobs: { adapter: databaseQueue(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
+  /** Background work: `jobs: { adapter: databaseQueue(database), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
@@ -629,7 +639,7 @@ export interface Jobs {
    */
   tick(at?: Date): Promise<string[]>;
   /**
-   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `databaseQueue(db)`, that's
+   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `databaseQueue(database)`, that's
    * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing, or maintain themselves
    * (pg-boss), resolve zeros.
    */

@@ -125,7 +125,7 @@ Postgres itself aborts a transaction after a failed statement, and Rails warns a
 Map the database errors you care about where you know what they mean. `sqlState` reads the SQLSTATE code, even when Drizzle wraps the error:
 
 ```ts
-import { sqlState } from "logic-sdk/drizzle";
+import { sqlState } from "logic-sdk/drizzle/pg";
 
 try {
   await ctx.db.insert(users).values(input);

@@ -98,6 +98,7 @@ export type {
   Runner,
   ScheduleOptions,
   Schema,
+  SqlDatabase,
   SweepResult,
 } from "./types.ts";
 export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
@@ -108,7 +109,7 @@ export { inProcess, replaceKeyOf } from "./jobs.ts";
  * ──────────────────────────────────────────────────────────────────────────── */
 
 type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Omit<RegistryOptions<Mods>, "wrap" | "jobs"> & {
-  /** Background work: `jobs: { adapter: databaseQueue(db), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
+  /** Background work: `jobs: { adapter: databaseQueue(database), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
   jobs?: JobsOptions<ScopeOf<C>, T>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call<CallMetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
@@ -471,7 +472,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         if (replace !== undefined) {
           if (!replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty key.`);
           if (!dispatcher.replaces)
-            throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use databaseQueue(db), or outbox(db, queue) in front of your queue.`);
+            throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use databaseQueue(database), or outbox(database, queue) in front of your queue.`);
         }
         // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
         const waits = seconds > 0;

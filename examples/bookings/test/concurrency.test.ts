@@ -1,5 +1,5 @@
 import { isDomainError } from "logic-sdk";
-import { sqlState } from "logic-sdk/drizzle";
+import { sqlState } from "logic-sdk/drizzle/pg";
 import { eq } from "drizzle-orm";
 import { expect, test } from "vitest";
 import * as bookings from "../src/bookings";

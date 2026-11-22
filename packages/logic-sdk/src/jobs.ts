@@ -106,9 +106,9 @@ export function makeJobs(deps: JobsDeps) {
   function checkHold(what: string, seconds: number) {
     const { holds } = dispatcher;
     if (!holds)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use databaseQueue(db).`);
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use databaseQueue(database).`);
     if (holds !== true && seconds > holds.max)
-      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${holds.max}s. Put an outbox in front, outbox(db, queue): it holds them as long as needed.`);
+      throw new Error(`[logic-sdk] ${what} waits ${seconds}s; your jobs adapter holds jobs for at most ${holds.max}s. Put an outbox in front, outbox(database, queue): it holds them as long as needed.`);
   }
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
@@ -255,7 +255,7 @@ export function makeJobs(deps: JobsDeps) {
       const jobs = due(at);
       if (!jobs.length) return [];
       if (enqueue) {
-        if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like databaseQueue(db)) need `database`.");
+        if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like databaseQueue(database)) need `database`.");
         await database.transaction((tx) => enqueue(tx, jobs));
       }
       await dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
@@ -263,7 +263,7 @@ export function makeJobs(deps: JobsDeps) {
     },
     sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
     async retry(id) {
-      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(db), outbox(db, queue) and pgBoss(boss) do.`);
+      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(database), outbox(database, queue) and pgBoss(boss) do.`);
       return dispatcher.retry(id);
     },
   };

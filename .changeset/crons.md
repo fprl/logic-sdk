@@ -14,7 +14,7 @@ export const morningDigest = cron({
 ```
 
 - **`registry.jobs.tick(at?)`** runs the crons due in that minute, each as a job (`<cron id>@<minute>`) through your jobs adapter, with `attempts` like a listener. Call it from a timer on Node; on Cloudflare, `handleScheduled(registry, controller)` from `logic-sdk/cloudflare` ticks and sweeps. One platform trigger per cron and one every minute both work.
-- **With `databaseQueue` or `outbox`, each minute runs once** across servers and redelivered triggers. Re-export `cronRunsTable` from `logic-sdk/drizzle` next to `jobsTable`.
+- **With `databaseQueue` or `outbox`, each minute runs once** across servers and redelivered triggers. Re-export `cronRunsTable` from `logic-sdk/drizzle/pg` next to `jobsTable`.
 - **Five-field schedules** (lists, ranges, steps, names), matched on the wall clock of `timezone`. Seconds, `@daily` aliases and `L`/`W`/`#` are refused at startup.
 - **Tests:** `t.jobs.tick(at)` runs what's due at that minute and throws a failure.
 - `Job` is now `Delivery | CronJob`, `registry.definitions.crons` lists them, and `FailureInfo.listener` names the cron when one fails.

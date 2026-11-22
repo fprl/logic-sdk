@@ -1,12 +1,12 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
 import type { AIMeta } from "../src/ai.ts";
-import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle.ts";
+import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle/pg.ts";
 import type { PgBossMeta } from "../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { z } from "zod";
-import { inProcess, init, type Dispatcher, type ForListeners, type ReadWrite } from "../src/index.ts";
+import { inProcess, init, type DatabaseAdapter, type Dispatcher, type ForListeners, type ReadWrite } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
@@ -327,14 +327,16 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
 
 // three ways: the database is the queue, the queue alone, or an outbox in front of a queue
 {
-  const db = {} as PgliteDatabase;
+  const database = drizzleAdapter({} as PgliteDatabase);
   const queue = { async deliver() {} };
-  databaseQueue(db, { lease: 60 });
-  outbox(db, queue, { maxAttempts: 3 });
+  // @ts-expect-error the adapter, not the Drizzle database
+  databaseQueue({} as PgliteDatabase);
+  databaseQueue(database, { lease: 60 });
+  outbox(database, queue, { maxAttempts: 3 });
   // @ts-expect-error an outbox is in front of a queue
-  outbox(db);
+  outbox(database);
   // @ts-expect-error maxAttempts counts sends, and a database queue sends nothing
-  databaseQueue(db, { maxAttempts: 3 });
+  databaseQueue(database, { maxAttempts: 3 });
 }
 
 // an adapter that keeps jobs needs jobs.scope
@@ -351,4 +353,24 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   createRegistry({ modules: {}, jobs: { adapter: queue } });
   // @ts-expect-error an adapter picked per env may be the one that keeps jobs
   createRegistry({ modules: {}, jobs: { adapter: Math.random() ? queue : inProcess() } });
+}
+
+// another ORM: the seam is `query` on the adapter (Prisma's shape)
+{
+  interface PrismaTx {
+    $queryRawUnsafe<T = unknown>(query: string, ...values: any[]): Promise<T>;
+    booking: { count(): Promise<number> };
+  }
+  interface PrismaClient extends PrismaTx {
+    $transaction<R>(fn: (tx: PrismaTx) => Promise<R>): Promise<R>;
+  }
+  const prisma = {} as PrismaClient;
+  const database = {
+    db: prisma,
+    transactions: "interactive",
+    transaction: (fn) => prisma.$transaction(fn),
+    query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
+  } satisfies DatabaseAdapter<PrismaClient, PrismaTx>;
+  const { createRegistry } = init<{ scope: { who: string }; db: ReadWrite<PrismaClient, PrismaTx> }>();
+  createRegistry({ modules: {}, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
 }

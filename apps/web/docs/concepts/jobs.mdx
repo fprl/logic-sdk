@@ -4,11 +4,13 @@ description: Work that runs after commit, where it runs, and who it runs as.
 ---
 
 ```ts
+const database = drizzleAdapter(db);
+
 createRegistry({
   modules,
-  database: drizzleAdapter(db),
+  database,
   jobs: {
-    adapter: databaseQueue(db),                                 // where jobs go; default inProcess()
+    adapter: databaseQueue(database),                           // where jobs go; default inProcess()
     scope: {
       store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId }), // what's saved with each job
       load: (saved) => scopeFor(saved),                         // rebuilt when it runs; null discards it
@@ -36,7 +38,7 @@ inProcess()  default, zero infra
   mutation ─ commit ─► run the listeners in this process
   lost if the process dies after commit
 
-databaseQueue(db)  durable, Postgres: your database is the queue (Laravel's database driver)
+databaseQueue(database)  durable, Postgres: your database is the queue (Laravel's database driver)
   mutation ─ insert a row ─ commit ─► your app runs it, deletes the row
                                    └► failed or crashed: registry.jobs.sweep() runs it again
 
@@ -44,7 +46,7 @@ cloudflareQueue(env.JOBS)  a queue alone (Laravel's SQS driver, after commit)
   mutation ─ commit ─► send it ─► your consumer ─► registry.jobs.run(job)
                     └► the process died before the send: lost
 
-outbox(db, cloudflareQueue(env.JOBS))  durable, a table in front of a queue (the outbox pattern)
+outbox(database, cloudflareQueue(env.JOBS))  durable, a table in front of a queue (the outbox pattern)
   mutation ─ insert a row ─ commit ─► send it, delete the row ─► your consumer ─► registry.jobs.run(job)
                                    └► the send failed or crashed: registry.jobs.sweep() sends it again
   after the handoff, the queue owns retries, concurrency and its dead-letter queue
@@ -58,8 +60,8 @@ pgBoss(boss)  durable, Postgres: pg-boss inserts inside your transaction
 - **Which one:** `databaseQueue` unless you need what a queue gives you (its own consumers, more throughput). Then the queue alone if losing a job on a crash is fine, and behind an `outbox` if it isn't.
 - **Why an outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between, which is the Rails and Laravel `after_commit` default. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
 - **`databaseQueue` and pg-boss need no outbox:** each lives in your database, so its insert commits or rolls back with your writes, like Oban.
-- **One page per adapter:** [database queue](/docs/adapters/drizzle#database-queue), [outbox](/docs/adapters/drizzle#outbox), [pg-boss](/docs/adapters/pg-boss), [Cloudflare](/docs/adapters/cloudflare).
-- **The adapter's own options go in its factory:** `databaseQueue(db, { lease, backoff })`, `outbox(db, queue, { maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
+- **One page per adapter:** [database queue](/docs/adapters/drizzle#database-queue) (or [with another ORM](/docs/adapters/other-orms)), [outbox](/docs/adapters/drizzle#outbox), [pg-boss](/docs/adapters/pg-boss), [Cloudflare](/docs/adapters/cloudflare).
+- **The adapter's own options go in its factory:** `databaseQueue(database, { lease, backoff })`, `outbox(database, queue, { maxAttempts })`. What every adapter honours goes in `jobs` (today, `scope`).
 
 ## What each one guarantees
 
@@ -101,7 +103,7 @@ export const sendReceipt = listener({
 - **A last try that never finished** (the process crashed, or the job ran past the time `databaseQueue` keeps extending its lease) is `failed` without running again, as Laravel's worker does.
 - **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
 - **`delay`** is stamped on the job as `runAt`. `databaseQueue` and `outbox` keep the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
-- **`inProcess()` tries once and can't hold a job.** What throws is `failed`, whatever its `attempts`. And `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue(db)`. Cloudflare alone holds up to 24 hours.
+- **`inProcess()` tries once and can't hold a job.** What throws is `failed`, whatever its `attempts`. And `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue(database)`. Cloudflare alone holds up to 24 hours.
 
 ## Scheduled calls
 
@@ -125,12 +127,12 @@ export const confirm = mutation({
   ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: bookingId });
   ```
 
-  A call that already started isn't touched; the new one runs on its own. With an `outbox`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`databaseQueue(db)`, `outbox(db, queue)` or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
+  A call that already started isn't touched; the new one runs on its own. With an `outbox`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`databaseQueue(database)`, `outbox(database, queue)` or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
 - **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
-- **It needs an adapter that holds jobs:** `databaseQueue(db)`, `outbox(db, queue)` or `pgBoss(boss)`. `ctx.schedule` throws on `inProcess()`.
+- **It needs an adapter that holds jobs:** `databaseQueue(database)`, `outbox(database, queue)` or `pgBoss(boss)`. `ctx.schedule` throws on `inProcess()`.
 - **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 
 ## Ids

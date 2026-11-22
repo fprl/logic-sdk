@@ -83,7 +83,7 @@ A second Fable pass reviewed the built code and found real bugs. All are fixed, 
 ## Open questions
 
 1. **Pure services in mutations.** A mutation that needs a pure dependency (a pricing table, an id generator) currently has to use `db`, `now`, or a plain import. Should there be a `deps` slot for side-effect-free things, or is that the slope back to mocks?
-2. **A durable dispatcher.** Settled as a ladder of dispatchers (`inProcess`, after-commit queues, `databaseQueue`, `outbox(db, queue)`, `pgBoss`); see "Next: listeners, plugins, durable events, crons".
+2. **A durable dispatcher.** Settled as a ladder of dispatchers (`inProcess`, after-commit queues, `databaseQueue`, `outbox(database, queue)`, `pgBoss`); see "Next: listeners, plugins, durable events, crons".
 3. **A Postgres `READ ONLY` transaction for queries**, as an adapter flag. Today it's a type-level guard only.
 4. **An MCP and AI SDK tools adapter** (`toAITools(registry)`): each exposed function is already `description` + `inputSchema` + `execute`. oRPC's MCP package covers it via `toORPCRouter` in the meantime.
 5. **The name.** `logic-sdk` ("Logic SDK") was free on npm and GitHub on 2026-11-19. `bounded` was taken by an unrelated agent-guardrails tool with its own `bounded` command. Whether the `@logic-sdk` scope is free couldn't be checked without logging in.
@@ -218,16 +218,16 @@ Configured once, where the registry is created:
 ```ts
 jobs: { adapter: inProcess() }                                  // default: zero infra, lost on a crash
 jobs: { adapter: cloudflareQueue(env.JOBS), scope }             // sent after commit: the Rails/Laravel model, lossy
-jobs: { adapter: databaseQueue(db), scope }                     // durable, Postgres only
-jobs: { adapter: outbox(db, cloudflareQueue(env.JOBS)), scope } // durable handoff, plus queue retries, DLQ, concurrency
+jobs: { adapter: databaseQueue(database), scope }                     // durable, Postgres only
+jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope } // durable handoff, plus queue retries, DLQ, concurrency
 jobs: { adapter: pgBoss(boss), scope }                          // transactional natively, no outbox needed
 ```
 
 - **Ship the lossy mode.** It's the Rails 8.2 and Laravel `after_commit` model, and fine for consequences you can lose (a live update, a cache warm-up). Fizzy uses it on purpose.
-- **`databaseQueue(db)` is the durable path:** it inserts rows in the mutation's transaction, flushes them after commit through `waitUntil` (which the registry already takes), and a sweeper retries what a crash left behind. It's Fizzy's "state row plus recurring sweep", without writing it by hand. It needs only Postgres, which every app with mutations has, so it behaves the same on Node, Workers and Vercel; a queue on top adds isolation, concurrency and a DLQ.
+- **`databaseQueue(database)` is the durable path:** it inserts rows in the mutation's transaction, flushes them after commit through `waitUntil` (which the registry already takes), and a sweeper retries what a crash left behind. It's Fizzy's "state row plus recurring sweep", without writing it by hand. It needs only Postgres, which every app with mutations has, so it behaves the same on Node, Workers and Vercel; a queue on top adds isolation, concurrency and a DLQ.
 - **pg-boss needs no outbox:** `send(..., { db })` joins the transaction, like Oban or Laravel's database driver.
 - **Every dispatcher declares its guarantee** (`at-most-once` or `at-least-once`), and `logic-sdk check` prints it, so the choice is visible. Not built: no adapter declares one and `check` prints none (found 2026-11-22).
-- **Adapters per provider, as subpaths** with optional peer dependencies: `logic-sdk/pg-boss`, `logic-sdk/drizzle`, `logic-sdk/cloudflare`, `logic-sdk/vercel`. Runtime is the host entry's job, and each provider's adapter covers both events and crons. Inngest and Upstash ship the same way: one core, a thin adapter per target.
+- **Adapters per provider, as subpaths** with optional peer dependencies: `logic-sdk/pg-boss`, `logic-sdk/drizzle/pg`, `logic-sdk/cloudflare`, `logic-sdk/vercel`. Runtime is the host entry's job, and each provider's adapter covers both events and crons. Inngest and Upstash ship the same way: one core, a thin adapter per target.
 - **Cost:** the first table the library owns, and the sweeper needs crons.
 
 ### Crons: a definer, discovered like listeners
@@ -329,7 +329,7 @@ What would change it: long-lived Node becoming the main target (then pg-boss's m
 
 ### The database queue and the outbox (step 2)
 
-- **Three ways, three names.** `databaseQueue(db)`: the table is the queue and your app runs the jobs, Laravel's [`database` driver](https://laravel.com/framework/docs/8.x/queues#driver-prerequisites) (class [`DatabaseQueue`](https://github.com/laravel/framework/blob/v13.43.0/src/Illuminate/Queue/DatabaseQueue.php), table `jobs`). `cloudflareQueue(env.JOBS)`: the queue alone, after commit, Laravel's SQS driver with `after_commit`. `outbox(db, queue)`: the table keeps a job only until a queue has it, the transactional outbox pattern, which Laravel doesn't ship. One implementation behind the first and third. It was one name, `outbox(db, { via })`, until 2026-11-22, and `outbox(db)` with no queue wasn't an outbox: it read as if a queue, or plain jobs, needed the pattern (the user). Not `database(db)`, Laravel's string: it collides with the `database` key next to it. The table is `logic_jobs`, prefixed because it lives among yours. Below, "under `via`" means behind an `outbox`.
+- **Three ways, three names.** `databaseQueue(database)`: the table is the queue and your app runs the jobs, Laravel's [`database` driver](https://laravel.com/framework/docs/8.x/queues#driver-prerequisites) (class [`DatabaseQueue`](https://github.com/laravel/framework/blob/v13.43.0/src/Illuminate/Queue/DatabaseQueue.php), table `jobs`). `cloudflareQueue(env.JOBS)`: the queue alone, after commit, Laravel's SQS driver with `after_commit`. `outbox(database, queue)`: the table keeps a job only until a queue has it, the transactional outbox pattern, which Laravel doesn't ship. One implementation behind the first and third. It was one name, `outbox(db, { via })`, until 2026-11-22, and `outbox(db)` with no queue wasn't an outbox: it read as if a queue, or plain jobs, needed the pattern (the user). Not `database(db)`, Laravel's string: it collides with the `database` key next to it. The table is `logic_jobs`, prefixed because it lives among yours. Below, "under `via`" means behind an `outbox`.
 
 - **Lease, not a held lock.** A runner claims a row by pushing `available_at` forward (`lease`, default 300 s) and bumping `attempts`; listeners run outside any transaction, so nothing pins a connection across network calls. pg-boss does the same (an active state with `expireInSeconds`, default 15 minutes).
 - **Rows are born unclaimed; the request claims each just before it runs it.** `enqueue` writes `attempts = 0`, due in 30 seconds, so a sweep leaves them to the emitting request for that long. After commit, a fenced update (`attempts = 1 WHERE attempts = 0`) claims one job and starts its lease. It claimed the whole commit at once until 2026-11-22: a slow or dead first listener then failed the others, which had never run. Under `via` it still claims them together, for one send. The first version wrote `attempts = 1` at enqueue, so a process dying between commit and delivery spent the only try of a default listener without running it (an outside reviewer's catch). Now a crash before the claim leaves `attempts = 0`, and the sweep's claim is the first try. A crash before the claim costs those 30 seconds, not a lease.
@@ -361,7 +361,17 @@ What would change it: the two connections failing the shared adapter suite.
 
 ### The jobs table in SQL, one seam for every ORM
 
-Agreed on 2026-11-22, API approved, not built yet (ROADMAP, "Before 0.5.0"). The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. What would change it: a driver whose parameters or returned rows can't go through one such method.
+Built on 2026-11-22, API approved. The table's queries are written once per database in SQL and run through one method next to `transaction`, `query(client, text, params)`, as pg-boss does with `fromDrizzle` and `fromPrisma`. Without it, each ORM is another copy of the claims, receipts and retries, times each database. The prototype passed main's suite unchanged, and one scenario list through three Drizzle drivers, a Prisma-shaped client and node:sqlite. Drizzle keeps the table to re-export. Not a Kysely adapter to prove it: the scenarios do. **How it's built** (Fable's cold design, checked against a first prototype, and it won):
+
+- **Eleven fixed statements per database, one engine.** The prototype built placeholder lists and one insert per row; fixed text with the ids and rows as one JSON parameter is one round trip and nothing to assemble.
+- **Parameters are strings and numbers, cast in the SQL** (`$1::text::jsonb`, `$1::float8`). With `$1::jsonb` postgres.js encodes the JSON string a second time. Each parameter appears once, in text order, so positional `?` works on SQLite.
+- **`databaseQueue(database)`, the adapter,** so the queue has `query`. Its check compares `database.db`, so two adapters over one database pass.
+- **Replace keys sort by code unit, not `localeCompare`:** processes with another locale would lock them in another order.
+- **Two sources for the table,** `jobsTable` for drizzle-kit and `jobsSchema` for everyone else. A test creates the SQL and compares columns, types and index names with the Drizzle table.
+
+Taken: pg-boss's one method per ORM, Laravel's lock clause per database, Oban's claim as one `UPDATE ... RETURNING`. Not taken: pg-boss's array parameters (not every driver encodes them, as its own Drizzle adapter works around).
+
+What would change it: a driver whose parameters or returned rows can't go through one such method.
 
 ### Live tests on deployed platforms
 
@@ -369,7 +379,7 @@ Agreed direction on 2026-11-22, not built yet. Others do it like this: files-sdk
 
 ### Cloudflare Queues (step 3)
 
-- **Two modes, one factory.** `cloudflareQueue(env.JOBS)` alone sends after commit (lossy, the Rails/Laravel model); `outbox(db, queue)` makes the handoff durable. `outbox` reuses the database queue's claim, fence and backoff: the only new step is "send" in place of "run", and `done` then means handed off.
+- **Two modes, one factory.** `cloudflareQueue(env.JOBS)` alone sends after commit (lossy, the Rails/Laravel model); `outbox(database, queue)` makes the handoff durable. `outbox` reuses the database queue's claim, fence and backoff: the only new step is "send" in place of "run", and `done` then means handed off.
 - **Adapters get a `Runner` (`run`, `report`),** not a bare `run`. A failed handoff is the adapter's failure, not the listener's, so `run` never sees it; without `report` it would only land in `last_error`. Fable caught this in review.
 - **`handleQueue(registry, batch)`, not curried.** The first version was `toQueueHandler(registry)(batch)`, copied from `toFetchHandler`. That one returns a router you build once; a queue handler runs per batch with a per-request registry, so the curry only added parens. Sequential, each message acknowledged on its own ([explicit acknowledgement](https://developers.cloudflare.com/queues/configuration/batching-retries/#explicit-acknowledgement-and-retries)), so one failure doesn't redeliver the batch. A throw is retried with `delaySeconds` on the database queue's curve: Cloudflare's `retry_delay` default isn't documented, and back-to-back retries would spend `attempts: 3` in seconds.
 - **One message per invocation (`max_batch_size: 1`), in the docs' config, not in code.** Laravel Vapor takes one SQS record per invocation ([`VaporWorkCommand::message`](https://github.com/laravel/vapor-core/blob/2.0/src/Console/Commands/VaporWorkCommand.php)). With Cloudflare's default of 10, a killed Worker failed the batch-mates that never ran (reproduced on a fake queue that follows the documented redelivery rules). Considered on 2026-11-22: the row stays until done and the message is only a wake-up. Dropped: it would have required the outbox, and the queue alone is a mode we ship on purpose. What would change it: throughput that needs batches.
@@ -424,7 +434,7 @@ listener({ event: () => orders.placed, attempts: 5, delay: 60, async handler(ctx
 ### Naming the slot: `jobs`
 
 ```ts
-createRegistry({ modules, database, jobs: { adapter: databaseQueue(db), scope: { store, load } } });
+createRegistry({ modules, database, jobs: { adapter: databaseQueue(database), scope: { store, load } } });
 await registry.jobs.sweep();                                          // a cron or an interval
 await registry.jobs.retry(id);                                        // failed jobs only; false otherwise
 await registry.jobs.run(message.body, { attempt: message.attempts }); // a queue consumer
@@ -449,7 +459,7 @@ The slot is `jobs`, not `queue`: every method on it acts on a job, and in every 
 - `queue`: the closest second. It's the adapter's config name in Rails and Laravel, but there it holds named queues, and lanes are something we'll want (`route` below).
 - `dispatcher`, `background`: describe the mechanism or an adjective, not the thing you act on.
 
-**An object: the adapter, plus what every adapter honours.** We first shipped a single value (`jobs: databaseQueue(db)`) on the claim that no setting survives every adapter. Reading the configs says otherwise:
+**An object: the adapter, plus what every adapter honours.** We first shipped a single value (`jobs: databaseQueue(database)`) on the claim that no setting survives every adapter. Reading the configs says otherwise:
 
 | | Common to every adapter | Adapter-specific | Per job, never in config |
 |---|---|---|---|
@@ -459,13 +469,13 @@ The slot is `jobs`, not `queue`: every method on it acts on a job, and in every 
 
 So: lanes, commit timing and test mode are common; retries never are. Ours:
 
-- **`adapter`** (Rails' word, and ours already: `drizzleAdapter`). Its own options go in its factory, `databaseQueue(db, { lease })`, not a `driver: "database"` string with a typed union: Laravel can use strings because its container builds the client, and we have none. The pg-boss instance, your `db`, a Worker's per-request binding come from your code, and adapters are subpaths with optional peers the core can't type.
+- **`adapter`** (Rails' word, and ours already: `drizzleAdapter`). Its own options go in its factory, `databaseQueue(database, { lease })`, not a `driver: "database"` string with a typed union: Laravel can use strings because its container builds the client, and we have none. The pg-boss instance, your `db`, a Worker's per-request binding come from your code, and adapters are subpaths with optional peers the core can't type.
 - **`scope`**, applied by the core in every adapter ("Before durable events ship", 4).
 - **Later `queue`**, the default lane, when lanes land. Commit timing is the contract, test mode is `createTestRegistry`.
-- **Object only, no `jobs: databaseQueue(db)` shorthand.** Adding a shorthand later breaks no one; removing one does. Fable preferred keeping both, for brevity when there's no `scope`.
-- **Wrapping still composes adapters:** `outbox(db, cloudflareQueue(...))`, since sibling fields (`{ adapter, store }`) could express nonsense.
+- **Object only, no `jobs: databaseQueue(database)` shorthand.** Adding a shorthand later breaks no one; removing one does. Fable preferred keeping both, for brevity when there's no `scope`.
+- **Wrapping still composes adapters:** `outbox(database, cloudflareQueue(...))`, since sibling fields (`{ adapter, store }`) could express nonsense.
 
-**Lanes (multiple queues)** are normal in every stack, for isolation, priority, per-lane concurrency and retry policy. Ours is a `route` in the transport, with no core change: `cloudflareQueue({ jobs: env.JOBS, mail: env.MAIL }, { route })`, `pgBoss(boss, { route })`. `inProcess()` and plain `databaseQueue(db)` have none; an unknown lane throws. Built with the Cloudflare and pg-boss transports, when the first app needs a second lane. **What would move the lane onto the listener** (`listener({ queue: "mail" })`): two transports implementing lanes, or routing by id prefix getting brittle.
+**Lanes (multiple queues)** are normal in every stack, for isolation, priority, per-lane concurrency and retry policy. Ours is a `route` in the transport, with no core change: `cloudflareQueue({ jobs: env.JOBS, mail: env.MAIL }, { route })`, `pgBoss(boss, { route })`. `inProcess()` and plain `databaseQueue(database)` have none; an unknown lane throws. Built with the Cloudflare and pg-boss transports, when the first app needs a second lane. **What would move the lane onto the listener** (`listener({ queue: "mail" })`): two transports implementing lanes, or routing by id prefix getting brittle.
 
 **`registry.definitions`** holds the lists (`functions`, `events`, `listeners`, later `crons`), so the registry's top level is what you call (`as`, `jobs`, `idOf`) and a new definer adds a list without taking a name there.
 
@@ -478,11 +488,11 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 1. **Deliver per (event, listener), not per event.** Today one failing listener makes the healthy ones re-run on retry. Rails, Laravel and Oban all make the job the unit; a listener is our job.
 2. **Let transports acknowledge.** `deliver` gets a `dispatch` that never throws, so a queue adapter can't ack or retry a message, while `registry.dispatch` throws: two paths with different rules. One dispatch that returns per-listener results, with `inProcess` doing the swallowing.
 3. **Stable ids. Landed:** an optional `id` on every definer (`listener({ id: "send" })`), local to the module so `notifications` + `"send"` is `notifications.send`. Jobs store listener ids and event names, and a rename orphans them in flight: Rails raises `UnknownJobClassError` ([core.rb](https://github.com/rails/rails/blob/main/activejob/lib/active_job/core.rb)), Oban "unknown worker" ([worker.ex](https://github.com/oban-bg/oban/blob/main/lib/oban/worker.ex)); Inngest's function id "should not change between deploys", and Trigger.dev's task id is top-level too. A core field, not `meta`: the core reads it for lookup, dedupe and errors, and meta is what the core never reads. Local, not full: a full id would let `billing` claim `notifications.send`, and `ctx.errors` codes assume the module prefix. Duplicates throw at `createRegistry`. Renaming a module key still orphans jobs; a CLI rename check or `aliases` comes if that bites.
-4. **Scope at rest goes stale.** The envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Precedents split (RESEARCH.md, "Scope at rest"): Convex carries nothing, Laravel's Context carries a snapshot of what you put in it, Fizzy carries only the account and reloads it. Least machinery that's still safe, **landed** on the registry, not the adapter: the core applies `store` at emit and `load` in `jobs.run`, so `inProcess()` and tests exercise the same projection, and `outbox(db, queue)` never asks whose scope wins. (We first had it on each durable adapter, because only they store scope; that repeats it per factory and skips it in tests.)
+4. **Scope at rest goes stale.** The envelope stores a copy of the caller's scope, so a retry days later runs with old roles. Precedents split (RESEARCH.md, "Scope at rest"): Convex carries nothing, Laravel's Context carries a snapshot of what you put in it, Fizzy carries only the account and reloads it. Least machinery that's still safe, **landed** on the registry, not the adapter: the core applies `store` at emit and `load` in `jobs.run`, so `inProcess()` and tests exercise the same projection, and `outbox(database, queue)` never asks whose scope wins. (We first had it on each durable adapter, because only they store scope; that repeats it per factory and skips it in tests.)
 
    ```ts
    jobs: {
-     adapter: databaseQueue(db),
+     adapter: databaseQueue(database),
      scope: {
        store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId, locale: s.locale }), // optional: what's saved
        load: async (stored) => scopeFor(stored),                                             // optional: rebuilt fresh at delivery

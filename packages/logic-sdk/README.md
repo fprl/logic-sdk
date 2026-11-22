@@ -10,7 +10,7 @@ Write the layer between your routes and your database once, as plain declaration
 npm i logic-sdk zod
 ```
 
-Node 24+, Bun or Cloudflare Workers. Postgres through Drizzle for mutations.
+Node 24+, Bun or Cloudflare Workers. Postgres for mutations, through Drizzle or any ORM that can run SQL in a transaction.
 
 ## Quick start
 
@@ -74,10 +74,12 @@ await caller.run(bookings.confirm, { bookingId });
 Work that must not be lost goes through a jobs adapter. Listeners, scheduled calls and crons all use it:
 
 ```ts
+const database = drizzleAdapter(db);
+
 export const registry = createRegistry({
   modules: { bookings, availability },
-  database: drizzleAdapter(db),
-  jobs: { adapter: databaseQueue(db), scope: { store, load } },
+  database,
+  jobs: { adapter: databaseQueue(database), scope: { store, load } },
 });
 
 // a listener, with tries
@@ -109,7 +111,8 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 
 | Import | |
 |---|---|
-| `logic-sdk/drizzle` | The database adapter, `databaseQueue` and `outbox` |
+| `logic-sdk/drizzle/pg` | The database adapter, `databaseQueue` and `outbox` |
+| `logic-sdk/postgres` | `databaseQueue` and `outbox` on Postgres with any ORM |
 | `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
 | `logic-sdk/pg-boss` | Jobs in pg-boss |
 | `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |

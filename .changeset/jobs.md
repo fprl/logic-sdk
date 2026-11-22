@@ -6,11 +6,12 @@
 Background work is configured under `jobs`, and what you call on it lives on `registry.jobs`:
 
 ```ts
+const database = drizzleAdapter(db);
 const registry = createRegistry({
   modules,
-  database: drizzleAdapter(db),
+  database,
   jobs: {
-    adapter: databaseQueue(db),                       // default inProcess()
+    adapter: databaseQueue(database),                     // default inProcess()
     scope: { store: (s) => ({ userId: s.userId }), load: (saved) => scopeFor(saved) },
   },
 });
