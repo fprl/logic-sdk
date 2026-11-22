@@ -222,8 +222,8 @@ export async function work(
     await boss.work<Job>(name, { ...tuning?.worker, perJobResults: true }, (jobs) => Promise.all(jobs.map(settle)));
   }
 
-  // a renamed or removed listener leaves its queue with no worker, and pg-boss's retention deletes those jobs unrun:
-  // say so: with no worker, these jobs never get a try to report
+  // a renamed or removed listener leaves its queue with no worker, and pg-boss's retention deletes those jobs unrun.
+  // They never get a try that could report, so say so here
   const ours = new Set(queues.map((q) => q.name));
   for (const q of await boss.getQueues())
     if (q.name.startsWith(PREFIX) && !ours.has(q.name) && q.queuedCount > 0)

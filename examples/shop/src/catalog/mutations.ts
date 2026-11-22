@@ -8,12 +8,14 @@ const Items = z.object({
 });
 
 /** Rows are locked in SKU order: two carts with the same products in opposite orders would deadlock. */
-const inLockOrder = <T extends { sku: string }>(items: T[]) => items.toSorted((a, b) => a.sku.localeCompare(b.sku));
+// not localeCompare: Node, Workers and Next must agree on the order
+const inLockOrder = <T extends { sku: string }>(items: T[]) => items.toSorted((a, b) => (a.sku < b.sku ? -1 : 1));
 
 /**
  * Take items out of stock and price them
  *
- * Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short.
+ * Internal: orders runs it. Takes stock at catalog prices, or fails on the first item that's short. Lines come back in
+ * SKU order, the order it locks them in.
  */
 export const reserve = mutation({
   input: Items,
