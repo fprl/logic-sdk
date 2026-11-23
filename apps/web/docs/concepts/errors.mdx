@@ -30,7 +30,7 @@ Every expected failure is a `DomainError` with a `kind`, a `code` and optional `
 | Kind | Means | Thrown by |
 |---|---|---|
 | `invalid` | The input doesn't match the schema | The library |
-| `unauthenticated` | There's no valid session | Your edge: `unauthenticated()` from `logic-sdk/fetch` |
+| `unauthenticated` | There's no valid session | Your edge: `unauthenticated()` from `logic-sdk` |
 | `forbidden` | The caller may not do this | The library when `authorize` fails, or `ctx.errors.deny()` |
 | `not_found` | It doesn't exist here | `ctx.errors.notFound()` |
 | `conflict` | Someone got there first | `ctx.errors.conflict(code)` |
@@ -49,19 +49,16 @@ Bad input works the same way. From a client, it's `invalid` (400). From a nested
 Whether there's a valid session is decided before any function runs, in the code that builds the scope. Two cases:
 
 - **The mount serves public functions too:** return a scope with no actor. Functions that need one fail their policy with `forbidden` (403), like Laravel.
-- **The mount is entirely session-only** (an admin API, say): throw `unauthenticated()` from `resolveScope`, and the client gets a 401.
+- **The mount is entirely session-only** (an admin API, say): throw `unauthenticated()` where you build the scope, and `toResponse` makes it a 401.
 
 ```ts
-import { toFetchHandler, unauthenticated } from "logic-sdk/fetch";
+import { unauthenticated } from "logic-sdk";
 
-toFetchHandler(registry, {
-  basePath: "/admin/api/",
-  resolveScope: async (request) => {
-    const session = await auth.getSession(request);
-    if (!session) throw unauthenticated();
-    return scopeFrom(session);
-  },
-});
+async function callerFor(request: Request) {
+  const session = await auth.getSession(request);
+  if (!session) throw unauthenticated();
+  return registry.as(scopeFrom(session));
+}
 ```
 
 With oRPC, throw `ORPCError("UNAUTHORIZED")` from your own middleware instead. Inside modules there's no 401: a caller who may not do something gets `forbidden`.

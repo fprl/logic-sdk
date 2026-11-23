@@ -18,7 +18,7 @@ type Config = {
 // a module
 /** Cancel a booking */
 export const cancel = mutation({
-  meta: { tags: ["bookings"], ai: { tool: true, description: "Use when the guest asks to cancel" } },
+  meta: { tags: ["bookings"], ai: { description: "Use when the guest asks to cancel" } },
   ...
 });
 ```

@@ -31,7 +31,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 ## 3. Secure by default
 
-- ✅ **Private by default, exposed on purpose.** `authorize: staff` says who may call a function; `expose: true` lets adapters publish it, and can't be set without `authorize`. Without `expose`, no adapter publishes it and the typed oRPC router doesn't contain it.
+- ✅ **Private by default, published on purpose.** `authorize: staff` says who may call a function. Nothing is reachable from outside until you list it in your oRPC router or your agent's tools, and the adapters refuse a function without `authorize`. The API surface is one file, in review.
 - ✅ **Policies are written once and narrow types.** A `staff` function gets a non-null `scope.actor`, because its policy runs on every call, nested ones too.
 - ✅ **Record rules the Rails way.** Load through a scoped helper (404 for other accounts), then a sync `can*` check (403), reused for UI flags. The CLI keeps `can*` checks sync and used.
 - ✅ **Scope is explicit and typed:** actor, tenant, locale. Row-level tenancy lives in `data.ts` helpers that take `scope.accountId`.
@@ -61,7 +61,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 - ✅ **`registry.as(scope).run(fn, input)`** is the same call from HTTP, RPC, a cron job, a script, a test or a webhook.
 - ✅ **The same validation, authorization, transactions and events apply** on every path.
-- ✅ **`toAITool(caller, fn)` and `toAITools(registry, caller)`:** an AI agent calls the same functions with the same rules, and only the ones you opt in.
+- ✅ **`toAITool(caller, fn)`:** an AI agent calls the same functions with the same rules, and only the ones you give it.
 
 ## 7. Observable
 

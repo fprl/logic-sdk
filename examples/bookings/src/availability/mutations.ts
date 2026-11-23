@@ -16,7 +16,7 @@ const HoldInput = Range.and(
 /**
  * Reserve a date range on a property's calendar
  *
- * Internal (no expose): other modules call it with ctx.run.
+ * Internal (not in src/rpc.ts): other modules call it with ctx.run.
  */
 export const hold = mutation({
   input: HoldInput,
@@ -40,7 +40,6 @@ export const release = mutation({
 export const block = mutation({
   input: Range.and(z.object({ reason: z.enum(["owner_block", "maintenance"]) })),
   authorize: owner,
-  expose: true,
   output: Hold,
   handler: (ctx, input) => insertHold(ctx, { ...input, sourceId: `${input.reason}:${ctx.scope.actor.id}` }),
 });

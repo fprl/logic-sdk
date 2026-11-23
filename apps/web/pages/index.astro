@@ -9,7 +9,6 @@ export const confirm = mutation({
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: staff,                                  // on every call, nested ones too
-  expose: true,                                      // HTTP, oRPC and AI tools may publish it
   async handler(ctx, input) {
     const b = await findBooking(ctx, input.bookingId); // other accounts' bookings: 404
     if (b.status !== "pending") throw ctx.errors.reject("not_pending");

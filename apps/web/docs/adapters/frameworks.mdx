@@ -48,7 +48,7 @@ export async function confirmBooking(bookingId: string) {
 }
 ```
 
-Server Actions call functions directly, so they don't need `expose`: `authorize` still runs. To let listeners finish after the response, pass `waitUntil: (p) => after(() => p)` to `createRegistry` (see [Events](/docs/concepts/events#serverless)).
+A Server Action is a public endpoint, so it calls a function that has `authorize`, which runs on every call. To let listeners finish after the response, pass `waitUntil: (p) => after(() => p)` to `createRegistry` (see [Events](/docs/concepts/events#serverless)).
 
 ## A queue worker
 

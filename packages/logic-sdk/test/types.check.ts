@@ -88,16 +88,13 @@ void check;
 create({ modules: {}, database: memoryDatabase() });
 // @ts-expect-error a database is required when the config declares db
 create({ modules: {}, services: { mail: () => {} } });
-declare const maybe: true | undefined;
-// @ts-expect-error expose must be definitely present or absent, so types and runtime exposure agree
-query({ input: z.object({}), authorize: anyone, output: z.number(), expose: maybe, handler: async () => 1 });
 
 // policies: imported functions; guards narrow the scope
-query({ input: z.object({}), authorize: signed, expose: true, output: z.number(), handler: async ({ scope }) => scope.actor.length });
-mutation({ input: z.object({}), authorize: signed, expose: true, output: z.number(), handler: async ({ scope }) => scope.actor.length });
+query({ input: z.object({}), authorize: signed, output: z.number(), handler: async ({ scope }) => scope.actor.length });
+mutation({ input: z.object({}), authorize: signed, output: z.number(), handler: async ({ scope }) => scope.actor.length });
 // internal functions may have a policy too, and it narrows
 mutation({ input: z.object({}), authorize: signed, handler: async ({ scope }) => scope.actor.length });
-query({ input: z.object({}), authorize: anyone, expose: true, output: z.void(), handler: async ({ scope }) => {
+query({ input: z.object({}), authorize: anyone, output: z.void(), handler: async ({ scope }) => {
   // @ts-expect-error a non-guard policy doesn't narrow
   scope.actor.length;
 } });
@@ -107,24 +104,25 @@ query({ input: z.object({}), authorize: async (s: Scope) => s.actor !== null, ha
 query({ input: z.object({ id: z.string() }), authorize: (s: Scope, input: { id: string }) => s.tenant === input.id, handler: async () => 1 });
 // @ts-expect-error a policy name is not a policy
 query({ input: z.object({}), authorize: "signed", handler: async () => 1 });
-// @ts-expect-error expose: true needs authorize
-query({ input: z.object({}), expose: true, output: z.number(), handler: async () => 1 });
-// @ts-expect-error exposed functions must declare output
-query({ input: z.object({}), authorize: anyone, expose: true, handler: async () => 1 });
 query({ input: z.object({}), handler: async ({ scope }) => {
   // @ts-expect-error internal functions without a policy keep the nullable actor
   scope.actor.length;
 } });
-const exposedQ = query({ input: z.object({}), authorize: anyone, expose: true, output: z.number(), handler: async () => 1 });
+const authorizedQ = query({ input: z.object({}), authorize: anyone, handler: async () => 1 });
 // errors live on ctx.errors and return DomainError, so `throw` works everywhere
 query({ input: z.object({}), handler: async (ctx) => { throw ctx.errors.notFound(); } });
 action({ input: z.object({}), handler: async (ctx) => { throw ctx.errors.conflict("taken", { id: 1 }); } });
 listener({ event: () => ev, handler: async (ctx) => { throw ctx.errors.reject("nope"); } });
-type IsExposed<F> = F extends import("../src/index.ts").ExposedFn ? true : false;
-const exposedFlag: IsExposed<typeof exposedQ> = true;
-// @ts-expect-error internal functions are not ExposedFn
-const internalFlag: IsExposed<typeof getOne> = true;
-void exposedFlag; void internalFlag;
+// publishable: it says who may call it (output is optional: without it, the handler's type)
+type IsPublishable<F> = F extends import("../src/index.ts").PublishableFn ? true : false;
+const publishable: IsPublishable<typeof authorizedQ> = true;
+// @ts-expect-error nobody said who may call it
+const unauthorized: IsPublishable<typeof getOne> = true;
+// an inline policy counts too, and an inline guard still narrows
+const inline = query({ authorize: (s) => s.tenant !== "", handler: async () => 1 });
+const inlineGuard = mutation({ authorize: (s): s is Signed => s.actor !== null, handler: async ({ scope }) => scope.actor.length });
+const inlineOk: [IsPublishable<typeof inline>, IsPublishable<typeof inlineGuard>] = [true, true];
+void publishable; void unauthorized; void inlineOk;
 const transforming = event({ payload: z.object({ at: z.string().transform((s) => new Date(s)) }) });
 mutation({ input: z.object({}), handler: async ({ emit }) => {
   emit(transforming, { at: "2026-01-01" });
@@ -306,12 +304,12 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   type QueueMeta = ForListeners<{ queue?: { priority: number } }>; // someone else's adapter
   const shop = init<{ scope: Scope; meta: AppMeta & AIMeta & PgBossMeta & QueueMeta }>();
   const happened = shop.event({ payload: z.object({}) });
-  shop.action({ meta: { area: "shop", ai: { tool: true } }, handler: async () => 1 });
+  shop.action({ meta: { area: "shop", ai: { description: "Ship it" } }, handler: async () => 1 });
   shop.listener({ event: () => happened, meta: { area: "orders", pgBoss: {}, queue: { priority: 1 } }, handler: async () => 1 });
   shop.createRegistry({
     modules: {},
     wrap: async (call, next) => {
-      const seen: [AppMeta["area"] | undefined, boolean | undefined, object | undefined] = [call.meta?.area, call.meta?.ai?.tool, call.meta?.pgBoss];
+      const seen: [AppMeta["area"] | undefined, string | undefined, object | undefined] = [call.meta?.area, call.meta?.ai?.description, call.meta?.pgBoss];
       void seen;
       return next();
     },
@@ -323,7 +321,7 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   // @ts-expect-error a typo inside an adapter's options
   shop.action({ meta: { area: "shop", ai: { tol: true } }, handler: async () => 1 });
   // @ts-expect-error the app's own part is still required
-  shop.action({ meta: { ai: { tool: true } }, handler: async () => 1 });
+  shop.action({ meta: { ai: { description: "x" } }, handler: async () => 1 });
 
   const admin = init<{ scope: Scope; meta: AIMeta }>();
   const changed = admin.event({ payload: z.object({}) });

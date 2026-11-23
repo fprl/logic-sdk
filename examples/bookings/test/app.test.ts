@@ -1,6 +1,5 @@
 import { eq } from "drizzle-orm";
 import type { Caller } from "logic-sdk";
-import { toFetchHandler } from "logic-sdk/fetch";
 import { expect, test } from "vitest";
 import * as availability from "../src/availability";
 import * as bookings from "../src/bookings";
@@ -164,39 +163,3 @@ test("tenancy: another account can't see the booking", async () => {
   await expect(t.as(scopeAs("agent", "acc_2")).run(bookings.confirm, { bookingId: b.id })).rejects.toMatchObject({ code: "bookings.not_found" });
 });
 
-test("fetch adapter: only exposed functions are published, errors map to statuses", async () => {
-  const p = await seedProperty(t.as(scopeAs("owner")));
-  const handler = toFetchHandler(t.registry, {
-    basePath: "/api/",
-    resolveScope: (req) => scopeAs((req.headers.get("x-role") as any) ?? null),
-  });
-  const call = async (id: string, body: unknown, role?: string, method = "POST") => {
-    const res = await handler(new Request(`http://x/api/${id}`, {
-      method, body: method === "POST" ? JSON.stringify(body) : undefined,
-      headers: { ...(method === "POST" ? { "content-type": "application/json" } : {}), ...(role ? { "x-role": role } : {}) },
-    }));
-    return [res.status, await res.json()] as const;
-  };
-
-  // internal functions don't exist over HTTP, and there's no listing of what does
-  expect((await call("enquiries.markWon", {}))[0]).toEqual(404);
-  expect((await call("bookings.confirmPaid", {}))[0]).toEqual(404);
-  expect((await handler(new Request("http://x/api/"))).status).toEqual(404);
-
-  const [s1, r1] = await call("bookings.request", { propertyId: p.id, checkIn: "2026-07-01", checkOut: "2026-07-04", guestEmail: "g@x.com" });
-  expect(s1).toEqual(200);
-  const bookingId = (r1 as any).data.id;
-  expect((await call("bookings.confirm", { bookingId }))[0]).toEqual(403);
-  expect((await call("bookings.confirm", { bookingId }, "agent"))[0]).toEqual(200);
-  expect(await call("bookings.confirm", { bookingId }, "agent")).toEqual([422, { error: { kind: "rejected", code: "bookings.not_pending", details: { status: "confirmed" } } }]);
-  expect((await call("availability.hold", {}))[0]).toEqual(404);
-  expect((await call("bookings.request", { propertyId: "nope" }))[0]).toEqual(400);
-  // CSRF guard: a form post (no JSON content type) is refused
-  expect((await handler(new Request("http://x/api/bookings.confirm", { method: "POST", body: "bookingId=x", headers: { "content-type": "application/x-www-form-urlencoded", "x-role": "agent" } }))).status).toEqual(415);
-  const del = await handler(new Request("http://x/api/bookings.confirm", { method: "DELETE" }));
-  expect([del.status, del.headers.get("allow")]).toEqual([405, "POST"]);
-  // basePath without a trailing slash works too
-  const noSlash = toFetchHandler(t.registry, { basePath: "/api", resolveScope: () => scopeAs(null) });
-  const check = `/api/availability.check?input=${encodeURIComponent(JSON.stringify({ propertyId: p.id, from: "2026-07-02", to: "2026-07-03" }))}`;
-  expect(await (await noSlash(new Request(`http://x${check}`))).json()).toEqual({ data: { available: false } });
-});

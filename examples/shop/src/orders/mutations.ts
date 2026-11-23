@@ -12,7 +12,6 @@ export const place = mutation({
     items: z.array(z.object({ sku: z.string(), quantity: z.int().min(1) })).min(1),
   }),
   authorize: signedIn,
-  expose: true,
   output: Order,
   async handler(ctx, input) {
     const { maxItems } = ctx.config.orders;
@@ -37,7 +36,6 @@ export const place = mutation({
 export const cancel = mutation({
   input: z.object({ orderId: z.uuid() }),
   authorize: signedIn,
-  expose: true,
   output: Order,
   async handler(ctx, input) {
     const order = await findOrder(ctx, input.orderId);
@@ -54,7 +52,6 @@ export const cancel = mutation({
 export const ship = mutation({
   input: z.object({ orderId: z.uuid() }),
   authorize: staff,
-  expose: true,
   output: Order,
   async handler(ctx, input) {
     const order = await findOrder(ctx, input.orderId);

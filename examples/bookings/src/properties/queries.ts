@@ -8,7 +8,6 @@ import { Property } from "./schema";
 export const get = query({
   input: z.object({ propertyId: z.uuid() }),
   authorize: anyone,
-  expose: true,
   output: Property,
   handler: (ctx, input) => findProperty(ctx, input.propertyId),
 });

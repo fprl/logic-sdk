@@ -19,14 +19,12 @@ const added = event({ payload: z.object({ name: z.string() }) });
 const list = query({
   input: z.object({}).optional(),
   authorize: anyone,
-  expose: true,
   output: z.array(z.string()),
   handler: async ({ db }) => (db.rows.items ?? []).map((r) => r.name as string),
 });
 const add = mutation({
   input: z.object({ name: z.string().min(1) }),
   authorize: signedIn,
-  expose: true,
   output: z.object({ name: z.string() }),
   async handler({ db, emit, errors, scope }, { name }) {
     const actor: string = scope.actor; // narrowed by the policy
@@ -88,7 +86,6 @@ test("registry: ids come from module keys", () => {
     "items.add", "items.addTwo", "items.greet", "items.list", "items.locale", "items.typed", "items.whoami",
   ]);
   expect(registry.definitions.listeners.map((l) => l.id)).toEqual(["log.onAdded"]);
-  expect(registry.definitions.functions.filter((f) => f.exposed).map((f) => f.id).sort()).toEqual(["items.add", "items.list"]);
 });
 
 test("mutation commits, then listeners run with the emitter's scope", async () => {
@@ -124,11 +121,11 @@ test("invalid input → DomainError kind invalid, with issues", async () => {
   await expect(app.run(items.add, { name: 1 })).rejects.toMatchObject({ kind: "invalid", code: "items.add.invalid_input" });
 });
 
-test("an exposed function's check runs on every call, nested ones too", async () => {
+test("a function's check runs on every call, nested ones too", async () => {
   const { registry, db } = setup();
   const anon = registry.as({ actor: null, locale: "es" });
   await expect(anon.run(items.add, { name: "x" })).rejects.toMatchObject({ kind: "forbidden", code: "items.add.forbidden" });
-  // greet is internal (no check), but the add it runs is exposed: still checked, so a narrowed scope never lies
+  // greet is internal (no check), but the add it runs has a policy: still checked, so a narrowed scope never lies
   await expect(anon.run(items.greet, { name: "y" })).rejects.toMatchObject({ kind: "forbidden" });
   expect(db.store.rows.items).toEqual(undefined);
 });
@@ -140,14 +137,6 @@ test("run options: { scope } changes who is calling for that call, and checks se
   });
   const r = createRegistry<Scope>({ modules: { items, log, x: { asAdmin } }, database: memoryDatabase(), services: { log: [] } });
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
-});
-
-test("expose: true without authorize or output fails at createRegistry, naming the function", () => {
-  const msg = (fn: object) => { try { createRegistry<Scope>({ modules: { orders: { fn } }, database: memoryDatabase() }); return ""; } catch (e) { return (e as Error).message; } };
-  // @ts-expect-error expose without authorize
-  expect(msg(query({ output: z.number(), expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no authorize/);
-  // @ts-expect-error expose without output
-  expect(msg(query({ authorize: anyone, expose: true, handler: async () => 1 }))).toMatch(/orders\.fn has expose: true but no output/);
 });
 
 test("a policy must return exactly true: truthy or a Promise is a denial", async () => {
@@ -163,7 +152,6 @@ test("an internal function with authorize is checked too, even when your own cod
   const purge = mutation({ input: z.object({}), authorize: signedIn, handler: async () => "purged" });
   const job = action({ input: z.object({}), handler: async ({ run }) => run(purge, {}) });
   const r = createRegistry<Scope>({ modules: { j: { purge, job } }, database: memoryDatabase(), services: { log: [] } });
-  expect(r.definitions.functions.find((f) => f.id === "j.purge")!.exposed).toBe(false);
   await expect(r.as({ actor: null, locale: "es" }).run(job, {})).rejects.toMatchObject({ kind: "forbidden", code: "j.purge.forbidden" });
   expect(await r.as({ actor: "a", locale: "es" }).run(job, {})).toEqual("purged");
 });

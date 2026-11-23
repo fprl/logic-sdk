@@ -9,7 +9,6 @@ const nightsBetween = (from: string, to: string) => (Date.parse(to) - Date.parse
 export const priceStay = query({
   input: z.object({ propertyId: z.uuid(), from: z.iso.date(), to: z.iso.date() }),
   authorize: anyone,
-  expose: true,
   output: z.object({ nights: z.number(), nightly: z.number(), cleaning: z.number(), total: z.number() }),
   async handler(ctx, input) {
     const { propertyId, from, to } = input;

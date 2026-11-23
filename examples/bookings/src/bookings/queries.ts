@@ -8,7 +8,6 @@ import { Booking } from "./schema";
 export const get = query({
   input: z.object({ bookingId: z.uuid() }),
   authorize: staff,
-  expose: true,
   output: Booking,
   handler: (ctx, input) => findBooking(ctx, input.bookingId),
 });

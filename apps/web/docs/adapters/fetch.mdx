@@ -1,38 +1,44 @@
 ---
-title: HTTP (fetch)
-description: A web-standard handler that publishes exposed functions as JSON endpoints.
+title: HTTP routes
+description: Your own routes call your functions; toResponse turns a domain error into its status.
 ---
 
-```ts
-import { toFetchHandler } from "logic-sdk/fetch";
+Write routes the way your framework does, and call the function from them. Your routes are your API surface: a function no route calls isn't reachable over HTTP.
 
-const api = toFetchHandler(registry, {
-  basePath: "/api/",
-  resolveScope: (request) => scopeFromSession(request),
+```ts
+import { toResponse } from "logic-sdk/fetch";
+
+// Hono
+app.post("/orders", async (c) => {
+  try {
+    return c.json(await c.var.caller.run(orders.place, await c.req.json()), 201);
+  } catch (e) {
+    return toResponse(e);
+  }
 });
 ```
 
-It takes a `Request` and returns a `Response`, so it mounts as-is in Workers, Bun, Hono, SvelteKit endpoints and Next.js route handlers:
+- **`toResponse(error)` handles domain errors:** `{ "error": { "kind", "code", "details" } }`, with the status from the table below.
+- **Anything else is thrown again,** so your framework makes the 500 and logs it, and the message never reaches the client. Hono's default handler answers a plain `Internal Server Error` and logs the error.
+- **Or once, for every route:** `app.onError((e, c) => (isDomainError(e) ? toResponse(e) : c.text("Internal Server Error", 500)))`.
+- **The caller is the request's:** build it in a middleware, `registry.as(await scopeFrom(c.req.raw))`, and keep the scope's policies doing the deciding. A function with `authorize` checks it on every call, from a route too.
+
+Elsewhere, check what your framework sends for an uncaught error before you rely on it. In a Next.js route handler, say it yourself:
 
 ```ts
-// Hono
-app.all("/api/*", (c) => api(c.req.raw));
+// app/orders/route.ts
+export async function POST(request: Request) {
+  try {
+    return Response.json(await callerFor(request).run(orders.place, await request.json()), { status: 201 });
+  } catch (e) {
+    if (isDomainError(e)) return toResponse(e);
+    console.error(e);
+    return Response.json({ error: { kind: "internal" } }, { status: 500 });
+  }
+}
 ```
 
-## Routes
-
-| Request | Does |
-|---|---|
-| `POST /api/bookings.confirm` | Runs it with the JSON body as input |
-| `GET /api/availability.check?input={...}` | Queries only |
-
-- Only functions with `expose: true` are published. Anything else is a 404, and there's no route that lists them.
-- POST needs `content-type: application/json`. That blocks cross-site form posts (CSRF).
-- Success is `{ "data": ... }`.
-
-## Errors
-
-Failures are `{ "error": { "kind", "code", "details" } }`, with a status from the error's kind:
+## Statuses
 
 | Kind | Status |
 |---|---|
@@ -42,29 +48,24 @@ Failures are `{ "error": { "kind", "code", "details" } }`, with a status from th
 | `not_found` | 404 |
 | `conflict` | 409 |
 | `rejected` | 422 |
-| anything unexpected | 500, without details |
 
-Unexpected errors go to `onError` (default: `console.error`). The map is exported as `statusOf`.
+The map is exported as `statusOf`.
 
 ## Signed out
 
-`resolveScope` decides what a request without a session means:
-
-- **This mount also serves public functions:** return a scope with no actor. Functions whose `authorize` needs one answer 403.
-- **This mount is entirely session-only:** throw `unauthenticated()` and the client gets a 401.
+- **A route that also serves public functions:** build the caller with a scope that has no actor. Functions whose `authorize` needs one answer 403.
+- **A route that's entirely session-only:** throw `unauthenticated()` (from `logic-sdk`) before the caller is built, and `toResponse` makes it a 401.
 
 ```ts
-import { toFetchHandler, unauthenticated } from "logic-sdk/fetch";
+import { unauthenticated } from "logic-sdk";
 
-const admin = toFetchHandler(registry, {
-  basePath: "/admin/api/",
-  resolveScope: async (request) => {
-    const session = await auth.getSession(request);
-    if (!session) throw unauthenticated();
-    return scopeFrom(session);
-  },
-});
+const session = await auth.getSession(request);
+if (!session) throw unauthenticated();
 ```
+
+## A typed client
+
+For a typed client, OpenAPI or MCP, publish through [oRPC](/docs/adapters/orpc) instead of hand-written routes.
 
 ## Serverless
 

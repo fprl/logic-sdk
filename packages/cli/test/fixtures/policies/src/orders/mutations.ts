@@ -10,7 +10,6 @@ export const cancel = mutation({
   input: z.object({ id: z.string() }),
   output: Order,
   authorize: member,
-  expose: true,
   async handler(ctx, { id }) {
     const order = loadForCancel(ctx, ctx.scope.actor, id);
     ctx.db.run("update orders"); // a database call, not a run edge

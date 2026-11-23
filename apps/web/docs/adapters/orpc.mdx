@@ -1,13 +1,29 @@
 ---
 title: oRPC
-description: A typed router and client for your exposed functions, through oRPC v2.
+description: "Your functions as oRPC procedures, in a router you write: a typed client, OpenAPI and MCP."
 ---
+
+Your router is your API: one file listing the functions a client may call. Everything else stays internal.
+
+```ts
+// src/rpc.ts
+import { toORPCProcedure } from "logic-sdk/orpc";
+import * as bookings from "./bookings";
+import * as pricing from "./pricing";
+
+export const router = {
+  bookings: {
+    confirm: toORPCProcedure(bookings.confirm),
+    cancel: toORPCProcedure(bookings.cancel),
+  },
+  pricing: { priceStay: toORPCProcedure(pricing.priceStay) },
+};
+```
 
 ```ts
 import { RPCHandler } from "@orpc/server/fetch";
-import { toORPCRouter } from "logic-sdk/orpc";
+import { router } from "./rpc";
 
-const router = toORPCRouter(registry);
 const rpc = new RPCHandler(router);
 
 export async function handle(request: Request) {
@@ -19,15 +35,16 @@ export async function handle(request: Request) {
 }
 ```
 
-The router has one procedure per `expose: true` function, grouped by module, fully typed. Internal functions aren't in it, at the type level either.
-
 ```ts
 const client: RouterClient<typeof router> = createORPCClient(link);
 
 await client.bookings.confirm({ bookingId });
 ```
 
-Your modules stay the core, and oRPC is the edge: you get its typed client, OpenAPI and MCP packages. Validation runs once, in the registry. Requires `@orpc/server` 2.0 beta.
+- **Each one is a real oRPC procedure,** so it takes your middleware and metadata: `toORPCProcedure(bookings.confirm).use(rateLimit)`, `.meta(...)` for OpenAPI routes. Your own procedures sit next to them in the same router.
+- **It needs `authorize`:** a published function says who may call it. Everyone is a decision too (`authorize: anyone`, with `const anyone = () => true`). A function without one is a type error, and throws if a cast gets it through.
+- **`output` is optional,** and worth it: it strips what you didn't mean to send (a row's password hash) and the client's types come from it. Without it, the client gets the handler's return type, all of it. See [Output](/docs/concepts/output).
+- **The context's `caller` is typed with your `init`'s scope.** Validation runs once, in the registry. Requires `@orpc/server` 2.0 beta.
 
 ## Errors
 
@@ -47,4 +64,3 @@ The map is exported as `orpcCodeOf`.
 ## Signed out
 
 Build the caller with a scope that has no actor, and let each function's `authorize` answer 403. For a router that's entirely session-only, throw `ORPCError("UNAUTHORIZED")` from your own middleware, before the caller is built.
-

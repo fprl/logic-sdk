@@ -12,7 +12,6 @@ export const create = mutation({
     minNights: z.int().min(1).default(1),
   }),
   authorize: owner,
-  expose: true,
   output: Property,
   async handler(ctx, input) {
     const [p] = await ctx.db.insert(properties).values({ ...input, accountId: ctx.scope.accountId }).returning();

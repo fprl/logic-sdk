@@ -1,4 +1,5 @@
 import { isDomainError, type Caller } from "logic-sdk";
+import { toResponse } from "logic-sdk/fetch";
 import { Hono, type Context } from "hono";
 import * as catalog from "./catalog";
 import type { Scope } from "./logic";
@@ -34,27 +35,11 @@ export function createApi<Bindings extends object = object>(shopFor: (c: Context
     return c.json(await c.var.caller.run(orders.ship, { orderId: c.req.param("id") }));
   });
 
+  // A domain error is its status and code; anything else, a bare 500, logged here, never sent.
   app.onError((error, c) => {
-    if (!isDomainError(error)) {
-      console.error(error);
-      return c.json({ error: { kind: "internal" } }, 500);
-    }
-
-    const body = { error: { kind: error.kind, code: error.code, details: error.details } };
-    switch (error.kind) {
-      case "invalid":
-        return c.json(body, 400);
-      case "unauthenticated":
-        return c.json(body, 401);
-      case "forbidden":
-        return c.json(body, 403);
-      case "not_found":
-        return c.json(body, 404);
-      case "conflict":
-        return c.json(body, 409);
-      case "rejected":
-        return c.json(body, 422);
-    }
+    if (isDomainError(error)) return toResponse(error);
+    console.error(error);
+    return c.json({ error: { kind: "internal" } }, 500);
   });
 
   return app;

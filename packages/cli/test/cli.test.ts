@@ -15,8 +15,8 @@ function cli(cwd: string, ...args: string[]) {
 
 test("list: every function and listener, with kind and policy", () => {
   const rows = cli(app, "list", "--json").json();
-  expect(rows).toContainEqual(expect.objectContaining({ id: "bookings.confirm", kind: "mutation", authorize: "staff", exposed: true }));
-  expect(rows).toContainEqual(expect.objectContaining({ id: "availability.hold", kind: "mutation", authorize: null, exposed: false }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "bookings.confirm", kind: "mutation", authorize: "staff" }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "availability.hold", kind: "mutation", authorize: null }));
   expect(rows).toContainEqual(expect.objectContaining({ id: "tasks.prepareStay", kind: "listener", event: "bookings.confirmed" }));
 });
 
@@ -29,9 +29,9 @@ test("descriptions come from the JSDoc above each export: its first paragraph, o
   expect(cli(app, "show", "enquiries.winOnBooking").out).toContain("Mark the enquiry won when its booking is confirmed");
 });
 
-test("list filters by module, kind and exposure", () => {
-  const ids = cli(app, "list", "--module", "bookings", "--exposed", "--json").json().map((r: { id: string }) => r.id);
-  expect(ids.sort()).toEqual(["bookings.cancel", "bookings.checkout", "bookings.confirm", "bookings.get", "bookings.request"]);
+test("list filters by module and kind", () => {
+  const ids = cli(app, "list", "--module", "bookings", "--kind", "mutation", "--json").json().map((r: { id: string }) => r.id);
+  expect(ids.sort()).toEqual(["bookings.cancel", "bookings.confirm", "bookings.confirmPaid", "bookings.request"]);
 });
 
 test("show: schemas from the registry, edges from the source (through this module's helpers too)", () => {
@@ -157,7 +157,7 @@ test("without @logic-sdk/cli installed, the command says how to add it", async (
   expect(r.stderr).toContain("npm i -D @logic-sdk/cli");
 });
 
-// ── 0.2: authorize, expose: true, record checks ─────────────────────────────
+// ── 0.2: authorize and record checks ────────────────────────────────────────
 
 const policies = fixture("policies");
 const holes = fixture("holes");
@@ -165,18 +165,16 @@ const problem = (r: ReturnType<typeof cli>, code: string, file: string, line: nu
   r.json().problems.find((p: { code: string; at: Loc | null }) => p.code === code && p.at?.file === file && p.at.line === line);
 type Loc = { file: string; line: number; column: number };
 
-test("list and show: the policy as written (or inline) and whether it's exposed", () => {
+test("list and show: the policy as written, or inline", () => {
   const rows = cli(policies, "list", "--json").json();
-  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.cancel", authorize: "member", exposed: true }));
-  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.refund", authorize: "inline", exposed: false }));
-  expect(rows).toContainEqual(expect.objectContaining({ id: "stock.release", authorize: null, exposed: false }));
-  expect(cli(policies, "list", "--exposed", "--json").json().map((r: { id: string }) => r.id)).toEqual(["orders.cancel"]);
+  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.cancel", authorize: "member" }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "orders.refund", authorize: "inline" }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "stock.release", authorize: null }));
   const text = cli(policies, "show", "orders.cancel").out;
   expect(text).toMatch(/policy\s+member/);
-  expect(text).toMatch(/exposed\s+yes/);
   expect(text).not.toContain("\u2014"); // no em dashes in output
   const { nodes } = cli(policies, "graph", "--format", "json").json();
-  expect(nodes).toContainEqual({ id: "orders.cancel", kind: "mutation", authorize: "member", exposed: true });
+  expect(nodes).toContainEqual({ id: "orders.cancel", kind: "mutation", authorize: "member" });
 });
 
 test("show lists record checks, in the body or through this module's helpers", () => {

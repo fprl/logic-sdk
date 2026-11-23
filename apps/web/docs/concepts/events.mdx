@@ -29,7 +29,7 @@ export const prepareStay = listener({
 - **`event` is a thunk** (`() => bookings.confirmed`), so two modules can import each other's index without an import-cycle crash.
 - **What you emit is what's delivered.** `emit` takes a snapshot of the payload.
 - **Listeners must be idempotent.** They may run again; `ctx.event.id` is the key to dedupe on, in a record of that listener's own: two listeners of one event share its id, so a shared record would make one skip the other.
-- **Listeners run with the emitter's scope.** Have them run internal functions, not exposed ones. See [Authorization](/docs/concepts/authorization#nested-calls-and-listeners).
+- **Listeners run with the emitter's scope.** Have them run internal functions, not published ones. See [Authorization](/docs/concepts/authorization#nested-calls-and-listeners).
 
 ## Serverless
 

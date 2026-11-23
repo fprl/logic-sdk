@@ -36,8 +36,6 @@ export const confirm = mutation({
   output: Booking,
   // Who may call it, on every call
   authorize: staff,
-  // HTTP, oRPC and AI tools may publish it
-  expose: true,
 
   async handler(ctx, input) {
     const booking = await findBooking(ctx, input.bookingId);
@@ -100,8 +98,8 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 - **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `drizzleAdapter(db, { transactionAttempts })`.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
-- **Internal by default.** Only `expose: true` functions reach HTTP, RPC or AI tools, with a required policy and output contract.
-- **Agents included.** `toAITool` gives an agent your functions, under the same policies and transactions as your API. Opt-in, one function at a time or by `filter`.
+- **Internal by default.** A function reaches HTTP, RPC or an AI tool only when you list it in your router or tools, and only with an `authorize`.
+- **Agents included.** `toAITool` gives an agent your functions, under the same policies and transactions as your API, one function at a time.
 - **Settings in one place.** Declare `config` once, fill it from env at the entry, read `ctx.config` anywhere. The CLI fails the build if a module reads env.
 - **Errors without HTTP.** `ctx.errors.reject`, `conflict`, `notFound`, `deny`; adapters map them to statuses.
 - **Tests without mocks.** Each test is a real transaction on a real database, always rolled back.
@@ -118,8 +116,8 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 | `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
 | `logic-sdk/pg-boss` | Jobs in pg-boss |
 | `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |
-| `logic-sdk/fetch` | A web-standard HTTP handler for exposed functions |
-| `logic-sdk/orpc` | A typed oRPC v2 router and client |
+| `logic-sdk/fetch` | `toResponse`: a domain error as an HTTP response, for your own routes |
+| `logic-sdk/orpc` | `toORPCProcedure`: a function as an oRPC v2 procedure, for your router |
 | `logic-sdk/ai` | AI SDK tools: agents run your functions with the same rules |
 | `logic-sdk/testing` | Rolled-back test transactions, stubs, frozen time |
 

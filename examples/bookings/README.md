@@ -21,16 +21,16 @@ bun run test:pg     # the same suite on the Docker Postgres, plus a race: 3 agen
 ```
 
 ```bash
-curl -X POST localhost:3000/api/properties.create \
+curl -X POST localhost:3000/rpc/properties/create \
   -H 'content-type: application/json' -H 'x-user: ana:owner' \
-  -d '{"name":"Casa","nightlyRate":10000,"cleaningFee":0,"minNights":1}'
+  -d '{"json":{"name":"Casa","nightlyRate":10000,"cleaningFee":0,"minNights":1}}'
 ```
 
 ## Who may call what
 
 - **Policies** are plain functions in `src/policies.ts` (`anyone`, `member`, `staff`, `owner`, `agent`). A function opts in with `authorize: staff`; the guard narrows `ctx.scope`, so `ctx.scope.actor` is never null inside.
-- **`expose: true`** lets the HTTP and oRPC adapters publish a function. It needs `authorize` and `output`. Without it a function is internal: other modules `run` it, nobody calls it over the wire.
+- **`src/rpc.ts` is the API:** the functions a client may call, as oRPC procedures (`toORPCProcedure`, which needs `authorize`). The rest are internal: other modules `run` them, nobody calls them over the wire.
 - **Record rules** run in `handler`, after loading through an account-scoped helper: `if (!canCancel(ctx.scope.actor, booking)) throw ctx.errors.deny()` (`src/bookings/data.ts`). Another account's booking is a 404, not a 403.
 - **`checkout` doesn't pretend to be an admin.** A guest may pay but not read or confirm bookings, so the action runs two internal functions with no policy (`amountDue`, `confirmPaid`). The scope stays the guest's.
 
-Read in this order: `src/logic.ts` → `src/policies.ts` → `src/registry.ts` → `src/bookings/mutations.ts` → `src/bookings/actions.ts` → `src/enquiries/listeners.ts` → `src/server.ts` → `test/app.test.ts`.
+Read in this order: `src/logic.ts` → `src/policies.ts` → `src/registry.ts` → `src/bookings/mutations.ts` → `src/bookings/actions.ts` → `src/enquiries/listeners.ts` → `src/rpc.ts` → `src/server.ts` → `test/app.test.ts`.

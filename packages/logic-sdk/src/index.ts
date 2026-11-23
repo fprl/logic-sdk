@@ -58,8 +58,6 @@ export type {
   Envelope,
   Errors,
   EventDef,
-  ExposedFn,
-  ExposedOf,
   FailureInfo,
   Fn,
   FnIn,
@@ -82,6 +80,7 @@ export type {
   MutationCtx,
   Out,
   Policy,
+  PublishableFn,
   QueryCtx,
   ReadWrite,
   Registered,
@@ -101,7 +100,7 @@ export type {
   SqlDatabase,
   SweepResult,
 } from "./types.ts";
-export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
+export { DomainError, isDomainError, unauthenticated, type ErrorKind } from "./errors.ts";
 export { inProcess, replaceKeyOf } from "./jobs.ts";
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -130,7 +129,7 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed signature of `Constructor`; `checkExposure` is the runtime half that matters.
+  // One implementation behind the typed signature of `Constructor`: the types are the contract, the adapters check `authorize`.
   const make =
     <K extends Kind>(kind: K) =>
     (def: object) =>
@@ -318,15 +317,6 @@ function assertPlain(value: unknown, what: string, hint: string): void {
 const isBranded = (v: unknown): v is Fn | EventDef | Listener | Cron => !!v && typeof v === "object" && BRAND in v;
 
 /**
- * Publishing needs `authorize` and `output`. The types say so; this holds for JS callers and casts too, because an
- * exposed function nobody authorizes is a hole, not a type error.
- */
-function checkExposure(id: string, fn: Fn) {
-  if (fn.expose && !fn.authorize) throw new Error(`[logic-sdk] ${id} has expose: true but no authorize. Say who may call it.`);
-  if (fn.expose && !fn.output) throw new Error(`[logic-sdk] ${id} has expose: true but no output. Say what callers may see.`);
-}
-
-/**
  * What `createRegistry` finds in your modules, without a database or services: every function, event and
  * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
@@ -353,10 +343,7 @@ export function describeModules(modules: Record<string, object>) {
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
       else if (value.kind === "cron") crons.push({ id, module, name, cron: value });
-      else {
-        checkExposure(id, value);
-        functions.push({ id, module, name, kind: value.kind, fn: value, exposed: value.expose === true });
-      }
+      else functions.push({ id, module, name, kind: value.kind, fn: value });
     }
   }
   return { ids, functions, events, listeners, crons };

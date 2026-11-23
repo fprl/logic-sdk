@@ -63,7 +63,7 @@ export interface TestRegistry<S extends object, Mods extends Record<string, obje
   readonly events: readonly Envelope[];
   /** The test transaction itself: read rows to assert on them. */
   readonly db: any;
-  /** The registry bound to this test's transaction, for adapters: `toFetchHandler(t.registry, …)`. */
+  /** The registry bound to this test's transaction, for adapters: an oRPC context's `caller: t.registry.as(scope)`. */
   readonly registry: Registry<S, Mods, Cf>;
   readonly jobs: TestJobs<S>;
 }

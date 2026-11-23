@@ -46,3 +46,9 @@ export const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 export class StalePayload extends Error {}
+
+/**
+ * Throw where there's no valid session, outside your functions (a route, a middleware): `toResponse` makes it a 401.
+ * Inside a function, a policy answers instead (a scope with no actor, then `forbidden`).
+ */
+export const unauthenticated = (code = "unauthenticated", details?: unknown) => new DomainError("unauthenticated", code, details);

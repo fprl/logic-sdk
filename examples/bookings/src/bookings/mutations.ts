@@ -17,7 +17,6 @@ export const request = mutation({
     enquiryId: z.uuid().optional(),
   }),
   authorize: anyone,
-  expose: true,
   output: Booking,
   async handler(ctx, input) {
     const range = { propertyId: input.propertyId, from: input.checkIn, to: input.checkOut };
@@ -37,7 +36,6 @@ export const request = mutation({
 export const confirm = mutation({
   input: z.object({ bookingId: z.uuid() }),
   authorize: staff,
-  expose: true,
   output: Booking,
   async handler(ctx, input) {
     const b = await confirmBooking(ctx, input.bookingId);
@@ -49,7 +47,7 @@ export const confirm = mutation({
 /**
  * Confirm a booking the guest has just paid for
  *
- * Internal (no authorize, no expose): `checkout` runs it once the guest has paid. Not reachable from
+ * Internal (no authorize, not in src/rpc.ts): `checkout` runs it once the guest has paid. Not reachable from
  * any adapter, so the gate is the action that runs it.
  */
 export const confirmPaid = mutation({
@@ -66,7 +64,6 @@ export const confirmPaid = mutation({
 export const cancel = mutation({
   input: z.object({ bookingId: z.uuid() }),
   authorize: staff,
-  expose: true,
   output: Booking,
   async handler(ctx, input) {
     const b = await findBooking(ctx, input.bookingId);

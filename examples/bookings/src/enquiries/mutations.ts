@@ -8,7 +8,6 @@ import { Enquiry, enquiries } from "./schema";
 export const create = mutation({
   input: z.object({ propertyId: z.uuid(), guestEmail: z.email(), message: z.string().min(1) }),
   authorize: anyone,
-  expose: true,
   output: Enquiry,
   async handler(ctx, input) {
     const [e] = await ctx.db.insert(enquiries).values({ ...input, accountId: ctx.scope.accountId }).returning();

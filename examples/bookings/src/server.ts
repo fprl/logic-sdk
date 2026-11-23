@@ -1,10 +1,9 @@
 import { serve } from "@hono/node-server";
 import { RPCHandler } from "@orpc/server/fetch";
-import { toFetchHandler } from "logic-sdk/fetch";
-import { toORPCRouter } from "logic-sdk/orpc";
 import { Hono } from "hono";
 import { db } from "./db/client";
 import { makeRegistry } from "./registry";
+import { router } from "./rpc";
 import type { Role, Scope } from "./scope";
 import { memoryPayments } from "./services";
 
@@ -27,12 +26,8 @@ function scopeOf(req: Request): Scope {
 
 const app = new Hono();
 
-// Plain JSON over HTTP: POST /api/bookings.request, GET /api/pricing.priceStay?input=...
-const api = toFetchHandler(registry, { basePath: "/api/", resolveScope: scopeOf });
-app.all("/api/*", (c) => api(c.req.raw));
-
-// Typed client for your frontend: createORPCClient<ORPCRouterOf<...>>(new RPCLink({ url: "/rpc" }))
-const rpc = new RPCHandler(toORPCRouter(registry));
+// The API in src/rpc.ts, with a typed client for your frontend: createORPCClient<RouterClient<typeof router>>(new RPCLink({ url: "/rpc" }))
+const rpc = new RPCHandler(router);
 app.all("/rpc/*", async (c) => {
   const { response } = await rpc.handle(c.req.raw, { prefix: "/rpc", context: { caller: registry.as(scopeOf(c.req.raw)) } });
   return response ?? c.notFound();

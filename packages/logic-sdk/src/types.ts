@@ -99,7 +99,7 @@ export const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
 
 /** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
-export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean, C extends Config = any> {
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends boolean = boolean, C extends Config = any> {
   readonly [BRAND]: K;
   readonly kind: K;
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
@@ -112,20 +112,15 @@ export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends b
   readonly meta?: Readonly<Record<string, unknown>>;
   /** Who may call it (from `authorize`). Runs on every call, before validation. */
   readonly authorize?: Policy<never>;
-  /**
-   * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
-   * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
-   * (other functions, jobs, scripts).
-   */
-  readonly expose?: true;
   readonly handler: (ctx: never, input: never) => Promise<unknown>;
-  /** Phantom types, never set at runtime. */
-  readonly [types]?: { input: I; output: O; exposed: E; init: (config: C) => void };
+  /** Phantom types, never set at runtime. `authorized`: it has an `authorize`, so adapters may publish it. */
+  readonly [types]?: { input: I; output: O; authorized: A; init: (config: C) => void };
 }
-/** The exposed functions of one module: what adapters publish. */
-export type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<Kind, unknown, unknown, true> ? N : never]: T[N] };
-/** A function with `expose: true`: adapters may publish it. */
-export type ExposedFn<K extends Kind = Kind, I = unknown, O = unknown> = Fn<K, I, O, true>;
+/**
+ * A function that says who may call it (`authorize`), so an adapter may publish it: `toORPCProcedure(fn)`,
+ * `toAITool(caller, fn)`. Everyone is a decision too: `authorize: anyone`, with `const anyone = () => true`.
+ */
+export type PublishableFn<K extends Kind = Kind, I = unknown, O = unknown, C extends Config = any> = Fn<K, I, O, true, C>;
 /** What callers pass to a function. */
 export type FnIn<F> = F extends Fn<Kind, infer I, unknown> ? I : never;
 /** What a function returns. */
@@ -361,7 +356,7 @@ type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
 
 /** What a function without `input` gets: nothing. */
 type NoInput = StandardSchemaV1<undefined, undefined>;
-type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
+type Def<C extends Config, K extends Kind, IS, OS, R, P, A> = {
   /**
    * Stable id, local to its module: in a `notifications` module, `id: "send"` is `notifications.send`. Jobs store it,
    * so set it before you rename the export and queued jobs keep finding this code. Defaults to the export name.
@@ -369,39 +364,19 @@ type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
   id?: string;
   /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
   input?: IS;
-  /** Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required with `expose`. */
-  authorize?: P;
+  /**
+   * Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required to publish it through an
+   * adapter: callers outside your server are untrusted. Leave it out when only your own code runs it.
+   */
+  authorize?: P & ((scope: ScopeOf<C>) => A);
+  /**
+   * What callers get back, checked before it leaves: unknown fields are stripped, and a published function's client
+   * types come from it. Without it, the handler's return type, all of it.
+   */
+  output?: OS;
   meta?: FunctionMetaOf<C>;
   handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
 };
-/**
- * `expose: true` makes `authorize` and `output` required: you can't publish something without saying who may call it,
- * and what leaves your process is a contract. `expose` itself is then required too, so a maybe-undefined flag is an
- * error and the types agree with what adapters publish. Internal functions may skip both; `authorize` still runs if set.
- */
-type Exposure<C extends Config, OS, X> = [X] extends [true]
-  ? {
-      /**
-       * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
-       * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
-       * (other functions, jobs, scripts).
-       */
-      expose: true;
-      authorize: Policy<ScopeOf<C>>;
-      /** What callers get back, checked before it leaves. */
-      output: OS;
-    }
-  : {
-      /**
-       * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
-       * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
-       * (other functions, jobs, scripts).
-       */
-      expose?: X;
-      /** What callers get back, checked before it leaves. */
-      output?: OS;
-    };
-
 /**
  * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'output' is missing")
  * instead of "No overload matches this call". Keep `output: OS` plain: `OS & Schema` makes TypeScript compare the whole
@@ -412,10 +387,12 @@ export type Constructor<C extends Config, K extends Kind> = <
   OS extends Schema | undefined = undefined,
   R = unknown,
   P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>,
-  X extends true | undefined = undefined,
+  // `authorize`'s return type, inferred after an inline policy is typed: `never` when there's none. `P` can't tell,
+  // since an inline policy takes its default.
+  A = never,
 >(
-  def: Def<C, K, IS, OS, R, P> & Exposure<C, OS, X>,
-) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false, C>;
+  def: Def<C, K, IS, OS, R, P, A>,
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [A] extends [never] ? false : true, C>;
 
 type OtherInit = SetupError<"Defined with another init(), so it would run with this registry's scope, not its own. Define it with the init() this createRegistry came from">;
 /** `createRegistry`'s modules: a function, listener or cron defined with another `init` is an error, since it would run with this one's scope. Events have no `init`. */
@@ -620,8 +597,6 @@ export interface Registered {
 export interface RegisteredFn extends Registered {
   fn: Fn;
   kind: Kind;
-  /** Has `expose: true`: adapters may publish it. */
-  exposed: boolean;
 }
 
 export interface Overrides {
