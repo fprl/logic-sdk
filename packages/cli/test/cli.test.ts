@@ -5,7 +5,6 @@ import { expect, test } from "bun:test";
 // The real entry point: the `logic-sdk` command from the main package, which loads this CLI.
 const bin = fileURLToPath(new URL("../../logic-sdk/bin/logic-sdk.js", import.meta.url));
 const app = fileURLToPath(new URL("../../../examples/bookings", import.meta.url));
-const broken = fileURLToPath(new URL("./fixtures/broken", import.meta.url));
 
 /** Runs the built CLI with Node, piped, the way a script or an agent would. */
 function cli(cwd: string, ...args: string[]) {
@@ -65,29 +64,6 @@ test("graph: runs, emits and triggers, as JSON or Mermaid", () => {
   expect(mermaid).toContain("bookings_confirm -. bookings.confirmed .-> tasks_prepareStay");
 });
 
-test("check passes on a clean app", () => {
-  const r = cli(app, "check", "--json");
-  expect(r.code).toBe(0);
-  expect(r.json()).toEqual({ errors: 0, warnings: 0, problems: [] });
-});
-
-test("check finds every broken rule, with where and how to fix it, and exits 1", () => {
-  const r = cli(broken, "check", "--json");
-  expect(r.code).toBe(1);
-  const { errors, warnings, problems } = r.json();
-  expect([errors, warnings]).toEqual([3, 2]);
-  expect(problems.map((p: { code: string }) => p.code).sort()).toEqual([
-    "cross-module-import",
-    "event-never-emitted",
-    "network-in-transaction",
-    "run-cycle",
-    "wall-clock",
-  ]);
-  const cross = problems.find((p: { code: string }) => p.code === "cross-module-import");
-  expect(cross.at).toEqual({ file: "src/orders/mutations.ts", line: 4, column: 1 });
-  expect(cross.fix).toContain('import * as stock from "../stock"');
-});
-
 test("mistakes are usage errors (exit 2) with a suggestion", () => {
   const r = cli(app, "show", "confirm", "--json");
   expect(r.code).toBe(2);
@@ -106,29 +82,10 @@ test("piped output has no color codes", () => {
 });
 
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
-const codes = (r: ReturnType<typeof cli>) => r.json().problems.map((p: { code: string }) => p.code).sort();
 
-test("renamed definers (mutation: defineMutation) are checked like any other", () => {
-  const r = cli(fixture("renamed"), "check", "--json");
-  expect(r.code).toBe(1);
-  expect(codes(r)).toEqual(codes(cli(broken, "check", "--json")));
-});
-
-test("run-cycle counts writes: modules may read each other both ways, not run each other's mutations or actions", () => {
-  const r = cli(fixture("cycles"), "check", "--json");
-  expect(r.code).toBe(1);
-  const cycles = r.json().problems.filter((p: { code: string }) => p.code === "run-cycle").map((p: { message: string }) => p.message);
-  expect(cycles).toEqual([
-    expect.stringContaining("billing → bookings → billing (billing.charge → bookings.markPaid, bookings.confirm → billing.charge)"),
-    expect.stringContaining("crm → mail → crm (crm.log → mail.send, mail.send → crm.log)"),
-  ]); // properties ↔ bookings runs only queries
-  expect(r.json().problems).toHaveLength(2);
-});
-
-test("a module can be a single file, and explicit ids are what the CLI shows and links", () => {
-  const r = cli(fixture("files"), "check", "--json");
+test("a module can be a single file, definers can have any name, and explicit ids are what the CLI shows and links", () => {
   // found in source by export name, reported by id
-  expect(r.json()).toMatchObject({ errors: 0, warnings: 1, problems: [{ code: "wall-clock", message: expect.stringMatching(/^stock\.hold reads/) }] });
+  expect(cli(fixture("files"), "show", "stock.hold", "--json").json()).toMatchObject({ description: "Reserve stock", at: { file: "src/stock.ts" } });
   expect(cli(fixture("files"), "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.hold"], emits: ["orders.created"] });
   expect(cli(fixture("files"), "show", "orders.created", "--json").json()).toMatchObject({ emittedBy: ["orders.place"], listeners: ["orders.email"] });
   expect(cli(fixture("files"), "show", "orders.email", "--json").json()).toMatchObject({ conditional: true });
@@ -141,7 +98,7 @@ test("an app that throws while loading gets a diagnostic with the location, not 
   expect(r.err).toContain("app-load-failed");
   expect(r.err).toContain("ORDERS_API_URL is not set (src/orders/index.ts:3");
   expect(r.err).not.toContain("    at ");
-  expect(r.err).toContain("Fix that error first"); // the crash isn't about cloudflare:workers, so no env hint
+  expect(r.err).toContain("Fix that error first");
 });
 
 test("an app that throws something that isn't an Error still gets the diagnostic", () => {
@@ -153,7 +110,6 @@ test("an app that throws something that isn't an Error still gets the diagnostic
 
 test("modules can live anywhere, and package.json can point to the registry", () => {
   const app = fixture("custom"); // registry in lib/, modules in lib/domains/
-  expect(cli(app, "check", "--json").json()).toEqual({ errors: 0, warnings: 0, problems: [] });
   expect(cli(app, "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.reserve"], at: { file: "lib/domains/orders/index.ts" } });
 });
 
@@ -171,10 +127,6 @@ test("without @logic-sdk/cli installed, the command says how to add it", async (
 // ── 0.2: authorize and record checks ────────────────────────────────────────
 
 const policies = fixture("policies");
-const holes = fixture("holes");
-const problem = (r: ReturnType<typeof cli>, code: string, file: string, line: number) =>
-  r.json().problems.find((p: { code: string; at: Loc | null }) => p.code === code && p.at?.file === file && p.at.line === line);
-type Loc = { file: string; line: number; column: number };
 
 test("list and show: the policy as written, or inline", () => {
   const rows = cli(policies, "list", "--json").json();
@@ -200,61 +152,9 @@ test("runs count only on ctx: ctx.run, a destructured run; never db.run. Scope c
   expect(cancel.scopeChanges).toEqual([{ run: "stock.release", keys: ["accountId"] }]);
   expect(cli(policies, "show", "orders.cancel").out).toContain("stock.release (scope: accountId)");
   expect(cli(policies, "show", "orders.refund", "--json").json().runs).toEqual(["stock.release"]);
-  expect(cli(policies, "check", "--json").json()).toEqual({ errors: 0, warnings: 0, problems: [] });
 });
 
-test("check: every boundary hole, both record check rules, and runs it can't name", () => {
-  const r = cli(holes, "check", "--json");
-  expect(r.code).toBe(1);
-  expect(codes(r)).toEqual([
-    "async-can",
-    "async-can",
-    "cross-module-import",
-    "cross-module-import",
-    "cross-module-import",
-    "cross-module-import",
-    "cross-module-import",
-    "dynamic-run",
-    "unused-can",
-  ]);
-});
-
-test("check resolves tsconfig paths (@/) and package.json imports (#)", () => {
-  const r = cli(holes, "check", "--json");
-  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 2)).toMatchObject({ message: expect.stringContaining('"@/stock/data"'), fix: expect.stringContaining('from "@/stock"') });
-  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 3)).toMatchObject({ message: expect.stringContaining('"#stock/data"'), fix: expect.stringContaining('from "../stock"') });
-});
-
-test("check treats re-exports and import() like imports", () => {
-  const r = cli(holes, "check", "--json");
-  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 8)).toBeDefined(); // export { reserved } from
-  expect(problem(r, "cross-module-import", "src/orders/mutations.ts", 9)).toBeDefined(); // import("../stock/data")
-});
-
-test("check scans code outside the modules (routes, pages): only a module's index", () => {
-  const p = problem(cli(holes, "check", "--json"), "cross-module-import", "src/routes/orders.ts", 3);
-  expect(p.message).toContain("outside the modules");
-  expect(p.fix).toContain('import * as stock from "../stock"');
-});
-
-test("check warns about runs it can't name, instead of dropping them from cycle detection", () => {
-  const p = problem(cli(holes, "check", "--json"), "dynamic-run", "src/orders/mutations.ts", 20);
-  expect(p).toMatchObject({ severity: "warning", message: expect.stringContaining("orders.place") });
-  expect(cli(holes, "show", "orders.place", "--json").json().runs).toEqual(["(dynamic)"]); // ctx.db.run isn't one
-});
-
-test("async-can: a can* declared async, or awaited", () => {
-  const r = cli(holes, "check", "--json");
-  expect(problem(r, "async-can", "src/orders/rules.ts", 2)).toMatchObject({ severity: "error", message: expect.stringContaining("canShip is async") });
-  expect(problem(r, "async-can", "src/orders/mutations.ts", 16)).toMatchObject({ message: expect.stringContaining("canShip is awaited") });
-});
-
-test("unused-can: a can* call whose result is thrown away", () => {
-  const p = problem(cli(holes, "check", "--json"), "unused-can", "src/orders/mutations.ts", 17);
-  expect(p).toMatchObject({ severity: "error", message: expect.stringContaining("canHold"), fix: expect.stringContaining("ctx.errors.deny()") });
-});
-
-// ctx.config: show lists the keys a function reads; modules never read the environment
+// ctx.config: show lists the keys a function reads
 const configApp = fixture("config");
 
 test("show: config keys a function reads, through this module's helpers too", () => {
@@ -269,34 +169,6 @@ test("show: config keys a function reads, through this module's helpers too", ()
   expect(cli(configApp, "show", "orders.whole").out).toContain("all of it (passed on whole)");
 });
 
-test("check: env-in-module catches process.env, import.meta.env and env reached through an import", () => {
-  const r = cli(configApp, "check", "--json");
-  expect(r.code).toBe(1);
-  const env = r.json().problems.filter((p: { code: string }) => p.code === "env-in-module");
-  expect(env.map((p: { at: { file: string; line: number } }) => `${p.at.file}:${p.at.line}`)).toEqual([
-    "src/orders/mutations.ts:4", // import { linkFor } from "../lib/links", which imports ../env
-    "src/stock/more.ts:2", // import { env as nodeEnv } from "node:process"
-    "src/stock/more.ts:9", // process["env"]
-    "src/stock/more.ts:10", // globalThis.process.env
-    "src/stock/more.ts:11", // const { env } = process
-    "src/stock/more.ts:13", // process2.env, from `import process2 from "node:process"`
-    "src/stock/mutations.ts:9", // process.env (the type-only import on line 3 is not a read)
-    "src/stock/mutations.ts:10", // import.meta.env
-  ]);
-  expect(env[0].message).toContain("process.env at src/env.ts:3");
-  // outside the modules, env is yours to read: the entry passes process.env straight into config and services
-  expect(r.json().problems.some((p: { at: { file: string } | null }) => p.at?.file === "src/server.ts")).toBe(false);
-  expect(env[0].fix).toContain("ctx.config");
-});
-
-test("a module that reads the Worker's env fails to load, and the hint says why", () => {
-  const r = cli(fixture("workers-env"), "check");
-  expect(r.code).toBe(1);
-  expect(r.err).toContain("app-load-failed");
-  expect(r.err).toContain('src/links/index.ts:1 reads the environment (env from "cloudflare:workers")');
-  expect(r.err).toContain("ctx.config");
-});
-
 test("crons: list shows the schedule and what it runs; show too; the function lists the cron as its caller", () => {
   const shop = fileURLToPath(new URL("../../../examples/shop", import.meta.url));
   expect(cli(shop, "list", "--kind", "cron", "--json").json()).toEqual([
@@ -306,24 +178,4 @@ test("crons: list shows the schedule and what it runs; show too; the function li
   expect(cli(shop, "show", "orders.sendDigest", "--json").json().calledBy).toEqual(["orders.morningDigest"]);
   expect(cli(shop, "graph").out).toMatch(/morningDigest\s+cron\s+at 0 8 \* \* 1-5/);
   expect(cli(shop, "graph", "--format", "json").json().edges).toContainEqual({ from: "orders.morningDigest", to: "orders.sendDigest", type: "runs" });
-});
-
-test("check: no .transaction() in modules, and no database client, directly or through an import", () => {
-  const problems: { code: string; at: { file: string; line: number }; message: string; fix: string }[] = cli(configApp, "check", "--json").json().problems;
-  const where = (code: string) => problems.filter((p) => p.code === code).map((p) => `${p.at.file}:${p.at.line}`);
-  // not ledger.transaction(): a service's own method. Not stock/__tests__/: test helpers aren't module code.
-  expect(where("nested-transaction")).toEqual([
-    "src/stock/writes.ts:7", // db.transaction(...)
-    "src/stock/writes.ts:9", // db["transaction"](...)
-    "src/stock/writes.ts:2", // import { attempt } from "../lib/savepoint", which calls db.transaction
-  ]);
-  expect(where("db-client-in-module")).toEqual([
-    "src/stock/writes.ts:11", // pg.drizzle(...)
-    "src/stock/writes.ts:3", // import { connect } from "../db"; the type-only import on line 1 is fine
-  ]);
-  const client = problems.find((p) => p.code === "db-client-in-module" && p.at.line === 3)!;
-  expect(client.message).toContain('drizzle() from "drizzle-orm/node-postgres" at src/db.ts:3');
-  expect(client.fix).toContain("ctx.db");
-  expect(client.fix).toContain("`import type`, so loading that file doesn't create the client");
-  expect(problems.find((p) => p.code === "nested-transaction")!.fix).toContain("ctx.run another mutation");
 });

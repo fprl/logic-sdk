@@ -76,7 +76,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 ## 9. Built for AI-written code
 
 - ✅ **Uniform shape, a one-sentence JSDoc on every function, an agent skill.** An agent can't invent a new architecture per feature.
-- ✅ **The agent skill ships in the package, and `logic-sdk check` enforces the rules:** no cross-module imports, no cycles, no `fetch` in a transaction. The agent writes the code; the lib verifies it followed the rules.
+- ✅ **The agent skill ships in the package, and the types and runtime hold the lines:** a query can't write, a mutation has no services, an action has no transaction. The agent writes the code; the compiler and the registry refuse what breaks them.
 
 ## What you give up
 

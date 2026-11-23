@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 import type * as Core from "logic-sdk";
-import { analyze, type Edge, type Loc, type Source } from "./analyze.ts";
+import { analyze, type Edge, type Loc } from "./analyze.ts";
 
 export interface FnInfo {
   id: string;
@@ -63,7 +63,6 @@ export interface Project {
   listeners: ListenerInfo[];
   crons: CronInfo[];
   events: EventInfo[];
-  source: Source;
 }
 
 /** An expected failure: printed as a diagnostic, exit code 1 (or 2 for usage). */
@@ -118,15 +117,10 @@ export async function loadProject(root: string): Promise<Project> {
       const e = error instanceof Error ? error : new Error(String(error)); // top-level code can throw anything
       const frame = e.stack?.split("\n").find((l) => l.includes(root) && !l.includes("node_modules"));
       const where = frame?.match(/(\/[^():\s]+):(\d+):(\d+)/);
-      // A module reading the platform's env (cloudflare:workers) can't even load outside it: say that, not just the crash
-      // Only when the crash is that import, and a module reads env through it: never blame an unrelated read
-      const env = e.message.includes("cloudflare:workers") ? source.env.find((r) => r.what.includes("cloudflare:workers")) : undefined;
       throw new CliError(
         "app-load-failed",
         `Loading your app failed: ${e.message}${where ? ` (${relative(root, where[1]!)}:${where[2]}:${where[3]})` : ""}`,
-        env
-          ? `${env.at.file}:${env.at.line} reads the environment (${env.what}), which modules don't do. Read the value from ctx.config, filled from your env at the entry: createRegistry({ config }).`
-          : "Fix that error first. The CLI imports your modules the same way your app does, without connecting to anything.",
+        "Fix that error first. The CLI imports your modules the same way your app does, without connecting to anything.",
       );
     }
   };
@@ -207,6 +201,5 @@ export async function loadProject(root: string): Promise<Project> {
     listeners,
     crons,
     events,
-    source,
   };
 }

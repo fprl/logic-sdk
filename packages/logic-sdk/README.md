@@ -128,10 +128,9 @@ npm i -D @logic-sdk/cli
 npx logic-sdk list                   # every function, its kind and policy
 logic-sdk show bookings.confirm      # schemas, what it runs and emits, who calls it
 logic-sdk graph --format mermaid     # who runs whom, who reacts to which event
-logic-sdk check                      # module boundaries, mutation/action cycles, no network in transactions, can* checks
 ```
 
-Read-only, `--json` everywhere, exit codes for CI. The `logic-sdk` command ships with the main package and hands off to `@logic-sdk/cli`, so apps that don't use the CLI never download it.
+Read-only, `--json` everywhere, exit codes for scripts. The `logic-sdk` command ships with the main package and hands off to `@logic-sdk/cli`, so apps that don't use the CLI never download it.
 
 ## Examples
 

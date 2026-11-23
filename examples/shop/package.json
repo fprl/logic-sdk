@@ -9,8 +9,7 @@
     "dev:worker": "wrangler dev",
     "dev:next": "APP_URL=http://localhost:3200 next dev --port 3200",
     "test": "vitest run",
-    "typecheck": "wrangler types --check && tsc",
-    "check": "logic-sdk check"
+    "typecheck": "wrangler types --check && tsc"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.106",

@@ -16,8 +16,7 @@ type Transaction<Db extends Transactional> = Parameters<Parameters<Db["transacti
 
 /**
  * What mutations get: the transaction minus `transaction`, since a savepoint that rolled back would still send the
- * events and calls made inside it. Type helpers with it: `type Tx = DrizzleTx<typeof db>`. A type-level guard;
- * `logic-sdk check` catches the rest.
+ * events and calls made inside it. Type helpers with it: `type Tx = DrizzleTx<typeof db>`. A type-level guard.
  */
 export type DrizzleTx<Db extends Transactional> = Omit<Transaction<Db>, "transaction">;
 

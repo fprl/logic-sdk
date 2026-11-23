@@ -20,7 +20,7 @@ bun run --filter web dev   # docs site
 
 ## Rules
 
-- **Done means `bun run test` passes,** plus `logic-sdk check` on both examples. Change the skill, the docs and the examples in the same change as the API.
+- **Done means `bun run test` passes.** Change the skill, the docs and the examples in the same change as the API.
 - **Every change to a published package gets a changeset** (see CONTRIBUTING.md). No hand edits to `CHANGELOG.md` or versions.
 - **Decisions go in DESIGN.md with the reason and what would change it.** Claims about other libraries cite a source; inference is labelled.
 - **Reference stacks, in order:** Vercel, TanStack, Convex, then Rails, Laravel, Phoenix.

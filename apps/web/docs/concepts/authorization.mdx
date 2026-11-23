@@ -120,13 +120,6 @@ end
 
 Laravel's policies are the same shape: boolean methods on a user and a record.
 
-### What the CLI checks
-
-| Rule | Catches |
-|---|---|
-| `async-can` | A `can*` predicate that's `async` or returns a Promise. Load first, then ask. |
-| `unused-can` | A `can*` call whose result is thrown away, so nothing is enforced |
-
 `logic-sdk show bookings.cancel` lists the predicates a function calls under `checks:`, next to its policy.
 
 ## Nested calls and listeners
