@@ -384,7 +384,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     );
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
-  const maxEventDepth = options.maxEventDepth ?? 8;
+  const maxEventDepth = options.jobs?.maxEventDepth ?? 8;
   checkAttempts("database transaction", options.database?.transactionAttempts);
   const transactionAttempts = options.database?.transactionAttempts ?? 3; // the app's, so a test's nested adapter keeps it
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test

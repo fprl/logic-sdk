@@ -147,7 +147,7 @@ export const confirm = mutation({
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
-- **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
+- **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `jobs.maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
 - **It needs an adapter that holds jobs:** `databaseQueue(database)`, `outbox(database, queue)` or `pgBoss(boss)`. `ctx.schedule` throws on `inProcess()`.
 - **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 

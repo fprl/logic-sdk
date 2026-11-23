@@ -68,7 +68,7 @@ export default {
 
 ## Loops
 
-A listener whose mutation emits the event it listens to would loop forever. Delivery stops after **8** hops (`maxEventDepth`) and the loop is reported to `onError`. Real chains are 2 or 3 hops. A call `ctx.schedule` runs right away is a hop too, so a function that schedules itself with no delay stops the same way; one that waits starts a new chain.
+A listener whose mutation emits the event it listens to would loop forever. Delivery stops after **8** hops (`jobs: { maxEventDepth }`) and the loop is reported to `onError`. Real chains are 2 or 3 hops. A call `ctx.schedule` runs right away is a hop too, so a function that schedules itself with no delay stops the same way; one that waits starts a new chain.
 
 ## Durability
 

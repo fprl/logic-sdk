@@ -766,7 +766,7 @@ test("listener loops stop at maxEventDepth (default 8 hops) and are reported onc
   for (const [maxEventDepth, expected] of [[undefined, 8], [5, 5]] as const) {
     hops.length = 0;
     const errors: string[] = [];
-    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth, onError: (e, { source }) => errors.push(`${source}: ${(e as Error).message}`) });
+    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), jobs: { maxEventDepth }, onError: (e, { source }) => errors.push(`${source}: ${(e as Error).message}`) });
     await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
     expect(hops.length).toEqual(expected);
     expect(errors).toEqual([expect.stringMatching(new RegExp(`^l\\.ping: .*deeper than ${expected}`))]);
@@ -1108,7 +1108,7 @@ test("ctx.schedule: a function that schedules itself with no delay stops at maxE
   const errors: string[] = [];
   let runs = 0;
   const again: ReturnType<typeof mutation> = mutation({ async handler(ctx) { runs++; ctx.schedule(again, undefined, { delay: 0 }); } });
-  const r = createRegistry<Scope>({ modules: { x: { again } }, database: memoryDatabase(), maxEventDepth: 4, onError: (e) => errors.push((e as Error).message) });
+  const r = createRegistry<Scope>({ modules: { x: { again } }, database: memoryDatabase(), jobs: { maxEventDepth: 4 }, onError: (e) => errors.push((e as Error).message) });
   await r.as({ actor: "a", locale: "es" }).run(again);
   expect(runs).toBe(5); // the caller's run, then 4 hops
   expect(errors).toEqual([expect.stringMatching(/chain of events and calls deeper than 4/)]);
@@ -1121,7 +1121,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   let runs = 0;
   const pong = listener({ event: () => pinged, async handler(ctx) { runs++; await ctx.run(serve); } });
   const serve = mutation({ async handler(ctx) { ctx.schedule(ping, undefined, { delay: 0 }); } });
-  const r = createRegistry<Scope>({ modules: { x: { pinged, ping, pong, serve } }, database: memoryDatabase(), maxEventDepth: 6, onError: (e) => errors.push((e as Error).message) });
+  const r = createRegistry<Scope>({ modules: { x: { pinged, ping, pong, serve } }, database: memoryDatabase(), jobs: { maxEventDepth: 6 }, onError: (e) => errors.push((e as Error).message) });
   await r.as({ actor: "a", locale: "es" }).run(ping);
   expect(runs).toBe(3); // event (1), call (2), event (3), call (4), event (5), call (6), event (7): stopped
   expect(errors).toEqual([expect.stringMatching(/deeper than 6/)]);
@@ -1132,9 +1132,8 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   const r2 = createRegistry<Scope>({
     modules: { x: { pinged, ping, deep } },
     database: memoryDatabase(),
-    maxEventDepth: 0,
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: { load: (saved) => saved }, maxEventDepth: 0 },
   });
   await r2.as({ actor: "a", locale: "es" }).run(deep);
   expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
