@@ -29,8 +29,7 @@ export const createShop = (options: {
 export type Shop = ReturnType<typeof createShop>;
 
 /** Env in, settings out. Hosts read their env (process.env, Worker bindings) and pass it here; modules read ctx.config. */
-// The index signature lets process.env and Worker bindings both fit
-export const settingsFrom = (env: { APP_URL?: string; MAX_ITEMS?: string; [name: string]: unknown }): Settings => ({
+export const settingsFrom = (env: { APP_URL?: string; MAX_ITEMS?: string }): Settings => ({
   app: { url: env.APP_URL ?? "http://localhost:3000" },
   orders: { maxItems: Number(env.MAX_ITEMS) || 10 },
 });

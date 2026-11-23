@@ -34,7 +34,6 @@ export function check(project: Project): Problem[] {
   const graph = new Map<string, Map<string, string>>(); // module → module → an example "a.fn → b.fn"
   for (const f of [...project.functions, ...project.listeners])
     for (const e of f.runs) {
-      const to = e.to.split(".")[0]!;
       if (e.to === "(dynamic)") {
         // Never pass silently: an edge we can't name could close a cycle
         problems.push({
@@ -46,17 +45,18 @@ export function check(project: Project): Problem[] {
         });
         continue;
       }
+      const to = e.to.slice(0, e.to.indexOf("."));
       if (to === f.module) continue;
       const edges = graph.get(f.module) ?? new Map<string, string>();
       graph.set(f.module, edges);
       if (!edges.has(to)) edges.set(to, `${f.id} → ${e.to}`);
     }
   for (const cycle of cycles(graph)) {
-    const steps = cycle.map((m, i) => graph.get(m)!.get(cycle[(i + 1) % cycle.length]!)!);
+    const names = cycle.map((s) => s.module);
     problems.push({
       code: "run-cycle",
       severity: "error",
-      message: `Modules run each other in a circle: ${[...cycle, cycle[0]].join(" → ")} (${steps.join(", ")}).`,
+      message: `Modules run each other in a circle: ${[...names, names[0]].join(" → ")} (${cycle.map((s) => s.step).join(", ")}).`,
       at: null,
       fix: "Break the cycle with an event: emit it in one module, react with a listener in the other.",
     });
@@ -144,17 +144,20 @@ export function check(project: Project): Problem[] {
 }
 
 /** Elementary cycles, each reported once (smallest rotation). Module graphs are tiny, so a plain DFS is enough. */
-function cycles(graph: Map<string, Map<string, string>>): string[][] {
-  const found = new Map<string, string[]>();
-  const visit = (start: string, node: string, path: string[]) => {
-    for (const next of graph.get(node)?.keys() ?? []) {
+type Step = { module: string; step: string }; // a module, and the run that leaves it for the next one
+function cycles(graph: Map<string, Map<string, string>>): Step[][] {
+  const found = new Map<string, Step[]>();
+  const visit = (start: string, node: string, path: Step[]) => {
+    for (const [next, step] of graph.get(node) ?? []) {
+      const taken = [...path, { module: node, step }];
       if (next === start) {
-        const min = path.indexOf([...path].sort()[0]!);
-        const rotated = [...path.slice(min), ...path.slice(0, min)];
-        found.set(rotated.join(","), rotated);
-      } else if (!path.includes(next)) visit(start, next, [...path, next]);
+        const first = taken.map((s) => s.module).sort()[0];
+        const min = taken.findIndex((s) => s.module === first);
+        const rotated = [...taken.slice(min), ...taken.slice(0, min)];
+        found.set(rotated.map((s) => s.module).join(","), rotated);
+      } else if (!taken.some((s) => s.module === next)) visit(start, next, taken);
     }
   };
-  for (const start of graph.keys()) visit(start, start, [start]);
+  for (const start of graph.keys()) visit(start, start, []);
   return [...found.values()];
 }

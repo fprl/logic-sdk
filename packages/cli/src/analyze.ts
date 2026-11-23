@@ -62,7 +62,7 @@ export interface Source {
 type Node = { type: string; start: number; [key: string]: any };
 const WRAPPERS = new Set(["TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "ParenthesizedExpression"]);
 const unwrap = (n: Node | undefined): Node | undefined => (n && WRAPPERS.has(n.type) ? unwrap(n.expression) : n);
-const isFunction = (n: Node | undefined) =>
+const isFunction = (n: Node | undefined): n is Node =>
   n?.type === "ArrowFunctionExpression" || n?.type === "FunctionExpression" || n?.type === "FunctionDeclaration";
 const CAN = /^can[A-Z]/;
 /** `canCancel(...)` or `rules.canCancel(...)`: the called name. */
@@ -171,7 +171,8 @@ const ctxIn = (fns: Node[], param: number | "any") => {
       cur = unwrap(cur.object);
     }
     if (callee || path.at(-1) === "length") path.pop();
-    if (cur?.type === "Identifier" && configNames.has(cur.name)) return path.reduce(keyPath, configNames.get(cur.name)!);
+    const held = cur?.type === "Identifier" ? configNames.get(cur.name) : undefined;
+    if (held !== undefined) return path.reduce(keyPath, held);
     if (path[0] === "config" && onCtx(cur)) return path.slice(1).join(".");
     return undefined;
   };
@@ -237,12 +238,15 @@ function canIssues(program: Node, loc: (o: number) => Loc): CanIssue[] {
       : undefined;
     const fnNode = n.type === "FunctionDeclaration" ? n : n.type === "VariableDeclarator" ? unwrap(n.init) : n.value;
     if (fnName && CAN.test(fnName) && fnNode?.async) cans.push({ code: "async-can", name: fnName, how: "declared", at: loc(n.start) });
-    const awaited = n.type === "AwaitExpression" ? unwrap(n.argument) : undefined;
-    if (awaited?.type === "CallExpression" && CAN.test(calleeName(awaited) ?? ""))
-      cans.push({ code: "async-can", name: calleeName(awaited)!, how: "awaited", at: loc(n.start) });
-    const discarded = n.type === "ExpressionStatement" ? unwrap(n.expression) : undefined;
-    if (discarded?.type === "CallExpression" && CAN.test(calleeName(discarded) ?? ""))
-      cans.push({ code: "unused-can", name: calleeName(discarded)!, how: "discarded", at: loc(n.start) });
+    /** The can* an expression calls, if that's what it is. */
+    const canCalled = (e: Node | undefined) => {
+      const name = e?.type === "CallExpression" ? calleeName(e) : undefined;
+      return name && CAN.test(name) ? name : undefined;
+    };
+    const awaited = n.type === "AwaitExpression" ? canCalled(unwrap(n.argument)) : undefined;
+    if (awaited) cans.push({ code: "async-can", name: awaited, how: "awaited", at: loc(n.start) });
+    const discarded = n.type === "ExpressionStatement" ? canCalled(unwrap(n.expression)) : undefined;
+    if (discarded) cans.push({ code: "unused-can", name: discarded, how: "discarded", at: loc(n.start) });
   });
   return cans;
 }
@@ -313,12 +317,13 @@ export function analyze(root: string, registryFile: string): Source {
       `Couldn't find the modules in ${relative(root, registryFile)}. Expected createRegistry({ modules: { bookings, ... } }) with each module imported as \`import * as bookings from "./bookings"\`.`,
     );
 
-  const moduleOf = (file: string) =>
-    Object.entries(modules).find(([, m]) => file === m.dir || (m.folder && file.startsWith(m.dir + sep)))?.[0];
+  const moduleOf = (file: string) => {
+    const found = Object.entries(modules).find(([, m]) => file === m.dir || (m.folder && file.startsWith(m.dir + sep)));
+    return found && { name: found[0], ...found[1] };
+  };
 
   /** `import * as links from "<this>"`: the spec without the inner path when it ends with it, else a relative path. */
-  const indexSpec = (spec: string, fromFile: string, resolved: string, target: string) => {
-    const m = modules[target]!;
+  const indexSpec = (spec: string, fromFile: string, resolved: string, m: { dir: string; index: string; folder: boolean }) => {
     const noExt = (p: string) => p.replace(/\.[mc]?[jt]sx?$/, "");
     const inner = noExt(relative(m.dir, resolved)).split(sep).join("/");
     for (const tail of [inner, inner.replace(/(^|\/)index$/, "")])
@@ -341,13 +346,13 @@ export function analyze(root: string, registryFile: string): Source {
       const resolved = resolve(file, spec);
       const target = resolved ? moduleOf(resolved) : undefined;
       if (!resolved || !target) continue;
-      for (const sp of decl?.specifiers ?? []) local[sp.local.name] = { mod: target, ns: sp.type === "ImportNamespaceSpecifier" };
-      if (target !== from)
+      for (const sp of decl?.specifiers ?? []) local[sp.local.name] = { mod: target.name, ns: sp.type === "ImportNamespaceSpecifier" };
+      if (target.name !== from)
         imports.push({
           from,
           spec,
-          target,
-          internal: resolved !== modules[target]!.index,
+          target: target.name,
+          internal: resolved !== target.index,
           index: indexSpec(spec, file, resolved, target),
           at: loc(start),
         });
@@ -369,7 +374,8 @@ export function analyze(root: string, registryFile: string): Source {
   /** The first env read in `file` or in the app files it loads, or null. Memoized, so each file is looked at once. */
   const envMemo = new Map<string, { what: string; at: Loc } | null>();
   const envVia = (file: string, visiting: Set<string>): { what: string; at: Loc } | null => {
-    if (envMemo.has(file)) return envMemo.get(file)!;
+    const known = envMemo.get(file);
+    if (known !== undefined) return known;
     if (visiting.has(file)) return null; // a cycle: whatever it reads is found from where the cycle started
     visiting.add(file);
     const { program, loc } = read(file);
@@ -397,8 +403,8 @@ export function analyze(root: string, registryFile: string): Source {
       scanEnv(mod, f, file.program, file.loc);
       const local = scanImports(f, file.program, file.loc, mod);
       const nameOf = (arg: Node | undefined): string => {
-        if (arg?.type === "MemberExpression" && arg.object?.type === "Identifier" && local[arg.object.name]?.ns)
-          return `${local[arg.object.name]!.mod}.${arg.property.name}`;
+        const ns = arg?.type === "MemberExpression" && arg.object?.type === "Identifier" ? local[arg.object.name] : undefined;
+        if (ns?.ns) return `${ns.mod}.${arg?.property.name}`;
         if (arg?.type === "Identifier") return `${local[arg.name]?.mod ?? mod}.${arg.name}`;
         return "(dynamic)";
       };
@@ -414,7 +420,10 @@ export function analyze(root: string, registryFile: string): Source {
         const add = (name: string, node: Node) => helpers.set(name, [...(helpers.get(name) ?? []), { node, file }]);
         if (s?.type === "FunctionDeclaration" && s.id) add(s.id.name, s);
         if (s?.type === "VariableDeclaration")
-          for (const d of s.declarations) if (d.id?.type === "Identifier" && isFunction(unwrap(d.init))) add(d.id.name, unwrap(d.init)!);
+          for (const d of s.declarations) {
+            const fn = unwrap(d.init);
+            if (d.id?.type === "Identifier" && isFunction(fn)) add(d.id.name, fn);
+          }
       }
     /** `{ scope: { actor: system } }` in run options → the keys it changes; "(dynamic)" when they can't be read. */
     const scopeOf = (options: Node | undefined): { scope?: string[] } => {
@@ -425,7 +434,7 @@ export function analyze(root: string, registryFile: string): Source {
       if (!prop) return {};
       const value = unwrap(prop.value);
       if (value?.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
-      return { scope: value.properties.map((p: Node) => (p.key?.name ?? p.key?.value ?? "(dynamic)") as string) };
+      return { scope: value.properties.map((p: Node) => p.key?.name ?? p.key?.value ?? "(dynamic)") };
     };
     const readConfig = (found: Found, key: string | undefined) => {
       if (key === undefined) return;

@@ -131,6 +131,13 @@ test("an app that throws while loading gets a diagnostic with the location, not 
   expect(r.err).toContain("Fix that error first"); // the crash isn't about cloudflare:workers, so no env hint
 });
 
+test("an app that throws something that isn't an Error still gets the diagnostic", () => {
+  const r = cli(fixture("crash-string"), "list");
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("app-load-failed");
+  expect(r.err).toContain("orders failed to load");
+});
+
 test("modules can live anywhere, and package.json can point to the registry", () => {
   const app = fixture("custom"); // registry in lib/, modules in lib/domains/
   expect(cli(app, "check", "--json").json()).toEqual({ errors: 0, warnings: 0, problems: [] });

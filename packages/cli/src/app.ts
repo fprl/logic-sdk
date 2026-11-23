@@ -22,7 +22,7 @@ function guarded<F extends object, A extends unknown[]>(func: (this: Context, fl
       const known = error instanceof CliError ? error : error instanceof ParseError ? new CliError("unreadable-registry", error.message) : null;
       if (!known) throw error;
       this.process.exitCode = known.code === "unknown-name" ? 2 : 1;
-      if ((flags as { json?: boolean }).json) {
+      if ("json" in flags && flags.json) {
         print(this, { error: { code: known.code, message: known.message, fix: known.fix ?? null } });
         return;
       }
@@ -55,7 +55,7 @@ const list = buildCommand({
   func: guarded(async function (this: Context, flags: { module?: string; kind?: FnInfo["kind"] | "listener" | "cron"; exposed?: boolean; json?: boolean }) {
     const p = await loadProject(this.cwd);
     const rows = [
-      ...p.functions.map((f) => ({ ...plainFn(f), kind: f.kind as FnInfo["kind"] | "listener" | "cron" })),
+      ...p.functions.map((f) => plainFn(f)),
       ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, authorize: null, exposed: false, description: l.description ?? `on ${l.event}`, event: l.event })),
       ...p.crons.map((c) => ({ ...c, kind: "cron" as const, authorize: null, exposed: false, description: `${c.schedule} ${c.timezone} → ${c.run}` })),
     ].filter(

@@ -114,7 +114,7 @@ export async function loadProject(root: string): Promise<Project> {
     try {
       return (await jiti.import(spec)) as Record<string, any>;
     } catch (error) {
-      const e = error as Error;
+      const e = error instanceof Error ? error : new Error(String(error)); // top-level code can throw anything
       const frame = e.stack?.split("\n").find((l) => l.includes(root) && !l.includes("node_modules"));
       const where = frame?.match(/(\/[^():\s]+):(\d+):(\d+)/);
       // A module reading the platform's env (cloudflare:workers) can't even load outside it: say that, not just the crash
