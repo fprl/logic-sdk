@@ -437,6 +437,20 @@ listener({ event: () => orders.placed, attempts: 5, delay: 60, async handler(ctx
 - **A throw from `jobs.scope.load` counts as a try,** like one from the listener: it's part of running the job, and at the default of one, any failure fails.
 - **Adapters keep failures through `run`'s `fail` callback,** with the real error, instead of writing a generic one after `run` resolves.
 
+### `when`: a listener that wants only some events
+
+```ts
+listener({ event: () => orders.placed, when: (order) => order.total > 5000, async handler(ctx, order) { ... } });
+```
+
+- **False, and no job is made** for that listener and event: nothing stored, run or counted. Returning early in the handler stores and runs a job for nothing, which shows up as done. Laravel's `shouldQueue($event)` takes only the event and skips queueing the listener ([docs](https://laravel.com/docs/12.x/events), "Conditionally Queueing Listeners"); Inngest's trigger `if` sees only `event` ([docs](https://www.inngest.com/docs/guides/writing-expressions)). Ours applies with every adapter, `inProcess()` included.
+- **Checked where jobs are made, at commit,** inside the transaction, once per event and listener. A throw is a bug in the app and fails the mutation, as a bad payload does.
+- **The parsed payload,** the value the handler gets: the commit-time parse is kept in the transaction's state (not the envelope, which travels as JSON) and passed to `when`.
+- **The event only, no scope.** Both precedents give only the event. A scope here would be a second one: with a durable adapter the handler runs as `load(store(scope))`, not the emitter's, the reason `ctx.event` carries no scope. If who emitted matters, the event says so. A second argument can be added later without breaking anyone.
+- **Sync, and no runtime check that it returned a boolean.** The type refuses an async `when`; one that slips through (a cast, JavaScript) returns a Promise, which is truthy, so the listener runs for every event, as without `when`. Runtime checks are for security rules: a policy must return exactly `true`; this is a filter.
+- **`t.jobs.perform(listener, payload)` skips it:** it names the listener.
+- **What would change it:** a real listener whose skip depends on who emitted, not on what happened (then the emitting scope as a second argument), or a check rule if async `when`s show up.
+
 ### Tests: hooks, and jobs inline or manual
 
 - **`beforeEach(() => t.begin())` and `afterEach(() => t.rollback())`, not a callback per test.** Checked: Rails wraps every test in a rolled-back transaction by default (`use_transactional_tests`, default true); Laravel opts in per test class with the `RefreshDatabase` trait; Phoenix generates a `DataCase` with the sandbox in `setup`, and each file `use`s it; convex-test starts a fresh backend per test. Hooks fit all of them. Drizzle transactions are callbacks, so `begin` parks one on a promise until `rollback`.

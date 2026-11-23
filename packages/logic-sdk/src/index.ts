@@ -187,15 +187,22 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       attempts?: number;
       /** Seconds after the event before the first try. Needs an adapter that holds jobs: `inProcess()` is refused. */
       delay?: number;
+      /**
+       * Whether this event gets a job for this listener, like Laravel's `shouldQueue($event)`: false, and nothing is
+       * stored, run or counted. From the payload the handler gets (parsed), at commit, so sync and from the event only:
+       * a condition on the database belongs in the handler, since it can change before the job runs. A throw fails the
+       * mutation, as a bad payload does.
+       */
+      when?: (payload: O) => boolean;
       meta?: ListenerMetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
     }): Listener<O, C> => {
-      const { id, event, attempts, delay, meta, handler } = def;
+      const { id, event, attempts, delay, when, meta, handler } = def;
       checkAttempts("listener", attempts);
       if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
         throw new Error(`[logic-sdk] listener delay must be seconds, 0 or more (got ${delay}).`);
       // meta is checked against ListenerMetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
-      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, meta: meta as Listener["meta"], handler });
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, when, meta: meta as Listener["meta"], handler });
     },
   };
 }
@@ -230,6 +237,8 @@ interface TxState {
   doomed: boolean;
   reason: unknown;
   events: Envelope[];
+  /** Each event's payload as its schema parsed it, for listeners' `when`: the value their handler gets. */
+  parsed: Map<Envelope, unknown>;
   /** What `ctx.schedule` asked for, enqueued with the events at commit. */
   calls: CallJob[];
   pending: Promise<void>[];
@@ -423,8 +432,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     return r.value;
   }
   /** What our own code passed a mutation's ctx, checked by the time it commits: a bad value fails the commit. */
-  function checkAtCommit(tx: TxState, schema: Schema, value: unknown, what: string) {
-    const check = parseOwn(schema, value, what).then(() => {});
+  function checkAtCommit(tx: TxState, schema: Schema, value: unknown, what: string, keep?: (parsed: unknown) => void) {
+    const check = parseOwn(schema, value, what).then((parsed) => keep?.(parsed));
     check.catch(() => {}); // surfaced at commit; never an unhandled rejection
     tx.pending.push(check);
   }
@@ -465,7 +474,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         // reserve the slot now so events keep emit order, even with async schemas
         const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
         tx.events.push(envelope);
-        checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`);
+        checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`, (parsed) => tx.parsed.set(envelope, parsed));
       },
       schedule: (fn, input, { at, delay, attempts = 1, replace }) => {
         const fnId = idOf(fn);
@@ -596,11 +605,11 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           // SAFETY: createRegistry refuses mutations without a database that has interactive transactions
           committed = await database!.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
-            const tx: TxState = { db: txDb, doomed: false, reason: undefined, events: [], calls: [], pending: [] };
+            const tx: TxState = { db: txDb, doomed: false, reason: undefined, events: [], parsed: new Map(), calls: [], pending: [] };
             const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
-            const jobs = toJobs(tx.events, tx.calls);
+            const jobs = toJobs(tx.events, tx.calls, tx.parsed);
             if (jobs.length) await jobsAdapter.enqueue?.(txDb, jobs);
             return { out, events: tx.events, jobs };
           });

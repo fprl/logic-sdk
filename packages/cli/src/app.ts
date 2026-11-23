@@ -104,6 +104,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     } else if (listener) {
       lines.push(`${bold(listener.id)}  ${kind("listener")}`, ...(listener.description ? [listener.description] : []), dim(where(listener.at)), "");
       row("on", listener.event);
+      if (listener.conditional) row("when", "only events its condition lets through");
       if (listener.runs.length) row("runs", listener.runs.map(runLabel).join(", "));
     } else if (cron) {
       lines.push(`${bold(cron.id)}  ${kind("cron")}`, ...(cron.description ? [cron.description] : []), dim(where(cron.at)), "");

@@ -106,6 +106,21 @@ export const sendReceipt = listener({
 - **`delay`** is stamped on the job as `runAt`. `databaseQueue` and `outbox` keep the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
 - **`inProcess()` tries once and can't hold a job.** What throws is `failed`, whatever its `attempts`. And `createRegistry` refuses a listener with a `delay` there, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue(database)`. Cloudflare alone holds up to 24 hours.
 
+## Only some events: `when`
+
+```ts
+export const flagFraud = listener({
+  event: () => orders.placed,
+  when: (order) => order.total > 5000, // the others get no job for it
+  async handler(ctx, order) { ... },
+});
+```
+
+- **False, and that event gets no job for this listener:** nothing stored, run or counted, with any adapter. Like Laravel's `shouldQueue($event)` and Inngest's trigger `if`. The emitter doesn't know who listens; the listener says what it wants.
+- **It gets the payload the handler gets,** parsed by the event's schema (defaults and transforms applied), at commit.
+- **Sync, from the event only.** A condition on the database belongs in the handler: the data can change before the job runs. If who emitted matters, the event says so (`placedBy: "admin"`).
+- **A throw fails the mutation,** as a bad payload does: it's a bug in your code. `t.jobs.perform(listener, payload)` skips `when`, since it names the listener.
+
 ## Scheduled calls
 
 ```ts
