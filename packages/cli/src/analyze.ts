@@ -83,7 +83,7 @@ function walk(node: unknown, visit: (n: Node) => void): void {
   for (const key in n) if (key !== "parent") walk(n[key], visit);
 }
 
-const SKIP_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage"]);
+const SKIP_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage", "__tests__", "test", "tests"]);
 /** Source files under `dir`. Skips dependencies, build output, dot folders (.next, .git) and tests. */
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -233,29 +233,46 @@ const directEnv = (program: Node, loc: (o: number) => Loc): Hit[] => {
   return found;
 };
 
-/** `x.transaction(...)`, on anything: modules never open a transaction (a mutation already is one). */
+/** Named like a database or a transaction: `db`, `ctx.db`, `tx`, `trx`, `database`, `ordersDb`, `pgTx`. */
+const DB_LIKE = /^(db|tx|trx|database)$|(Db|Tx)$/;
+/**
+ * `db.transaction(...)` (or `tx["transaction"]`): modules never open a transaction, since a mutation already is one.
+ * Only on something named like a database, so a payments service's own `transaction` method is left alone.
+ */
 const directTransactions = (program: Node, loc: (o: number) => Loc): Hit[] => {
   const found: Hit[] = [];
   walk(program, (n) => {
     const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
-    if (callee?.type === "MemberExpression" && !callee.computed && callee.property?.name === "transaction") found.push({ what: ".transaction()", at: loc(n.start) });
+    if (callee?.type !== "MemberExpression") return;
+    const key = callee.computed ? (callee.property?.type === "Literal" ? callee.property.value : undefined) : callee.property?.name;
+    const on = unwrap(callee.object);
+    const name = on?.type === "Identifier" ? on.name : on?.type === "MemberExpression" && !on.computed ? on.property?.name : undefined;
+    if (key === "transaction" && name && DB_LIKE.test(name)) found.push({ what: `${name}.transaction()`, at: loc(n.start) });
   });
   return found;
 };
 
-/** A Drizzle client created: `drizzle(...)` imported from a driver entry, `drizzle-orm/<driver>`. */
+/** A Drizzle client created: `drizzle(...)` or `pg.drizzle(...)`, from a driver entry, `drizzle-orm/<driver>`. */
 const directDbClients = (program: Node, loc: (o: number) => Loc): Hit[] => {
   const makers = new Map<string, string>(); // local name → the entry it came from
+  const namespaces = new Map<string, string>(); // `import * as pg from "drizzle-orm/node-postgres"`
   for (const s of program.body) {
     if (s.type !== "ImportDeclaration" || typeOnly(s) || !s.source.value.startsWith("drizzle-orm/")) continue;
-    for (const sp of s.specifiers)
+    for (const sp of s.specifiers) {
       if (sp.type === "ImportSpecifier" && sp.importKind !== "type" && sp.imported?.name === "drizzle") makers.set(sp.local.name, s.source.value);
+      if (sp.type === "ImportNamespaceSpecifier") namespaces.set(sp.local.name, s.source.value);
+    }
   }
   const found: Hit[] = [];
-  if (makers.size)
+  if (makers.size || namespaces.size)
     walk(program, (n) => {
       const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
-      const from = callee?.type === "Identifier" ? makers.get(callee.name) : undefined;
+      const from =
+        callee?.type === "Identifier"
+          ? makers.get(callee.name)
+          : callee?.type === "MemberExpression" && !callee.computed && callee.property?.name === "drizzle" && callee.object?.type === "Identifier"
+            ? namespaces.get(callee.object.name)
+            : undefined;
       if (from) found.push({ what: `drizzle() from "${from}"`, at: loc(n.start) });
     });
   return found;
@@ -413,7 +430,7 @@ export function analyze(root: string, registryFile: string): Source {
     const via = (file: string, visiting: Set<string>): Hit | null => {
       const known = memo.get(file);
       if (known !== undefined) return known;
-      if (visiting.has(file)) return null; // a cycle: whatever is there is found from where the cycle started
+      if (visiting.has(file)) return null; // a cycle: what's there is found by the file that started it
       visiting.add(file);
       const { program, loc } = read(file);
       let first = direct(program, loc)[0] ?? null;
@@ -423,7 +440,8 @@ export function analyze(root: string, registryFile: string): Source {
           if (first) break;
         }
       visiting.delete(file);
-      memo.set(file, first);
+      // "nothing here" is only final at the top: deeper, a cycle may have cut the search short
+      if (first || !visiting.size) memo.set(file, first);
       return first;
     };
     const scan = (mod: string, file: string, program: Node, loc: (o: number) => Loc) => {

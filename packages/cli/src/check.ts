@@ -146,7 +146,7 @@ export function check(project: Project): Problem[] {
       severity: "error",
       message: `${r.via ? `${r.at.file} imports a file that creates a database client (${r.what} at ${r.via.file}:${r.via.line})` : `${r.at.file} creates a database client (${r.what})`}. Writes through it are outside the mutation's transaction, so a rollback doesn't undo them.`,
       at: r.at,
-      fix: "Use ctx.db. Create the client at the entry and pass it to createRegistry({ database }). For its type only, `import type`.",
+      fix: "Use ctx.db: create the client at the entry and pass it to createRegistry({ database }). A second database is a service. A file that needs only its type (`typeof db` in logic.ts) imports it with `import type`, so loading that file doesn't create the client.",
     });
 
   // 9. Listeners for events nothing emits

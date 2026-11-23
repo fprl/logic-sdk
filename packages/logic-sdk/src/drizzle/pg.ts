@@ -42,7 +42,7 @@ export type DrizzleAdapterOptions = Pick<DatabaseAdapter, "transactionAttempts">
 export function drizzleAdapter<Db extends Transactional>(
   db: Db,
   options: DrizzleAdapterOptions = {},
-): SqlDatabase<Db, Transaction<Db>> {
+): SqlDatabase<Db, Transaction<Db>> { // the whole transaction, for `nest`; mutations see it as a DrizzleTx
   return {
     db,
     transactions: "interactive",
