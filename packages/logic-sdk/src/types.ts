@@ -219,7 +219,8 @@ export interface Cron<C extends Config = any> extends FromInit<C> {
   readonly id?: string;
   readonly schedule: string;
   readonly timezone?: string;
-  readonly run: Fn;
+  /** The function it runs, read when the registry is built, like a listener's `event`. */
+  readonly run: () => Fn;
   readonly input?: unknown;
   readonly scope: object;
   readonly attempts?: number;
@@ -623,6 +624,7 @@ export interface RegisteredListener extends Registered {
 }
 export interface RegisteredCron extends Registered {
   cron: Cron;
+  run: Fn;
 }
 
 /** `registry.jobs`: what you call from a queue consumer, a cron, or a script. */

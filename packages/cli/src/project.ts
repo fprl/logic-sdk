@@ -186,7 +186,7 @@ export async function loadProject(root: string): Promise<Project> {
     name: c.name,
     schedule: c.cron.schedule,
     timezone: c.cron.timezone ?? "UTC",
-    run: described.ids.get(c.cron.run) ?? "(unknown)",
+    run: described.ids.get(c.run) ?? "(unknown)",
     description: src(c)?.doc ?? null,
     at: src(c)?.at ?? null,
   }));

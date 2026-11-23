@@ -256,14 +256,14 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const system: Scope = { actor: "system", tenant: "all" };
   const needs = mutation({ input: z.object({ n: z.number() }), handler: async () => 1 });
   const none = query({ handler: async () => 1 });
-  cron({ schedule: "* * * * *", run: needs, input: { n: 1 }, scope: system });
-  cron({ schedule: "* * * * *", run: none, scope: system });
+  cron({ schedule: "* * * * *", run: () => needs, input: { n: 1 }, scope: system });
+  cron({ schedule: "* * * * *", run: () => none, scope: system });
   // @ts-expect-error the function needs input
-  cron({ schedule: "* * * * *", run: needs, scope: system });
+  cron({ schedule: "* * * * *", run: () => needs, scope: system });
   // @ts-expect-error input typed by the function
-  cron({ schedule: "* * * * *", run: needs, input: { n: "1" }, scope: system });
+  cron({ schedule: "* * * * *", run: () => needs, input: { n: "1" }, scope: system });
   // @ts-expect-error scope must be the app's
-  cron({ schedule: "* * * * *", run: none, scope: { nope: 1 } });
+  cron({ schedule: "* * * * *", run: () => none, scope: { nope: 1 } });
 }
 
 // db: DrizzleDb gives queries a reader and mutations the transaction
@@ -401,7 +401,7 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const placed = shop.event({ payload: z.object({ id: z.string() }) });
   const refund = shop.mutation({ handler: async (ctx) => ctx.scope.user });
   const audit = shop.listener({ event: () => placed, handler: async () => {} });
-  const sweep = shop.cron({ schedule: "0 * * * *", run: refund, scope: { user: null } });
+  const sweep = shop.cron({ schedule: "0 * * * *", run: () => refund, scope: { user: null } });
   const ban = admin.mutation({ handler: async (ctx) => ctx.scope.admin });
   admin.createRegistry({ modules: { admin: { ban, placed } } });
   const annotated: Fn = ban; // a type that lost its init passes: nothing to tell

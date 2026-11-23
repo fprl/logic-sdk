@@ -204,7 +204,7 @@ export function makeJobs(deps: JobsDeps) {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
       return attemptOnce(async () => {
-        await runAs(c.cron.run, c.cron.input, c.cron.scope, 0, queued);
+        await runAs(c.run, c.cron.input, c.cron.scope, 0, queued);
         return "done";
       });
     }

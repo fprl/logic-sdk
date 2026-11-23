@@ -237,7 +237,7 @@ jobs: { adapter: pgBoss(boss), scope }                          // transactional
 /** Expire carts nobody touched for a day */
 export const expireCarts = cron({
   schedule: "*/15 * * * *",
-  run: expireStale,          // a function, run with its policy, validation and tracing
+  run: () => expireStale,    // a function, run with its policy, validation and tracing
   scope: system,             // required: a cron has no caller, so it says who it runs as
 });
 ```
@@ -582,3 +582,7 @@ From porting an app (2026-11-23): a properties page runs `bookings.currentFor`, 
 - **Recursion is caught at runtime, not by a static rule.** Nothing limited `ctx.run` depth: a query ping-pong across two modules reached 20,000 levels in 30 ms with the heap growing, and inside a mutation it would hold the transaction open until memory ran out. Now a call nested past 64 throws a plain error with the last calls of its path (`… → a.ping → b.pong → a.ping`): a bug, so a 500 at the edge and `onError` in a job, and a nested mutation in the path dooms the transaction (a top-level mutation that catches it still commits, as with any error it catches). A fixed constant, not an option: 64 nested calls is far past any real composition; an option comes when someone hits it. The frame keeps the trail of call ids, and a call's depth is its length. A static function-level rule would also catch recursion through same-module edges, but the runtime error shows up in the first test that hits it, with the exact path, and also covers what the analysis can't name.
 - **No strict mode** (reads one way too) and no rule configuration: every `check` rule is a safety rule.
 - **What would change it:** modules that must be extractable as packages (a strict DAG, as an opt-in `module-cycle` warning); queries getting their own connection or cache inside a mutation; real apps needing more than 64 nested calls (then an option); or recursion that tests don't reach, which would bring back the static rule.
+
+### `cron({ run })` is a thunk, like a listener's `event`
+
+`cron({ schedule, run: () => reports.sendWeekly, scope })`. It was `run: reports.sendWeekly`, the one definer that read another file's export while files load. Inside a cycle of imports (a module's `crons.ts` and `mutations.ts`, or two modules' indexes), that read can hit an export not yet initialized and throw. With it lazy, resolved when the registry is built as listeners' `event` already is, no definer reads an import at load time: handlers read theirs when they run. So cycles between a module's files are harmless at runtime, as they are in Rails and Laravel (autoloading on first use) and Phoenix (modules resolved by name when called). A linter's `import/no-cycle` may still flag them; that's the app's choice. The thunk takes no argument: it runs at `createRegistry`, before any call, so there's no `ctx` to give it, and one that took `ctx` would be a handler, which a cron deliberately doesn't have (it runs an existing function, with its policy). **What would change it:** nothing short of string ids (`run: "reports.sendWeekly"`), which would cost the one-way type flow.

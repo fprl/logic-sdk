@@ -84,7 +84,7 @@ export const registry = createRegistry({
 export const sendConfirmation = listener({ event: () => confirmed, attempts: 3, handler });
 
 // a cron
-export const morningDigest = cron({ schedule: "0 8 * * MON-FRI", run: sendDigest, scope: asSystem("digest") });
+export const morningDigest = cron({ schedule: "0 8 * * MON-FRI", run: () => sendDigest, scope: asSystem("digest") });
 
 // later, from a mutation, committed with it
 ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });

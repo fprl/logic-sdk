@@ -61,7 +61,7 @@ const tidy = mutation({
     ran.push("tidy");
   },
 });
-const yearly = cron({ schedule: "0 9 1 1 *", run: tidy, scope: { actor: "system" } }); // only when a test ticks it
+const yearly = cron({ schedule: "0 9 1 1 *", run: () => tidy, scope: { actor: "system" } }); // only when a test ticks it
 const modules = { shop: { placed, place, email, remind, plan, tidy, yearly } };
 
 interface Guarantees {
