@@ -15,6 +15,6 @@ export const sendDigest = action({
 export const morningDigest = cron({
   schedule: "0 8 * * 1-5",
   timezone: "Europe/Madrid",
-  run: sendDigest,
+  run: () => sendDigest,
   scope: asSystem("orders.morningDigest"),
 });

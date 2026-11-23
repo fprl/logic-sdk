@@ -159,7 +159,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     /**
      * Run a function on a schedule, as `scope` (a cron has no caller). Export it from a module, like listeners, and call
      * `registry.jobs.tick()` every minute (or from your platform's cron trigger):
-     * `cron({ schedule: "0 9 * * 1", run: reports.sendWeekly, scope: system })`.
+     * `cron({ schedule: "0 9 * * 1", run: () => reports.sendWeekly, scope: system })`.
      */
     cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron<C> => {
       const { id, schedule, timezone, run, input, scope, attempts } = def;
@@ -215,8 +215,11 @@ type CronDef<S, F extends Fn> = {
   schedule: string;
   /** IANA name, like `"Europe/Madrid"`. Default UTC. Matched on the wall clock, like Laravel: mind DST at 1 to 3 am. */
   timezone?: string;
-  /** Any query, mutation or action: it runs with its policy, validation and tracing. */
-  run: F;
+  /**
+   * Any query, mutation or action, behind a function: `run: () => reports.sendWeekly`. It runs with its policy, validation
+   * and tracing. Read when the registry is built, like a listener's `event`, so no definer reads an import while files load.
+   */
+  run: () => F;
   /** Who it runs as: a cron has no caller. */
   scope: S;
   /** Tries in total, like a listener's. Default 1. */
@@ -348,7 +351,7 @@ export function describeModules(modules: Record<string, object>) {
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
-      else if (value.kind === "cron") crons.push({ id, module, name, cron: value });
+      else if (value.kind === "cron") crons.push({ id, module, name, cron: value, run: value.run() });
       else functions.push({ id, module, name, kind: value.kind, fn: value });
     }
   }
@@ -432,7 +435,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   for (const c of crons) {
-    if (!ids.has(c.cron.run))
+    if (!ids.has(c.run))
       throw new Error(`[logic-sdk] Cron ${c.id} runs a function that isn't registered. Export it from its module's index.ts.`);
     assertPlain(c.cron.input, `${c.id} input`, "Cron runs travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
   }
