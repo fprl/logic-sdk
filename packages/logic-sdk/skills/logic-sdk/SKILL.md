@@ -13,11 +13,11 @@ Follow this exactly. Every module looks the same.
 src/
   logic.ts       export const { query, mutation, action, event, listener, createRegistry } = init<Config>();   // Config's db: DrizzleDb<Db>, so queries can't write
   policies.ts    Scope type and policies: sync type guards over scope (anyone, member, admin)
-  registry.ts    createRegistry({ modules: { bookings, ... } })
+  registry.ts    createRegistry({ modules: { bookings, ... } })   // only what this init() defined: another's is a type error
   <module>/
     index.ts       export * from each public file below. Other modules import ONLY this.
     queries.ts     query({...})     reads
-    mutations.ts   mutation({...})  writes, one transaction
+    mutations.ts   mutation({...})  writes, one transaction (no nested ctx.db.transaction: its events would escape a rollback)
     actions.ts     action({...})    network calls: payments, email, AI, webhooks out
     events.ts      event({...})     things that happened
     listeners.ts   listener({...})  reacting to OTHER modules' events

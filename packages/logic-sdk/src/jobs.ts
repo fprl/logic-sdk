@@ -121,7 +121,7 @@ export function makeJobs(deps: JobsDeps) {
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
     const loop = (what: string) => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing ${what} (a loop?)`);
-    if (deepEvent) report(loop(deepEvent.name), { source: "(jobs adapter)" });
+    if (deepEvent) report(loop(deepEvent.name), { source: deepEvent.name });
     else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {

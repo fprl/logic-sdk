@@ -766,10 +766,10 @@ test("listener loops stop at maxEventDepth (default 8 hops) and are reported onc
   for (const [maxEventDepth, expected] of [[undefined, 8], [5, 5]] as const) {
     hops.length = 0;
     const errors: string[] = [];
-    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth, onError: (e) => errors.push((e as Error).message) });
+    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth, onError: (e, { source }) => errors.push(`${source}: ${(e as Error).message}`) });
     await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
     expect(hops.length).toEqual(expected);
-    expect(errors).toEqual([expect.stringMatching(new RegExp(`deeper than ${expected}`))]);
+    expect(errors).toEqual([expect.stringMatching(new RegExp(`^l\\.ping: .*deeper than ${expected}`))]);
   }
 });
 

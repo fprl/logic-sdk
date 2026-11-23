@@ -116,7 +116,8 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Om
 } &
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
   ({} extends ConfigOf<C> ? { config?: ConfigOf<C> } : { config: ConfigOf<C> }) &
-  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<unknown, DbOf<C>> }) & { modules: OwnModules<C, Mods> };
+  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<unknown, DbOf<C>> }) &
+  { modules: OwnModules<C, Mods> };
 
 /** Keys `Config` doesn't know are errors, so a typo like `servises` can't be silently ignored. */
 type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };

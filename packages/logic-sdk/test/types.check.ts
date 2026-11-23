@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { z } from "zod";
-import { inProcess, init, type ForListeners, type JobsAdapter, type ReadWrite, type SqlDatabase } from "../src/index.ts";
+import { inProcess, init, type Fn, type ForListeners, type JobsAdapter, type ReadWrite, type SqlDatabase } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
@@ -277,7 +277,10 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   d.query({ handler: async (ctx) => ctx.db.insert });
   d.mutation({ handler: async (ctx) => ctx.db.insert });
   // @ts-expect-error no savepoints: one rolled back would keep the events emitted inside it
-  d.mutation({ handler: async (ctx) => ctx.db.transaction });
+  d.mutation({ handler: async (ctx) => ctx.db.transaction(async () => {}) });
+  // a helper typed with Drizzle's own classes still takes the mutation's transaction
+  const count = async (x: PgliteDatabase) => x.$count;
+  d.mutation({ handler: async (ctx) => count(ctx.db) });
   d.createRegistry({ modules: {}, database: drizzleAdapter({} as PgliteDatabase) });
   // @ts-expect-error the registry still needs the database
   d.createRegistry({ modules: {} });
@@ -402,6 +405,8 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const sweep = shop.cron({ schedule: "0 * * * *", run: refund, scope: { user: null } });
   const ban = admin.mutation({ handler: async (ctx) => ctx.scope.admin });
   admin.createRegistry({ modules: { admin: { ban, placed } } });
+  const annotated: Fn = ban; // a type that lost its init passes: nothing to tell
+  admin.createRegistry({ modules: { admin: { annotated } } });
   // @ts-expect-error a mutation from the shop's init
   admin.createRegistry({ modules: { admin: { ban, refund } } });
   // @ts-expect-error a listener from the shop's init

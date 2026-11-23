@@ -95,8 +95,11 @@ declare const types: unique symbol;
 /** Brands every definer's result, so `createRegistry` finds them among a module's exports. */
 export const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 
+/** Which `init` defined it, as a phantom type: `createRegistry` refuses another init's (`any` when the type was erased, as in a bare `Fn`). */
+type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
+
 /** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
-export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean, C extends Config = never> {
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean, C extends Config = any> {
   readonly [BRAND]: K;
   readonly kind: K;
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
@@ -209,9 +212,8 @@ export interface CallJob {
 export type Job = Delivery | CronJob | CallJob;
 
 /** A function to run on a schedule, as `scope`. Export it from a module, like listeners. */
-export interface Cron<C extends Config = never> {
+export interface Cron<C extends Config = any> extends FromInit<C> {
   readonly [BRAND]: "cron";
-  readonly [types]?: { init: (config: C) => void };
   readonly kind: "cron";
   readonly id?: string;
   readonly schedule: string;
@@ -240,9 +242,8 @@ export interface ListenerEvent<O = unknown> {
   attempt: number;
 }
 
-export interface Listener<O = unknown, C extends Config = never> {
+export interface Listener<O = unknown, C extends Config = any> extends FromInit<C> {
   readonly [BRAND]: "listener";
-  readonly [types]?: { init: (config: C) => void };
   readonly kind: "listener";
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
   readonly id?: string;
@@ -403,7 +404,6 @@ export type Constructor<C extends Config, K extends Kind> = <
 ) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false, C>;
 
 type OtherInit = SetupError<"Defined with another init(), so it would run with this registry's scope, not its own. Define it with the init() this createRegistry came from">;
-type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
 /** `createRegistry`'s modules: a function, listener or cron defined with another `init` is an error, since it would run with this one's scope. Events have no `init`. */
 export type OwnModules<C extends Config, Mods> = {
   [M in keyof Mods]: { [N in keyof Mods[M]]: Mods[M][N] extends FromInit<never> ? (Mods[M][N] extends FromInit<C> ? Mods[M][N] : OtherInit) : Mods[M][N] };

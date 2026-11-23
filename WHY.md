@@ -23,7 +23,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **One transaction per top-level mutation.** Nested mutations join it.
 - ✅ **A caught nested failure can't commit partial writes.** The transaction is doomed. Rails commits in this case, and Ecto aborts like we do.
 - ✅ **Events only leave after commit.** No email for a booking that rolled back.
-- ✅ **Nothing after commit can fail the caller.** Listener, dispatcher, `waitUntil` and `onError` failures are all reported, never thrown.
+- ✅ **Nothing after commit can fail the caller.** Listener, jobs adapter, `waitUntil` and `onError` failures are all reported, never thrown.
 - ✅ **No side effects in a transaction**, at the type level: mutations and queries get no `services`. So you never hold a transaction open across a Stripe call, and mutations are safe to re-run.
 - ✅ **Automatic retry on deadlocks and serialization failures** (40001/40P01), which follows from the rule above.
 
