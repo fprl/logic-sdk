@@ -71,9 +71,9 @@ export interface JobsDeps {
   wrap(call: Call, next: () => Promise<unknown>): Promise<unknown>;
   report(error: unknown, info: FailureInfo): void;
   /** Run a function as `scope`, like `registry.as(scope).run`. `eventDepth`: the chain's hops so far (a scheduled call's `depth`). */
-  runAs(fn: Fn, input: unknown, scope: object, eventDepth?: number): Promise<unknown>;
+  runAs(fn: Fn, input: unknown, scope: object, eventDepth: number | undefined, queued: Job[] | undefined): Promise<unknown>;
   /** The ctx a listener's handler gets, as `scope`, in an event chain `eventDepth` deep. */
-  listenerCtx(scope: object, eventDepth: number, id: string): ActionCtx<any>;
+  listenerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined): ActionCtx<any>;
 }
 
 /**
@@ -156,9 +156,10 @@ export function makeJobs(deps: JobsDeps) {
 
   /**
    * Run one job: a listener's share of an event, a cron's run, or a scheduled call. Reports every failure; throws only when a retry might
-   * help and there are tries left. `fail` keeps a job that failed for good.
+   * help and there are tries left. `fail` keeps a job that failed for good. The jobs it queues land in `queued`, for
+   * `deliver` to run once this one is settled; without it (`registry.jobs.run`, in a consumer) they're delivered at once.
    */
-  async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}): Promise<DeliveryOutcome> {
+  async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}, queued?: Job[]): Promise<DeliveryOutcome> {
     const info = infoOf(job, attempt);
     // read before narrowing: a job queued by another version can have a kind this one doesn't know
     const { id, kind }: { id: string; kind: string } = job;
@@ -197,7 +198,7 @@ export function makeJobs(deps: JobsDeps) {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
       return attemptOnce(async () => {
-        await runAs(c.cron.run, c.cron.input, c.cron.scope);
+        await runAs(c.cron.run, c.cron.input, c.cron.scope, undefined, queued);
         return "done";
       });
     }
@@ -207,7 +208,7 @@ export function makeJobs(deps: JobsDeps) {
       return attemptOnce(async () => {
         const scope = await scopeOf(job, job.scope, attempt);
         if (!scope) return "discarded";
-        await runAs(f.fn, job.input, scope, job.depth);
+        await runAs(f.fn, job.input, scope, job.depth, queued);
         return "done";
       });
     }
@@ -227,16 +228,29 @@ export function makeJobs(deps: JobsDeps) {
           payload = r.value;
         }
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
-        return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
+        return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
       });
       return "done";
     });
   }
 
-  const runner: Runner = {
-    run: runJob,
+  /** A runner whose jobs' own jobs are collected in `queued`. */
+  const runnerInto = (queued: Job[]): Runner => ({
+    run: (job, options) => runJob(job, options, queued),
     report: (e, job, attempt) => report(e, infoOf(job, attempt)),
-  };
+  });
+
+  /**
+   * Deliver jobs, then the jobs those queued, and so on. A job is settled before what it queued starts, as a Laravel
+   * worker deletes a job before it pops the ones it pushed: a crash in a follow-up can't run the job again.
+   */
+  async function deliver(jobs: Job[]) {
+    while (jobs.length) {
+      const batch = jobs;
+      jobs = [];
+      await dispatcher.deliver(batch, runnerInto(jobs)).catch((e) => reportEach(e, batch));
+    }
+  }
 
   /** The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once. */
   function due(at: Date): CronJob[] {
@@ -258,15 +272,20 @@ export function makeJobs(deps: JobsDeps) {
         if (!database) throw new Error("[logic-sdk] Crons through a jobs adapter that stores them (like databaseQueue(database)) need `database`.");
         await database.transaction((tx) => enqueue(tx, jobs));
       }
-      await dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
+      await deliver(jobs);
       return jobs.map((job) => job.cron);
     },
-    sweep: async (options) => (await dispatcher.sweep?.(runner, options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 },
+    async sweep(options) {
+      const queued: Job[] = [];
+      const result = (await dispatcher.sweep?.(runnerInto(queued), options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 };
+      await deliver(queued);
+      return result;
+    },
     async retry(id) {
       if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(database), outbox(database, queue) and pgBoss(boss) do.`);
       return dispatcher.retry(id);
     },
   };
 
-  return { toJobs, runner, jobs, due, checkHold, reportEach };
+  return { toJobs, deliver, jobs, due, checkHold };
 }

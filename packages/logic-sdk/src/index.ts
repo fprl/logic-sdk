@@ -241,6 +241,8 @@ interface Frame {
   /** Passed to this very call: checked before it starts. */
   abortOn?: AbortSignal;
   eventDepth?: number;
+  /** Inside a job: where the jobs it queues wait until it's settled. */
+  queued?: Job[];
   tx?: TxState;
 }
 
@@ -522,7 +524,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toJobs, runner, jobs, due, checkHold, reportEach } = makeJobs({
+  const { toJobs, deliver, jobs, due, checkHold } = makeJobs({
     listeners,
     events,
     crons,
@@ -535,8 +537,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     now,
     wrap,
     report,
-    runAs: (fn, input, scope, eventDepth) => invoke(fn, input, enter({ scope, depth: -1, eventDepth }, undefined), ["query", "mutation", "action"]),
-    listenerCtx: (scope, eventDepth, id) => actionCtx({ scope, depth: 0, eventDepth }, id),
+    runAs: (fn, input, scope, eventDepth, queued) => invoke(fn, input, enter({ scope, depth: -1, eventDepth, queued }, undefined), ["query", "mutation", "action"]),
+    listenerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, depth: 0, eventDepth, queued }, id),
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────
@@ -612,16 +614,17 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       }
 
       // committed. Nothing below may fail the caller.
-      await afterCommit(committed.events, committed.jobs);
+      await afterCommit(committed.events, committed.jobs, frame.queued);
       return committed.out;
     });
   }
 
-  async function afterCommit(emitted: Envelope[], jobs: Job[]) {
+  async function afterCommit(emitted: Envelope[], jobs: Job[], queued: Job[] | undefined) {
     try {
       for (const e of emitted) o.record?.(e);
       if (!jobs.length) return;
-      const delivery = dispatcher.deliver(jobs, runner).catch((e) => reportEach(e, jobs));
+      if (queued) return void queued.push(...jobs); // queued by a job: delivered once that job is settled
+      const delivery = deliver(jobs);
       if (waitUntil) {
         try {
           waitUntil(delivery);
