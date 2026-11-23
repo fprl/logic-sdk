@@ -44,8 +44,8 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
 5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
 6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error. Rechecked 2026-11-23: still compiles, and the handler gets `undefined` for its scope's fields.
-7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them. Rechecked 2026-11-23: a listener whose mutation queues a 500 ms listener returns at 531 ms.
-8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
+7. **Done. A job is settled before the jobs it queued run,** as in Laravel (was: marked done only after them, 531 ms against 14 ms now).
+8. **Done. pg-boss: a crash on the last try reaches `onError`,** through one spare retry the core fails unrun.
 9. **Done ([53](https://github.com/fprl/logic-sdk/pull/53)). Rolling deploys:** a job whose code this process doesn't have uses its attempts, like Laravel.
 10. **Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
 11. **`logic-sdk show` lists every error a function can throw,** nested calls included (kind, code, where from), and `check` fails on a code that isn't a literal. Asked for and agreed on 2026-11-19 with the output designed, never built.

@@ -63,10 +63,10 @@ await work(registry, boss, {
 
 ## What differs from databaseQueue
 
-- **Attempts are stamped at insert,** as pg-boss's `retryLimit` (`attempts - 1`), like every adapter: a deploy that changes `attempts` applies to jobs queued after it. `ctx.event.attempt` is pg-boss's retry count plus one.
+- **Attempts are stamped at insert,** as pg-boss's `retryLimit` (`attempts`, one more than its retries: see the last try below), like every adapter: a deploy that changes `attempts` applies to jobs queued after it. `ctx.event.attempt` is pg-boss's retry count plus one.
 - **A failure with tries left** goes back to pg-boss, which retries it after a backoff (1 to 2 s, then 2 to 4 s, doubling). **Failed for good** (out of tries, or a domain error other than `conflict`) is pg-boss's `deadletter`: no more retries, and the job moves to the queue's `deadLetter` if you set one.
 - **`retry(id)` gives a fresh set of attempts,** like `databaseQueue`, Laravel and Solid Queue; pg-boss's own `retry` gives one more. It only takes failed jobs, and returns `false` otherwise.
-- **A crash on the last try** is failed by pg-boss's supervisor when `expireInSeconds` runs out, without running again and without reaching `onError`: logic-sdk never sees it. On an earlier try, pg-boss retries it.
+- **A crash on the last try** comes back once when `expireInSeconds` runs out, and is failed without running again and reported to `onError`, one backoff later. On an earlier try, pg-boss retries it.
 - **`replace`** deletes the waiting call (pg-boss's `created` state) in your transaction and inserts the new one under its own id, so `retry(id)` with the id `ctx.schedule` returned works. A call that started (`active`, or `retry` after a failure) isn't touched.
 - **No per-key order yet:** jobs run in parallel per queue, as pg-boss's workers fetch them.
 - **At least once,** like every adapter: a listener that charges or emails should keep `ctx.event.id` in a record of its own (two listeners share an event's id) and skip it if it has seen it.

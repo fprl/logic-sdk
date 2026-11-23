@@ -52,12 +52,17 @@ export function pgBossId(id: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** A job as a pg-boss row. Its tries are stamped here, as pg-boss counts them: retries after the first. */
+/**
+ * A job as a pg-boss row. Its tries are stamped here, as pg-boss counts them (retries after the first), plus one that
+ * never runs: when the last try's worker dies, pg-boss's supervisor expires the job without our code, and with a retry
+ * left it comes back to `registry.jobs.run`, which fails it past its attempts and reports it, as Laravel's worker does
+ * at pickup. A last try that throws is `deadletter`, so it never uses the spare.
+ */
 const rowOf = (job: Job, replaceKey?: string): JobInsert<Job> => ({
   id: pgBossId(job.id),
   data: job,
   startAfter: job.runAt,
-  retryLimit: job.attempts - 1,
+  retryLimit: job.attempts,
   retryBackoff: true, // pg-boss retries at once by default; this waits 1 to 2 s, then 2 to 4 s, 4 to 8 s…
   singletonKey: replaceKey,
 });
@@ -156,7 +161,7 @@ export function pgBoss(boss: PgBoss): Dispatcher {
           if (!affected) continue;
           const [failed] = await boss.findJobs<Job>(name, { id: uuid, db });
           if (!failed) continue;
-          // as new: retry count 0, `attempts - 1` retries
+          // as new: retry count 0, and its retries again
           await boss.deleteJob(name, uuid, { db });
           await boss.insert(name, [rowOf(failed.data)], { db });
           return true;
