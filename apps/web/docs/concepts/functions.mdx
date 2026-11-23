@@ -100,3 +100,7 @@ Inside a module, you can call your own functions two ways. They aren't the same:
 
 **Across modules, always `run`**, through the other module's index. Never import its `data.ts` or `schema.ts`: [`logic-sdk check`](/docs/cli#check) fails the build if you do.
 
+**Reads go both ways, writes go one way.** A properties page can `run` a bookings query while creating a booking `run`s a properties query: a query can't write, emit or schedule, so that's not a cycle. Modules running each other's mutations or actions in a circle is a `check` error (`run-cycle`): make one direction an event.
+
+**`ctx.run` nests at most 64 calls deep.** Past that it throws a plain error with the path (`… → a.ping → b.pong → a.ping`), because a function that runs itself, directly or through other modules, never returns. Recurse in a helper that takes `ctx` instead, or make each step separate work: an event, or `ctx.schedule`.
+

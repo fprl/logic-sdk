@@ -109,6 +109,6 @@ test("cancel frees the dates", async () => {
 
 ## Done means
 
-`tsc` passes, `logic-sdk check` passes (module boundaries, run cycles, no network in transactions, `can*` checks sync and used, no `.transaction()` or database client in modules: only `ctx.db`), and the tests pass. Every new mutation has a test for its main rule.
+`tsc` passes, `logic-sdk check` passes (module boundaries, no modules running each other's mutations or actions in a circle (reads may go both ways), no network in transactions, `can*` checks sync and used, no `.transaction()` or database client in modules: only `ctx.db`), and the tests pass. Every new mutation has a test for its main rule.
 
 Before changing a function, look it up: `logic-sdk show bookings.confirm --json` gives its schemas, policy, record checks, what it runs and emits, and who calls it. `logic-sdk graph --module bookings` shows a module's connections.
