@@ -2,7 +2,7 @@
 // `logic-sdk/drizzle/sqlite` instead: the same two functions, plus the table for your schema. Times are whole milliseconds since 1970, on SQLite's clock.
 // Every statement returns rows: better-sqlite3's `all()` refuses one that doesn't, so one `query` fits every driver.
 import { storedJobs, type DatabaseQueueOptions, type JobsSql, type OutboxOptions, type StoredJobs } from "./stored-jobs.ts";
-import type { Dispatcher, SqlDatabase } from "./index.ts";
+import type { JobsAdapter, SqlDatabase } from "./index.ts";
 
 export type { DatabaseQueueOptions, OutboxOptions, StoredJobs } from "./stored-jobs.ts";
 
@@ -71,4 +71,4 @@ const statements: JobsSql = {
 export const databaseQueue = (database: SqlDatabase, options: DatabaseQueueOptions = {}): StoredJobs => storedJobs(statements, database, options);
 
 /** A table in front of another queue: see `outbox` in `logic-sdk/postgres`, which this matches. */
-export const outbox = (database: SqlDatabase, queue: Dispatcher, options: OutboxOptions = {}): StoredJobs => storedJobs(statements, database, options, queue);
+export const outbox = (database: SqlDatabase, queue: JobsAdapter, options: OutboxOptions = {}): StoredJobs => storedJobs(statements, database, options, queue);

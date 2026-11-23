@@ -40,23 +40,23 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 
 1. **Done ([56](https://github.com/fprl/logic-sdk/pull/56)). The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get `jobsSchema`. One scenario list runs with no ORM and through Drizzle, on PGlite, and on real Postgres with postgres.js in CI. Not tested: real Prisma (its shape only), node-postgres in CI.
 2. **Done ([57](https://github.com/fprl/logic-sdk/pull/57)). SQLite, plain (API, approved: `drizzleAdapter(() => drizzle("app.db"), options)`, the adapter opens the connections).** node:sqlite and bun:sqlite on a disk: a connection per transaction, one at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Tested on node:sqlite and bun:sqlite, with Node processes racing and killed on one file. Not tested: better-sqlite3.
-3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
+3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Jobs adapter contract" promises.
 4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
-5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
-6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error. Rechecked 2026-11-23: still compiles, and the handler gets `undefined` for its scope's fields.
+5. **Moved after 0.5.0 by the owner (2026-11-23): live tests on deployed platforms.** They don't change the API.
+6. **Done. A function, listener or cron from another `init` is a type error in `createRegistry`** (it ran with the wrong scope: the shop's policy let an admin scope through, `undefined !== null`).
 7. **Done. A job is settled before the jobs it queued run,** as in Laravel (was: marked done only after them, 531 ms against 14 ms now).
 8. **Done. pg-boss: a crash on the last try reaches `onError`,** through one spare retry the core fails unrun.
 9. **Done ([53](https://github.com/fprl/logic-sdk/pull/53)). Rolling deploys:** a job whose code this process doesn't have uses its attempts, like Laravel.
-10. **Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
-11. **`logic-sdk show` lists every error a function can throw,** nested calls included (kind, code, where from), and `check` fails on a code that isn't a literal. Asked for and agreed on 2026-11-19 with the output designed, never built.
+10. **Done ([59](https://github.com/fprl/logic-sdk/pull/59)). Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
+11. **Moved after 0.5.0 by the owner (2026-11-23): `logic-sdk show` lists every error a function can throw.** It doesn't change the API.
 12. **Done ([46](https://github.com/fprl/logic-sdk/pull/46)). Docs that match what ships:** README, installation, WHY, one table of what each adapter guarantees, dedupe wording (the event id, in a record of that listener's own).
-13. **Tested ([47](https://github.com/fprl/logic-sdk/pull/47), [49](https://github.com/fprl/logic-sdk/pull/49)), except real Worker types. Outbox to consumer, tested as one:** `outbox(database, queue)` through `handleQueue`, the shop's Worker typed with real Worker types and its consumer run in workerd.
+13. **Done ([47](https://github.com/fprl/logic-sdk/pull/47), [49](https://github.com/fprl/logic-sdk/pull/49), [59](https://github.com/fprl/logic-sdk/pull/59): real Worker types). Outbox to consumer, tested as one:** `outbox(database, queue)` through `handleQueue`, the shop's Worker typed with real Worker types and its consumer run in workerd.
 14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
 15. **Try it in a real app,** then release on an explicit go.
 
-Waiting on the owner (each is an API change). From the seam's quality review: the other-ORM example `satisfies SqlDatabase`, so a forgotten `query` errors there. From the audit of 2026-11-22: rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `transactionAttempts` under 1 as listeners' `attempts` do.
+Done, approved by the owner on 2026-11-23: the other-ORM example `satisfies SqlDatabase`; `Dispatcher` and `DeliveryOutcome` renamed `JobsAdapter` and `JobOutcome`; `queueName`, `CALLS_QUEUE`, `internal()` and `Overrides` unexported; `transactionAttempts` under 1 throws; no `transaction` on a Postgres mutation's `ctx.db` (a savepoint that rolled back still sent its events). `backoff` stays: Laravel has it. Open: whether it also takes a number or a list, as Laravel's does (it's a function today).
 
-Agreed as after 0.5.0, not forgotten: pg-boss through `query`, so it takes any ORM (passes on PGlite in Fable's spike, array parameters untested on postgres.js); a `close()` on the SQLite adapter, once someone needs one; actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
+Agreed as after 0.5.0, not forgotten: live tests on deployed Workers (with Queues) and Vercel, run by hand from Actions, as files-sdk does (needs the owner's accounts); `logic-sdk show` listing every error a function can throw, nested calls included, and `check` failing on a code that isn't a literal (output designed 2026-11-19); pg-boss through `query`, so it takes any ORM (passes on PGlite in Fable's spike, array parameters untested on postgres.js); a `close()` on the SQLite adapter, once someone needs one; actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
 ## Next
 
@@ -105,12 +105,12 @@ Agreed as after 0.5.0, not forgotten: pg-boss through `query`, so it takes any O
 
 Skipped: model callbacks and observers (we chose explicit), notifications, caching, broadcasting, soft deletes, a REPL console.
 
-## Dispatcher contract
+## Jobs adapter contract
 
 - `enqueue(tx, deliveries)` inside the transaction, `deliver(deliveries, run)` after commit, `registry.jobs.run(delivery, { attempt })` from any consumer: resolves `done` or `failed` (ack both), throws to retry.
 - **Transactional queues** (pg-boss, Graphile Worker): enqueue in the same transaction. **External queues** (Cloudflare Queues, Vercel Queues, Inngest, SQS): after commit (lossy), or an outbox table plus a relay (durable).
-- Tests use the in-memory dispatcher, so they're the same whatever production uses.
-- Every adapter (database and dispatcher) runs a shipped conformance suite.
+- Tests use the in-memory jobs adapter, so they're the same whatever production uses.
+- Every adapter (database and jobs) runs a shipped conformance suite.
 
 ## Open
 

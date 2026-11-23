@@ -5,7 +5,7 @@ import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, setSystemTime, test } from "bun:test";
 import { z } from "zod";
 import { cronRunsTable, databaseQueue, drizzleAdapter, jobsSchema, jobsTable, outbox, type DrizzleTx } from "../src/drizzle/pg.ts";
-import { init, type Delivery, type Dispatcher, type FailureInfo } from "../src/index.ts";
+import { init, type Delivery, type JobsAdapter, type FailureInfo } from "../src/index.ts";
 
 // The real Postgres engine, in process, with the schema we ship.
 const pg = new PGlite();
@@ -45,7 +45,7 @@ const react = listener({
 
 const rows = () => db.select().from(jobsTable);
 const makeDue = () => db.update(jobsTable).set({ availableAt: sql`now() - interval '1 second'` });
-function setup(jobs: Dispatcher = databaseQueue(database)) {
+function setup(jobs: JobsAdapter = databaseQueue(database)) {
   const registry = createRegistry({ modules: { x: { added, add, react } }, database, jobs: { adapter: jobs, scope: { load: (saved) => saved } }, onError: () => {} });
   return { registry, app: registry.as({ actor: "ana" }) };
 }

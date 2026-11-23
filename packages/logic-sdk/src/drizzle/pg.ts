@@ -10,8 +10,17 @@ interface Transactional {
   execute(query: SQL, mode: "objects"): PromiseLike<Record<string, unknown>[]>;
 }
 
-/** The transaction type of a Drizzle database: `type Tx = DrizzleTx<typeof db>`. */
-export type DrizzleTx<Db extends Transactional> = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Drizzle's transaction for a database. Nested `transaction` calls on it are savepoints. */
+type Transaction<Db extends Transactional> = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * What mutations get: the transaction, still a Drizzle transaction for helpers typed with Drizzle's classes, but with no
+ * `transaction` to call. `type Tx = DrizzleTx<typeof db>`.
+ */
+export type DrizzleTx<Db extends Transactional> = Transaction<Db> & {
+  /** Not in a mutation: a savepoint that rolled back would keep the events and calls queued inside it. */
+  transaction: never;
+};
 
 /** What queries get: the database minus write methods. A type-level guard, not a runtime one. */
 export type DrizzleReader<Db> = Omit<
@@ -41,7 +50,7 @@ export function drizzleAdapter<Db extends Transactional>(
     transactions: "interactive",
     transactionAttempts: options.transactionAttempts,
     transaction: (fn) => db.transaction(fn),
-    nest: (tx) => drizzleAdapter(tx),
+    nest: (tx) => drizzleAdapter(tx), // the test registry's savepoints: `transaction` is there at runtime, hidden from mutations
     retryable: (e) => RETRYABLE.has(sqlState(e) ?? ""),
     query: async (client: Transactional, text, params) => client.execute(toSql(text, params), "objects"),
   };

@@ -11,7 +11,7 @@ import postgres from "postgres";
 import { z } from "zod";
 import { cloudflareQueue, handleQueue } from "../src/cloudflare.ts";
 import { databaseQueue, drizzleAdapter, jobsSchema, outbox, type DrizzleDb } from "../src/drizzle/pg.ts";
-import { inProcess, init, type Dispatcher, type FailureInfo, type Job, type Registry } from "../src/index.ts";
+import { inProcess, init, type JobsAdapter, type FailureInfo, type Job, type Registry } from "../src/index.ts";
 import { pgBoss, work, type PgBossMeta } from "../src/pg-boss.ts";
 
 setDefaultTimeout(30_000); // pg-boss polls in real time
@@ -79,7 +79,7 @@ interface Guarantees {
 
 interface Running {
   db: Db;
-  adapter: Dispatcher;
+  adapter: JobsAdapter;
   /** A consumer, or pg-boss's worker, where the adapter needs one. */
   start?(registry: Registry<Scope>): Promise<void>;
   /** Time passes, and everything runs: delays, backoffs, redeliveries. */
@@ -216,7 +216,7 @@ for (const [database, at] of databases)
       let registry: Registry<Scope, typeof modules>;
       let app: ReturnType<typeof registry.as>;
       const failures: FailureInfo[] = [];
-      const build = (adapter: Dispatcher) =>
+      const build = (adapter: JobsAdapter) =>
         createRegistry({
           modules,
           database: drizzleAdapter(running.db),

@@ -95,8 +95,11 @@ declare const types: unique symbol;
 /** Brands every definer's result, so `createRegistry` finds them among a module's exports. */
 export const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 
+/** Which `init` defined it, as a phantom type: `createRegistry` refuses another init's (`any` when the type was erased, as in a bare `Fn`). */
+type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
+
 /** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
-export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean> {
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends boolean = boolean, C extends Config = any> {
   readonly [BRAND]: K;
   readonly kind: K;
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
@@ -113,7 +116,7 @@ export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends b
   readonly expose?: true;
   readonly handler: (ctx: never, input: never) => Promise<unknown>;
   /** Phantom types, never set at runtime. */
-  readonly [types]?: { input: I; output: O; exposed: E };
+  readonly [types]?: { input: I; output: O; exposed: E; init: (config: C) => void };
 }
 /** The exposed functions of one module: what adapters publish. */
 export type ExposedOf<T> = { [N in keyof T as T[N] extends Fn<Kind, unknown, unknown, true> ? N : never]: T[N] };
@@ -136,7 +139,7 @@ export interface EventDef<I = unknown, O = I> {
 }
 
 /**
- * What a dispatcher stores and delivers. Fully JSON: `payload` is what was emitted (validated),
+ * What a jobs adapter stores and delivers. Fully JSON: `payload` is what was emitted (validated),
  * and listeners get it parsed again by the event's payload schema at delivery.
  */
 export interface Envelope<P = unknown, S = object> {
@@ -209,7 +212,7 @@ export interface CallJob {
 export type Job = Delivery | CronJob | CallJob;
 
 /** A function to run on a schedule, as `scope`. Export it from a module, like listeners. */
-export interface Cron {
+export interface Cron<C extends Config = any> extends FromInit<C> {
   readonly [BRAND]: "cron";
   readonly kind: "cron";
   readonly id?: string;
@@ -227,7 +230,7 @@ export interface Cron {
  * It's over, so acknowledge it; it's been reported.
  * `discarded`: `jobs.scope.load` returned null (who it ran as is gone). Acknowledge it too; it's been reported.
  */
-export type DeliveryOutcome = "done" | "failed" | "discarded";
+export type JobOutcome = "done" | "failed" | "discarded";
 
 /** The event a listener is handling. No scope here: `ctx.scope` is the one it runs as. */
 export interface ListenerEvent<O = unknown> {
@@ -239,7 +242,7 @@ export interface ListenerEvent<O = unknown> {
   attempt: number;
 }
 
-export interface Listener<O = unknown> {
+export interface Listener<O = unknown, C extends Config = any> extends FromInit<C> {
   readonly [BRAND]: "listener";
   readonly kind: "listener";
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
@@ -398,10 +401,16 @@ export type Constructor<C extends Config, K extends Kind> = <
   X extends true | undefined = undefined,
 >(
   def: Def<C, K, IS, OS, R, P> & Exposure<C, OS, X>,
-) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false>;
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [X] extends [true] ? true : false, C>;
+
+type OtherInit = SetupError<"Defined with another init(), so it would run with this registry's scope, not its own. Define it with the init() this createRegistry came from">;
+/** `createRegistry`'s modules: a function, listener or cron defined with another `init` is an error, since it would run with this one's scope. Events have no `init`. */
+export type OwnModules<C extends Config, Mods> = {
+  [M in keyof Mods]: { [N in keyof Mods[M]]: Mods[M][N] extends FromInit<never> ? (Mods[M][N] extends FromInit<C> ? Mods[M][N] : OtherInit) : Mods[M][N] };
+};
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Adapters and dispatcher seams
+ * Database and jobs adapters
  * ──────────────────────────────────────────────────────────────────────────── */
 
 export interface DatabaseAdapter<Db = unknown, Tx = Db> {
@@ -431,7 +440,7 @@ export interface SqlDatabase<Db = any, Tx = any> extends DatabaseAdapter<Db, Tx>
 }
 
 /** Runs one job: resolves when it's done or failed for good (acknowledge it), throws when a retry might help. */
-export type RunJob = (job: Job, options?: RunJobOptions) => Promise<DeliveryOutcome>;
+export type RunJob = (job: Job, options?: RunJobOptions) => Promise<JobOutcome>;
 
 export interface RunJobOptions {
   /** 1 on the first try; the adapter counts. */
@@ -458,7 +467,7 @@ export interface Runner {
   report(error: unknown, job: Job, attempt?: number): void;
 }
 
-export interface Dispatcher {
+export interface JobsAdapter {
   /**
    * It can hold a job until its `runAt` (a listener's `delay`, `ctx.schedule`): `true`, or for at most `max` seconds.
    * Without it (`inProcess()`), `createRegistry` refuses delayed listeners and `ctx.schedule` throws, rather than run
@@ -477,9 +486,9 @@ export interface Dispatcher {
   enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
   deliver(jobs: Job[], runner: Runner): Promise<void>;
-  /** Run what's due (retries, deliveries whose runner crashed). Only dispatchers that store deliveries have it. */
+  /** Run what's due (retries, deliveries whose runner crashed). Only adapters that store deliveries have it. */
   sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
-  /** Put a failed job back in line. `false` when there's no failed job with that id. Only dispatchers that store them. */
+  /** Put a failed job back in line. `false` when there's no failed job with that id. Only adapters that store them. */
   retry?(id: string): Promise<boolean>;
   /**
    * Keep a job that failed for good after it left the adapter: `registry.jobs.run` calls it from a queue consumer, so
@@ -493,9 +502,9 @@ export interface Dispatcher {
  * itself, like Laravel's `JobFailed` and Oban's exception telemetry.
  */
 export interface FailureInfo {
-  /** The listener, cron or scheduled function that failed, or the part of the registry (`"(dispatcher)"`). */
+  /** The listener, cron or scheduled function that failed, or the part of the registry (`"(jobs adapter)"`). */
   source: string;
-  /** The job that failed, or that the adapter couldn't take (`"(dispatcher)"`). */
+  /** The job that failed, or that the adapter couldn't take (`"(jobs adapter)"`). */
   job?: Job;
   attempt?: number;
   /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
@@ -517,7 +526,7 @@ export interface JobScope<S = object, T = any> {
 /** Marks `inProcess()` for TypeScript: the one adapter that keeps no jobs, so needs no `jobs.scope`. */
 export const RUNS_NOW: unique symbol = Symbol.for("logic-sdk.runsNow");
 /** What `inProcess()` returns. */
-export interface InProcess extends Dispatcher {
+export interface InProcess extends JobsAdapter {
   readonly [RUNS_NOW]: true;
 }
 
@@ -534,7 +543,7 @@ export type JobsOptions<S = object, T = any> =
     }
   | {
       /** An adapter that keeps jobs to run later, like `databaseQueue(database)`. */
-      adapter?: Dispatcher;
+      adapter?: JobsAdapter;
       /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
       scope: JobScope<S, T>;
     };
@@ -569,7 +578,7 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
    * still running at a restart is lost.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
-  /** Failures after commit land here (listeners, dispatcher). They never fail the caller. */
+  /** Failures after commit land here (listeners, the jobs adapter). They never fail the caller. */
   onError?: (error: unknown, info: FailureInfo) => void;
   now?: () => Date;
   /**
@@ -604,7 +613,7 @@ export interface Overrides {
   services?: object;
   /** Merged over the registry's config, section by section. */
   config?: unknown;
-  adapter?: Dispatcher;
+  adapter?: JobsAdapter;
   now?: () => Date;
   stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
   record?: (envelope: Envelope) => void;
@@ -631,7 +640,7 @@ export interface Jobs {
    * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
    * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (`databaseQueue` and `outbox` keep it).
    */
-  run(job: Job, options?: RunJobOptions): Promise<DeliveryOutcome>;
+  run(job: Job, options?: RunJobOptions): Promise<JobOutcome>;
   /**
    * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
    * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run

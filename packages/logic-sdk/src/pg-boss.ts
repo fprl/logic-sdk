@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { fromDrizzle, type Db, type DrizzleTransactionLike, type JobInsert, type JobResult, type PgBoss, type Queue, type WorkOptions } from "pg-boss";
-import { replaceKeyOf, type DatabaseAdapter, type Dispatcher, type ForListeners, type Job, type Jobs, type Registry } from "./index.ts";
+import { replaceKeyOf, type DatabaseAdapter, type ForListeners, type Job, type Jobs, type JobsAdapter, type Registry } from "./index.ts";
 import { startTicking } from "./node.ts";
 
 /** One queue's tuning: `meta.pgBoss`, and `work()`'s `calls` and `crons`. */
@@ -24,9 +24,9 @@ export type PgBossMeta = ForListeners<{ pgBoss?: PgBossTuning }>;
 /** Our queues' names start with it, so they can't collide with your own pg-boss queues, and `work()` can find ours. */
 const PREFIX = "logic-sdk.";
 /** A listener's or cron's queue: `logic-sdk.notifications.send`. */
-export const queueName = (id: string) => `${PREFIX}${id}`;
+const queueName = (id: string) => `${PREFIX}${id}`;
 /** Where scheduled calls (`ctx.schedule`) wait: one queue for all of them, so no function needs a worker of its own. */
-export const CALLS_QUEUE = `${PREFIX}calls`; // ids always have a dot, so no listener's queue is this one
+const CALLS_QUEUE = `${PREFIX}calls`; // ids always have a dot, so no listener's queue is this one
 
 /** A job's queue: its listener's or its cron's, or the shared one for scheduled calls. */
 const queueOf = (job: Job) => (job.kind === "delivery" ? queueName(job.listener) : job.kind === "cron" ? queueName(job.cron) : CALLS_QUEUE);
@@ -81,7 +81,7 @@ const inTx = (tx: unknown): Db => fromDrizzle(tx as DrizzleTransactionLike, sql)
  * const registry = createRegistry({ modules, database: drizzleAdapter(db), jobs: { adapter: pgBoss(boss), scope: { store, load } } });
  * ```
  */
-export function pgBoss(boss: PgBoss): Dispatcher {
+export function pgBoss(boss: PgBoss): JobsAdapter {
   let database: DatabaseAdapter<unknown, unknown> | undefined;
   const queueOptions = new Map<string, PgBossTuning["queue"]>();
 

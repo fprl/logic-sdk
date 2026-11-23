@@ -2,7 +2,7 @@
 "logic-sdk": minor
 ---
 
-The delivery contract for durable events. Each committed event becomes one `Delivery` per listener (`{ kind: "delivery", id, listener, envelope }`, `id` being `<listener id>@<event id>`), so a failing listener retries alone. Dispatchers get `enqueue(tx, deliveries)` and `deliver(deliveries, run)`; `inProcess()` is unchanged for you.
+The delivery contract for durable events. Each committed event becomes one `Delivery` per listener (`{ kind: "delivery", id, listener, envelope }`, `id` being `<listener id>@<event id>`), so a failing listener retries alone. Jobs adapters (`JobsAdapter`) get `enqueue(tx, deliveries)` and `deliver(deliveries, run)`; `inProcess()` is unchanged for you.
 
 `registry.dispatch(envelope)` is now `registry.jobs.run(delivery, { attempt })`. It resolves `"done"`, or `"failed"` when retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema), and throws when a retry might help. `onError(error, info)` gets `info.source` (the listener, cron or function that failed) and `info.job` (the job itself), with the attempt.
 

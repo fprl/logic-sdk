@@ -29,6 +29,7 @@ import type {
   MutationCtx,
   Out,
   Overrides,
+  OwnModules,
   QueryCtx,
   RegisteredCron,
   RegisteredEvent,
@@ -54,8 +55,6 @@ export type {
   DatabaseAdapter,
   DeepPartial,
   Delivery,
-  DeliveryOutcome,
-  Dispatcher,
   Envelope,
   Errors,
   EventDef,
@@ -71,6 +70,8 @@ export type {
   In,
   InProcess,
   Job,
+  JobOutcome,
+  JobsAdapter,
   JobScope,
   Jobs,
   JobsOptions,
@@ -80,7 +81,6 @@ export type {
   ListenerEvent,
   MutationCtx,
   Out,
-  Overrides,
   Policy,
   QueryCtx,
   ReadWrite,
@@ -116,7 +116,8 @@ type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Om
 } &
   ({} extends ServicesOf<C> ? { services?: ServicesOf<C> } : { services: ServicesOf<C> }) &
   ({} extends ConfigOf<C> ? { config?: ConfigOf<C> } : { config: ConfigOf<C> }) &
-  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<unknown, DbOf<C>> });
+  ([DbOf<C>] extends [never] ? { database?: undefined } : { database: DatabaseAdapter<unknown, DbOf<C>> }) &
+  { modules: OwnModules<C, Mods> };
 
 /** Keys `Config` doesn't know are errors, so a typo like `servises` can't be silently ignored. */
 type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
@@ -160,7 +161,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
      * `registry.jobs.tick()` every minute (or from your platform's cron trigger):
      * `cron({ schedule: "0 9 * * 1", run: reports.sendWeekly, scope: system })`.
      */
-    cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron => {
+    cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron<C> => {
       const { id, schedule, timezone, run, input, scope, attempts } = def;
       parseSchedule(schedule);
       if (timezone !== undefined) assertTimeZone(timezone);
@@ -188,7 +189,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       delay?: number;
       meta?: ListenerMetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
-    }): Listener<O> => {
+    }): Listener<O, C> => {
       const { id, event, attempts, delay, meta, handler } = def;
       checkAttempts("listener", attempts);
       if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
@@ -361,7 +362,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const database = o.database ?? options.database;
   const services = o.services ?? options.services ?? {};
   const config = freezeConfig(mergeConfig(options.config ?? {}, o.config)) as Frozen<Cf>;
-  const dispatcher = o.adapter ?? options.jobs?.adapter ?? inProcess();
+  const jobsAdapter = o.adapter ?? options.jobs?.adapter ?? inProcess();
   const jobScope = options.jobs?.scope;
   if (jobScope?.store && !jobScope.load) throw new Error("[logic-sdk] jobs.scope has store but no load. Jobs run as a scope, so rebuild it from what store saved.");
   // a job any adapter but inProcess() keeps runs as a scope saved earlier: rebuild it, or its roles are the ones from
@@ -375,7 +376,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
   const maxEventDepth = options.maxEventDepth ?? 8;
-  const transactionAttempts = Math.max(1, options.database?.transactionAttempts ?? 3); // the app's, so a test's nested adapter keeps it
+  checkAttempts("database transaction", options.database?.transactionAttempts);
+  const transactionAttempts = options.database?.transactionAttempts ?? 3; // the app's, so a test's nested adapter keeps it
   const waitUntil = "waitUntil" in o ? o.waitUntil : options.waitUntil; // tests turn it off: listeners finish inside the test
   const reportRaw =
     o.onError ?? options.onError ?? ((e, info) => console.error(`[logic-sdk] ${info.source} failed`, e));
@@ -395,7 +397,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   for (const l of listeners)
     if (!ids.has(l.event))
       throw new Error(`[logic-sdk] Listener ${l.id} listens to an event that isn't registered in any module.`);
-  dispatcher.check?.({ listeners, database });
+  jobsAdapter.check?.({ listeners, database });
 
   const idOf = (x: object) => {
     const id = ids.get(x);
@@ -473,7 +475,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         checkAttempts(`ctx.schedule(${fnId})`, attempts);
         if (replace !== undefined) {
           if (!replace) throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replace must be a non-empty key.`);
-          if (!dispatcher.replaces)
+          if (!jobsAdapter.replaces)
             throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but your jobs adapter can't replace one it already has. Use databaseQueue(database), or outbox(database, queue) in front of your queue.`);
         }
         // due now (no delay, or an `at` already past): runs after commit like a listener, no holding needed
@@ -530,7 +532,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     crons,
     functions,
     idOf,
-    dispatcher,
+    jobsAdapter,
     database,
     jobScope,
     maxEventDepth,
@@ -599,7 +601,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
             await Promise.all(tx.pending);
             if (tx.doomed) throw tx.reason;
             const jobs = toJobs(tx.events, tx.calls);
-            if (jobs.length) await dispatcher.enqueue?.(txDb, jobs);
+            if (jobs.length) await jobsAdapter.enqueue?.(txDb, jobs);
             return { out, events: tx.events, jobs };
           });
           break;
@@ -658,6 +660,3 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     },
   };
 }
-
-/** @internal */
-export const internal = <S extends object, Mods extends Record<string, object>, Cf>(registry: Registry<S, Mods, Cf>) => registry[INTERNAL];

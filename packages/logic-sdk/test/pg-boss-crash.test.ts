@@ -5,7 +5,7 @@ import { fromPglite, PgBoss } from "pg-boss";
 import { z } from "zod";
 import { drizzleAdapter } from "../src/drizzle/pg.ts";
 import { init, type FailureInfo } from "../src/index.ts";
-import { pgBoss, queueName, work, type PgBossMeta } from "../src/pg-boss.ts";
+import { pgBoss, work, type PgBossMeta } from "../src/pg-boss.ts";
 
 setDefaultTimeout(30_000);
 
@@ -32,7 +32,7 @@ test("a worker that dies on a job's last try: pg-boss expires it, and the failur
     jobs: { adapter: pgBoss(boss), scope: { load: (s) => s } },
     onError: (_e, info) => failures.push(info),
   });
-  const queue = queueName("x.react");
+  const queue = "logic-sdk.x.react";
   await boss.createQueue(queue, { expireInSeconds: 1, retryDelayMax: 1, retryBackoff: true });
   await registry.as({}).run(add);
 

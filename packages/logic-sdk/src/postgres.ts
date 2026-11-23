@@ -1,7 +1,7 @@
 // The jobs table on Postgres, in SQL. With Drizzle, import from `logic-sdk/drizzle/pg` instead: the same two
 // functions, plus the table for your schema.
 import { storedJobs, type DatabaseQueueOptions, type JobsSql, type OutboxOptions, type StoredJobs } from "./stored-jobs.ts";
-import type { Dispatcher, SqlDatabase } from "./index.ts";
+import type { JobsAdapter, SqlDatabase } from "./index.ts";
 
 export type { DatabaseQueueOptions, OutboxOptions, StoredJobs } from "./stored-jobs.ts";
 
@@ -87,4 +87,4 @@ export const databaseQueue = (database: SqlDatabase, options: DatabaseQueueOptio
  * jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, load } }
  * ```
  */
-export const outbox = (database: SqlDatabase, queue: Dispatcher, options: OutboxOptions = {}): StoredJobs => storedJobs(statements, database, options, queue);
+export const outbox = (database: SqlDatabase, queue: JobsAdapter, options: OutboxOptions = {}): StoredJobs => storedJobs(statements, database, options, queue);

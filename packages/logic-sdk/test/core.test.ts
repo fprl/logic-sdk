@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  createRegistry, init, inProcess, isDomainError, type Call, type Delivery, type Dispatcher, type Job, type DomainError, type Envelope, type FailureInfo,
+  createRegistry, init, inProcess, isDomainError, type Call, type Delivery, type JobsAdapter, type Job, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
 import { expect, test } from "bun:test";
@@ -243,7 +243,7 @@ test("an adapter that can't take the jobs: each is reported with the job itself,
     jobs: { adapter: { deliver: async () => { throw new Error("queue down"); } }, scope: { load: (saved) => saved } },
   });
   expect(await app.run(items.add, { name: "q" })).toBeDefined();
-  expect(reported).toEqual([expect.objectContaining({ source: "(dispatcher)", job: expect.objectContaining({ kind: "delivery", listener: "log.onAdded" }) })]);
+  expect(reported).toEqual([expect.objectContaining({ source: "(jobs adapter)", job: expect.objectContaining({ kind: "delivery", listener: "log.onAdded" }) })]);
 });
 
 test("waitUntil, set once on the registry: run returns after commit, listeners finish later", async () => {
@@ -262,7 +262,7 @@ test("wrap sees every call with depth", async () => {
   expect(calls).toEqual(["0:mutation:items.addTwo", "1:mutation:items.add", "1:mutation:items.add", "0:listener:log.onAdded", "0:listener:log.onAdded"]);
 });
 
-test("custom dispatcher: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
+test("custom jobs adapter: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
   const seen: string[] = [];
   const { app } = setup({
     jobs: { adapter: {
@@ -609,7 +609,7 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   const later = listener({ event: () => happened, delay: 90, async handler() { ran.push("later"); } });
   const now = listener({ event: () => happened, async handler() { ran.push("now"); } });
   const jobs: Delivery[] = [];
-  const make = (adapter?: Dispatcher) =>
+  const make = (adapter?: JobsAdapter) =>
     createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: memoryDatabase(), now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter, scope: { load: (saved) => saved } } });
   await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
@@ -622,7 +622,7 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
 test("adapter hooks: check sees the listeners and database at createRegistry; fail keeps what a consumer failed", async () => {
   const seen: string[] = [];
   const failed: string[] = [];
-  const adapter: Dispatcher = {
+  const adapter: JobsAdapter = {
     check: ({ listeners, database }) => void seen.push(...listeners.map((l) => l.id), database ? "db" : "no db"),
     deliver: async () => {},
     fail: async (job, error) => void failed.push(`${job.id}: ${(error as Error).message}`),
@@ -740,6 +740,10 @@ test("retries stop after `transactionAttempts`, and errors that aren't retryable
   const r2 = createRegistry<Scope>({ modules: { items, log }, database: { ...alwaysDeadlocks, retryable: () => false }, services: { log: [] } });
   await expect(r2.as({ actor: "a", locale: "es" }).run(add, { name: "x" })).rejects.toThrow(/deadlock/);
   expect(calls).toEqual(1);
+
+  expect(() => createRegistry<Scope>({ modules: {}, database: { ...db, transactionAttempts: 0 } })).toThrow(
+    /database transaction attempts must be a whole number of tries, 1 or more \(got 0\)/,
+  );
 });
 
 test("a test registry keeps the app's transactionAttempts, whatever its adapter's nest returns", async () => {
@@ -762,10 +766,10 @@ test("listener loops stop at maxEventDepth (default 8 hops) and are reported onc
   for (const [maxEventDepth, expected] of [[undefined, 8], [5, 5]] as const) {
     hops.length = 0;
     const errors: string[] = [];
-    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth, onError: (e) => errors.push((e as Error).message) });
+    const d = createRegistry<Scope>({ modules: { l: { ping, bump, loop } }, database: memoryDatabase(), maxEventDepth, onError: (e, { source }) => errors.push(`${source}: ${(e as Error).message}`) });
     await d.as({ actor: "a", locale: "es" }).run(bump, { n: 0 });
     expect(hops.length).toEqual(expected);
-    expect(errors).toEqual([expect.stringMatching(new RegExp(`deeper than ${expected}`))]);
+    expect(errors).toEqual([expect.stringMatching(new RegExp(`^l\\.ping: .*deeper than ${expected}`))]);
   }
 });
 

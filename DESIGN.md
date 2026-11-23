@@ -494,6 +494,20 @@ So: lanes, commit timing and test mode are common; retries never are. Ours:
 
 **What would change it:** a `job()` definer (then `jobs` would name a definition and the infrastructure).
 
+### The last API changes before 0.5.0
+
+Approved by the owner on 2026-11-23, each checked with Fable first.
+
+- **A function, listener or cron from another `init` is a type error in `createRegistry`.** It used to compile and run with the registry's scope: an admin scope (`{ admin }`) passed the shop's `signedIn` policy (`s.user !== null`, and `undefined !== null`), and the refund ran. Each one carries its `init`'s config as a phantom type, `init: (config: C) => void`, and `createRegistry`'s `modules` maps anything that doesn't fit this registry's config to a `SetupError` naming the fix. The check is contravariant: a function passes when this registry's config fits the one it was written for (a scope with more fields), which is when it runs correctly. Events carry no config: they hold no scope, so modules may share them. Cost: +4.6% type instantiations on a synthetic app, +0.2 to 0.7% on the examples. Considered: a runtime token per `init`. Rejected: a module loaded twice (two copies of the package, a test runner's module cache) would fail when nothing is wrong (inference).
+  - **Not caught:** a cast (`as any`), a type that lost its `init` (a bare `Fn`, a module typed `Record<string, object>`, so the default is `any` rather than an error that would wrongly say "another init"), a union with `undefined`, an app compiled without `strictFunctionTypes`, and the top-level `createRegistry` export, which has no config to compare.
+  - **Costs:** a generic wrapper around `createRegistry` (`function reg<Ms>(modules: Ms)`) no longer compiles, since the check can't be resolved on a type parameter. Nothing in the repo or the docs does that.
+  - **What would change it:** a measured type cost that slows editors on real apps, or apps that need generic wrappers.
+- **A Postgres mutation's `ctx.db` has no `transaction` to call.** A nested transaction is a savepoint the registry doesn't track, so one that rolled back still sent the events and scheduled calls made inside it. SQLite's never had it. Types only: a runtime guard broke the test registry, whose transactions are savepoints of the test's. It's `transaction: never` on Drizzle's transaction, not an `Omit`: an `Omit` drops the class's own members, so helpers typed with Drizzle's classes (`PgliteDatabase`) would stop taking `ctx.db`. SQLite's `DrizzleTx` is still an `Omit` and has that limit. **What would change it:** tracking savepoints, so events inside one roll back with it.
+- **`JobsAdapter` and `JobOutcome`,** were `Dispatcher` and `DeliveryOutcome`: the words the docs and the `jobs: { adapter }` option use, and an outcome belongs to any job, not only a delivery. `onError`'s `source` for the adapter's own failures is `"(jobs adapter)"`.
+- **Unexported:** pg-boss's `queueName` and `CALLS_QUEUE` (queue names are pg-boss's business, tests use the strings), `internal()` and `Overrides` (the test helper reads `registry[INTERNAL]` itself).
+- **`transactionAttempts` under 1 throws** at `createRegistry`, like listeners' `attempts`. It was clamped to 1, so a typo silently meant "no retries".
+- **`backoff` stays a function of the attempt.** Laravel's `$backoff` is a number, a list per attempt, or a method; a function covers all three (`() => 10`, `(n) => [1, 5, 10][n - 1] ?? 10`). Open, for the owner: also taking a number or a list. **What would change it:** the owner wanting Laravel's shorthands.
+
 ### Before durable events ship
 
 From Fable's review, each with what the mature stacks already learned. **Landed with the delivery contract:** 1, 2 and 6, plus the stale-payload half of 5 (a payload that fails its schema at delivery is `failed`, not retried) and the plain-JSON check from 4. **With the first durable transport:** 3, `store`/`load` from 4, and the failed state from 5.
