@@ -15,6 +15,7 @@ import {
   type QueryCtx as Query,
 } from "logic-sdk";
 import type { DrizzleDb } from "logic-sdk/drizzle/pg";
+import type { db } from "./db"; // its type only: modules reach the database through ctx.db
 import type { Scope } from "./policies";
 
 type Db = typeof db;

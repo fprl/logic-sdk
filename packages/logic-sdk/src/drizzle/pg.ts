@@ -14,13 +14,11 @@ interface Transactional {
 type Transaction<Db extends Transactional> = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
- * What mutations get: the transaction, still a Drizzle transaction for helpers typed with Drizzle's classes, but with no
- * `transaction` to call. `type Tx = DrizzleTx<typeof db>`.
+ * What mutations get: the transaction minus `transaction`, since a savepoint that rolled back would still send the
+ * events and calls made inside it. Type helpers with it: `type Tx = DrizzleTx<typeof db>`. A type-level guard;
+ * `logic-sdk check` catches the rest.
  */
-export type DrizzleTx<Db extends Transactional> = Transaction<Db> & {
-  /** Not in a mutation: a savepoint that rolled back would keep the events and calls queued inside it. */
-  transaction: never;
-};
+export type DrizzleTx<Db extends Transactional> = Omit<Transaction<Db>, "transaction">;
 
 /** What queries get: the database minus write methods. A type-level guard, not a runtime one. */
 export type DrizzleReader<Db> = Omit<
@@ -44,13 +42,13 @@ export type DrizzleAdapterOptions = Pick<DatabaseAdapter, "transactionAttempts">
 export function drizzleAdapter<Db extends Transactional>(
   db: Db,
   options: DrizzleAdapterOptions = {},
-): SqlDatabase<Db, DrizzleTx<Db>> {
+): SqlDatabase<Db, Transaction<Db>> {
   return {
     db,
     transactions: "interactive",
     transactionAttempts: options.transactionAttempts,
     transaction: (fn) => db.transaction(fn),
-    nest: (tx) => drizzleAdapter(tx), // the test registry's savepoints: `transaction` is there at runtime, hidden from mutations
+    nest: (tx) => drizzleAdapter(tx), // the test registry's savepoints
     retryable: (e) => RETRYABLE.has(sqlState(e) ?? ""),
     query: async (client: Transactional, text, params) => client.execute(toSql(text, params), "objects"),
   };

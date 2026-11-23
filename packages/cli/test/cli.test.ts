@@ -296,3 +296,17 @@ test("crons: list shows the schedule and what it runs; show too; the function li
   expect(cli(shop, "graph").out).toMatch(/morningDigest\s+cron\s+at 0 8 \* \* 1-5/);
   expect(cli(shop, "graph", "--format", "json").json().edges).toContainEqual({ from: "orders.morningDigest", to: "orders.sendDigest", type: "runs" });
 });
+
+test("check: no .transaction() in modules, and no database client, directly or through an import", () => {
+  const problems: { code: string; at: { file: string; line: number }; message: string; fix: string }[] = cli(configApp, "check", "--json").json().problems;
+  const where = (code: string) => problems.filter((p) => p.code === code).map((p) => `${p.at.file}:${p.at.line}`);
+  expect(where("nested-transaction")).toEqual([
+    "src/stock/writes.ts:6", // db.transaction(...)
+    "src/stock/writes.ts:2", // import { attempt } from "../lib/savepoint", which calls db.transaction
+  ]);
+  expect(where("db-client-in-module")).toEqual(["src/stock/writes.ts:3"]); // import { connect } from "../db"; the type-only import on line 1 is fine
+  const client = problems.find((p) => p.code === "db-client-in-module")!;
+  expect(client.message).toContain('drizzle() from "drizzle-orm/node-postgres" at src/db.ts:3');
+  expect(client.fix).toContain("ctx.db");
+  expect(problems.find((p) => p.code === "nested-transaction")!.fix).toContain("ctx.run another mutation");
+});

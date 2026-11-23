@@ -90,6 +90,8 @@ $ logic-sdk check
 | `async-can` | error | A `can*` record check that's async or awaited. A Promise is never falsy, so `if (!canX(...))` would never deny |
 | `unused-can` | error | A `can*` call whose result is thrown away |
 | `env-in-module` | error | Module code reading `process.env`, `import.meta.env`, `Bun.env` or Cloudflare's `env`, directly or through an app file it imports. Read [`ctx.config`](/docs/concepts/config) instead |
+| `nested-transaction` | error | A `.transaction()` call in module code, directly or through an app file it imports. In a mutation it's a savepoint the registry doesn't track, so a rollback inside it would still send its events. The types catch most; this catches casts and plain JavaScript |
+| `db-client-in-module` | error | Module code creating a database client (`drizzle(...)`), directly or through an app file it imports. Writes through it are outside the mutation's transaction. Use `ctx.db`; for the type only, `import type` |
 | `wall-clock` | warning | `new Date()` or `Date.now()` instead of `ctx.now()` |
 | `dynamic-run` | warning | A `run` whose target the CLI can't name, so cycles through it aren't checked |
 | `event-never-emitted` | warning | A listener for an event no function emits |

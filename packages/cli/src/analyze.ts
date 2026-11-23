@@ -43,12 +43,12 @@ export interface CanIssue {
   how: "declared" | "awaited" | "discarded";
   at: Loc;
 }
-/** A module file that reads the environment, itself or through a file it imports (`../lib/urls.ts` → `env.ts`). */
-export interface EnvRead {
+/** Something a module file does, itself or through a file it imports (`../lib/urls.ts` → `env.ts`): reading env, say. */
+export interface Reached {
   module: string;
-  what: string; // "process.env", "import.meta.env", `env from "cloudflare:workers"`
-  at: Loc; // in the module file: the read, or the import that leads to it
-  via?: Loc; // where the read actually is, when it's in an imported file
+  what: string; // "process.env", ".transaction()", `drizzle() from "drizzle-orm/pglite"`
+  at: Loc; // in the module file: the thing itself, or the import that leads to it
+  via?: Loc; // where it actually is, when it's in an imported file
 }
 export interface Source {
   /** `folder: false`: the module is a single file (fine for small modules). */
@@ -56,10 +56,16 @@ export interface Source {
   fns: Map<string, SourceFn>;
   imports: SourceImport[];
   cans: CanIssue[];
-  env: EnvRead[];
+  env: Reached[];
+  /** `x.transaction(...)` calls: a savepoint inside a mutation, which events made in it would escape. */
+  transactions: Reached[];
+  /** Database clients created (`drizzle(...)`): a module using one writes outside the mutation's transaction. */
+  dbClients: Reached[];
 }
 
 type Node = { type: string; start: number; [key: string]: any };
+/** One thing found in one file, before it's tied to a module. */
+type Hit = Pick<Reached, "what" | "at">;
 const WRAPPERS = new Set(["TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "ParenthesizedExpression"]);
 const unwrap = (n: Node | undefined): Node | undefined => (n && WRAPPERS.has(n.type) ? unwrap(n.expression) : n);
 const isFunction = (n: Node | undefined): n is Node =>
@@ -190,8 +196,8 @@ const ctxIn = (fns: Node[], param: number | "any") => {
 };
 
 const ENV_PACKAGES = new Set(["process", "node:process"]);
-const directEnv = (program: Node, loc: (o: number) => Loc): { what: string; at: Loc }[] => {
-  const found: { what: string; at: Loc }[] = [];
+const directEnv = (program: Node, loc: (o: number) => Loc): Hit[] => {
+  const found: Hit[] = [];
   const cf = new Set<string>(); // `import * as cf from "cloudflare:workers"`: cf.env counts
   const processes = new Set(["process"]); // `import proc from "node:process"`: proc.env counts
   for (const s of program.body) {
@@ -224,6 +230,34 @@ const directEnv = (program: Node, loc: (o: number) => Loc): { what: string; at: 
     if (n.type === "VariableDeclarator" && n.id?.type === "ObjectPattern" && isProcess(n.init) && n.id.properties.some((p: Node) => p.key?.name === "env"))
       found.push({ what: "process.env", at: loc(n.start) });
   });
+  return found;
+};
+
+/** `x.transaction(...)`, on anything: modules never open a transaction (a mutation already is one). */
+const directTransactions = (program: Node, loc: (o: number) => Loc): Hit[] => {
+  const found: Hit[] = [];
+  walk(program, (n) => {
+    const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
+    if (callee?.type === "MemberExpression" && !callee.computed && callee.property?.name === "transaction") found.push({ what: ".transaction()", at: loc(n.start) });
+  });
+  return found;
+};
+
+/** A Drizzle client created: `drizzle(...)` imported from a driver entry, `drizzle-orm/<driver>`. */
+const directDbClients = (program: Node, loc: (o: number) => Loc): Hit[] => {
+  const makers = new Map<string, string>(); // local name → the entry it came from
+  for (const s of program.body) {
+    if (s.type !== "ImportDeclaration" || typeOnly(s) || !s.source.value.startsWith("drizzle-orm/")) continue;
+    for (const sp of s.specifiers)
+      if (sp.type === "ImportSpecifier" && sp.importKind !== "type" && sp.imported?.name === "drizzle") makers.set(sp.local.name, s.source.value);
+  }
+  const found: Hit[] = [];
+  if (makers.size)
+    walk(program, (n) => {
+      const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
+      const from = callee?.type === "Identifier" ? makers.get(callee.name) : undefined;
+      if (from) found.push({ what: `drizzle() from "${from}"`, at: loc(n.start) });
+    });
   return found;
 };
 
@@ -363,44 +397,54 @@ export function analyze(root: string, registryFile: string): Source {
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
   type Found = Pick<SourceFn, "runs" | "emits" | "checks" | "config">;
 
-  // Environment reads: modules get settings from ctx.config, so neither they nor what they import read env.
-  const env: EnvRead[] = [];
   /** App files a file loads at runtime (not packages, not modules, not type-only imports). */
   const appImports = (file: string, program: Node) =>
     specifiers(program, true).flatMap(({ spec, start }) => {
       const target = resolve(file, spec);
       return target && !target.includes(`${sep}node_modules${sep}`) && !moduleOf(target) ? [{ target, start }] : [];
     });
-  /** The first env read in `file` or in the app files it loads, or null. Memoized, so each file is looked at once. */
-  const envMemo = new Map<string, { what: string; at: Loc } | null>();
-  const envVia = (file: string, visiting: Set<string>): { what: string; at: Loc } | null => {
-    const known = envMemo.get(file);
-    if (known !== undefined) return known;
-    if (visiting.has(file)) return null; // a cycle: whatever it reads is found from where the cycle started
-    visiting.add(file);
-    const { program, loc } = read(file);
-    let found: { what: string; at: Loc } | null = directEnv(program, loc)[0] ?? null;
-    if (!found)
-      for (const { target } of appImports(file, program)) {
-        found = envVia(target, visiting);
-        if (found) break;
+  /**
+   * What a module file does itself, or through the app files it loads. `direct` finds it in one file; the first one in
+   * an imported file is reported at the import. Memoized, so each file is looked at once.
+   */
+  const reach = (direct: (program: Node, loc: (o: number) => Loc) => Hit[]) => {
+    const found: Reached[] = [];
+    const memo = new Map<string, Hit | null>();
+    const via = (file: string, visiting: Set<string>): Hit | null => {
+      const known = memo.get(file);
+      if (known !== undefined) return known;
+      if (visiting.has(file)) return null; // a cycle: whatever is there is found from where the cycle started
+      visiting.add(file);
+      const { program, loc } = read(file);
+      let first = direct(program, loc)[0] ?? null;
+      if (!first)
+        for (const { target } of appImports(file, program)) {
+          first = via(target, visiting);
+          if (first) break;
+        }
+      visiting.delete(file);
+      memo.set(file, first);
+      return first;
+    };
+    const scan = (mod: string, file: string, program: Node, loc: (o: number) => Loc) => {
+      for (const r of direct(program, loc)) found.push({ module: mod, ...r });
+      for (const { target, start } of appImports(file, program)) {
+        const first = via(target, new Set());
+        if (first) found.push({ module: mod, what: first.what, at: loc(start), via: first.at });
       }
-    visiting.delete(file);
-    envMemo.set(file, found);
-    return found;
+    };
+    return { found, scan };
   };
-  const scanEnv = (mod: string, file: string, program: Node, loc: (o: number) => Loc) => {
-    for (const r of directEnv(program, loc)) env.push({ module: mod, ...r });
-    for (const { target, start } of appImports(file, program)) {
-      const found = envVia(target, new Set());
-      if (found) env.push({ module: mod, what: found.what, at: loc(start), via: found.at });
-    }
-  };
+  // Modules get settings from ctx.config, never open a transaction (a mutation is one), and reach the database only
+  // through ctx.db: neither they nor what they import read env, call .transaction() or create a client.
+  const env = reach(directEnv);
+  const transactions = reach(directTransactions);
+  const dbClients = reach(directDbClients);
 
   for (const [mod, { dir, folder, index }] of Object.entries(modules)) {
     const files: File[] = (folder ? sourceFiles(dir) : [index]).map((f) => {
       const file = read(f);
-      scanEnv(mod, f, file.program, file.loc);
+      for (const r of [env, transactions, dbClients]) r.scan(mod, f, file.program, file.loc);
       const local = scanImports(f, file.program, file.loc, mod);
       const nameOf = (arg: Node | undefined): string => {
         const ns = arg?.type === "MemberExpression" && arg.object?.type === "Identifier" ? local[arg.object.name] : undefined;
@@ -515,5 +559,5 @@ export function analyze(root: string, registryFile: string): Source {
       scanImports(file, program, loc, null);
     }
 
-  return { modules, fns, imports, cans, env };
+  return { modules, fns, imports, cans, env: env.found, transactions: transactions.found, dbClients: dbClients.found };
 }
