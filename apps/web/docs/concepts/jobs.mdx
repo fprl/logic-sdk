@@ -128,7 +128,7 @@ export const confirm = mutation({
   ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: bookingId });
   ```
 
-  A call that already started isn't touched; the new one runs on its own. With an `outbox`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`databaseQueue(database)`, `outbox(database, queue)` or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
+  A call that already started isn't touched; the new one runs on its own. A call waiting out a retry's backoff has started too. With an `outbox`, started means handed to the queue. The replaced call's id is gone, so `retry` with it returns `false`. Like Oban's `replace` and Laravel's `DebounceFor`. It needs an adapter that can replace (`databaseQueue(database)`, `outbox(database, queue)` or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
 - **No cancel.** It runs whatever happens meanwhile, so the function checks that its reason still holds ("is the booking still confirmed?"). Convex can cancel, but a call that already started keeps running, so the check is needed anyway.
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener; the function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.

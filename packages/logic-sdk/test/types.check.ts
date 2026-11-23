@@ -1,6 +1,6 @@
 // Compile-only: proves inference is real (an `any` would make the @ts-expect-error lines fail as unused).
 import type { AIMeta } from "../src/ai.ts";
-import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb } from "../src/drizzle/pg.ts";
+import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb, type DrizzleTx } from "../src/drizzle/pg.ts";
 import * as sqlite from "../src/drizzle/sqlite.ts";
 import type { PgBossMeta } from "../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
@@ -278,9 +278,12 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   d.mutation({ handler: async (ctx) => ctx.db.insert });
   // @ts-expect-error no savepoints: one rolled back would keep the events emitted inside it
   d.mutation({ handler: async (ctx) => ctx.db.transaction(async () => {}) });
-  // a helper typed with Drizzle's own classes still takes the mutation's transaction
-  const count = async (x: PgliteDatabase) => x.$count;
-  d.mutation({ handler: async (ctx) => count(ctx.db) });
+  // a helper typed with Drizzle's own classes would reach `transaction`: type it with DrizzleTx
+  const viaDrizzle = async (x: PgliteDatabase) => x.$count;
+  // @ts-expect-error not a Drizzle class: no `transaction` on it
+  d.mutation({ handler: async (ctx) => viaDrizzle(ctx.db) });
+  const viaTx = async (x: DrizzleTx<PgliteDatabase>) => x.$count;
+  d.mutation({ handler: async (ctx) => viaTx(ctx.db) });
   d.createRegistry({ modules: {}, database: drizzleAdapter({} as PgliteDatabase) });
   // @ts-expect-error the registry still needs the database
   d.createRegistry({ modules: {} });

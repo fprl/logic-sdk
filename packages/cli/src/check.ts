@@ -129,7 +129,27 @@ export function check(project: Project): Problem[] {
       fix: "Read the value from ctx.config: declare it in Config's `config` in logic.ts, and fill it from your env at the entry, createRegistry({ config }). Clients built from secrets go in services.",
     });
 
-  // 7. Listeners for events nothing emits
+  // 7. No transactions in modules: inside a mutation it's a savepoint, and the events made in one that rolled back still go
+  for (const r of source.transactions)
+    problems.push({
+      code: "nested-transaction",
+      severity: "error",
+      message: `${r.via ? `${r.at.file} imports a file that calls .transaction() (${r.via.file}:${r.via.line})` : `${r.at.file} calls .transaction()`}. In a mutation it's a savepoint the registry doesn't track: if it rolls back, the events and calls made in it are still sent.`,
+      at: r.at,
+      fix: "A mutation is already one transaction: let an error fail all of it, and ctx.run another mutation to compose. Work that may fail on its own goes in a mutation of its own, run from an action or a listener.",
+    });
+
+  // 8. The database only through ctx.db: a module with its own client writes outside the mutation's transaction
+  for (const r of source.dbClients)
+    problems.push({
+      code: "db-client-in-module",
+      severity: "error",
+      message: `${r.via ? `${r.at.file} imports a file that creates a database client (${r.what} at ${r.via.file}:${r.via.line})` : `${r.at.file} creates a database client (${r.what})`}. Writes through it are outside the mutation's transaction, so a rollback doesn't undo them.`,
+      at: r.at,
+      fix: "Use ctx.db: create the client at the entry and pass it to createRegistry({ database }). A second database is a service. A file that needs only its type (`typeof db` in logic.ts) imports it with `import type`, so loading that file doesn't create the client.",
+    });
+
+  // 9. Listeners for events nothing emits
   for (const e of project.events)
     if (e.listeners.length && !e.emittedBy.length)
       problems.push({
