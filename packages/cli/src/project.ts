@@ -31,6 +31,8 @@ export interface ListenerInfo {
   /** The export name: how the source refers to it (the id can differ). */
   name: string;
   event: string;
+  /** It has a `when`: some events of its kind get no job for it. */
+  conditional: boolean;
   description: string | null;
   at: Loc | null;
   runs: Edge[];
@@ -173,6 +175,7 @@ export async function loadProject(root: string): Promise<Project> {
     module: l.module,
     name: l.name,
     event: described.ids.get(l.event) ?? "(unknown)",
+    conditional: l.listener.when !== undefined,
     description: src(l)?.doc ?? null,
     at: src(l)?.at ?? null,
     runs: real(src(l)?.runs ?? []),

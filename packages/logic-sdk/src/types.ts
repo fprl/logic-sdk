@@ -253,6 +253,8 @@ export interface Listener<O = unknown, C extends Config = any> extends FromInit<
   readonly attempts?: number;
   /** Seconds after the event before the first try. Default 0. */
   readonly delay?: number;
+  /** Whether this event gets a job for this listener, from the parsed payload, at commit. Default: every event. */
+  readonly when?: (payload: O) => boolean;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
 }

@@ -120,6 +120,8 @@ test("a module can be a single file, and explicit ids are what the CLI shows and
   expect(r.json()).toMatchObject({ errors: 0, warnings: 1, problems: [{ code: "wall-clock", message: expect.stringMatching(/^stock\.hold reads/) }] });
   expect(cli(fixture("files"), "show", "orders.place", "--json").json()).toMatchObject({ runs: ["stock.hold"], emits: ["orders.created"] });
   expect(cli(fixture("files"), "show", "orders.created", "--json").json()).toMatchObject({ emittedBy: ["orders.place"], listeners: ["orders.email"] });
+  expect(cli(fixture("files"), "show", "orders.email", "--json").json()).toMatchObject({ conditional: true });
+  expect(cli(fixture("files"), "show", "orders.email").out).toContain("only events its condition lets through");
 });
 
 test("an app that throws while loading gets a diagnostic with the location, not a stack trace", () => {

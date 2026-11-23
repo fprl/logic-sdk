@@ -22,4 +22,4 @@ export const place = mutation({
 });
 
 /** Reacts to placed */
-export const notify = listener({ id: "email", event: () => placed, handler: async () => {} });
+export const notify = listener({ id: "email", event: () => placed, when: () => true, handler: async () => {} });

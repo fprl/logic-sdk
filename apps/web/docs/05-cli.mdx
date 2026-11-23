@@ -51,7 +51,7 @@ called by   nothing in this app (an entry point)
 
 `checks` lists the `can*` record checks the function calls, directly or through its module's helpers. See [Authorization](/docs/concepts/authorization#record-rules-can).
 
-When they apply, two more rows show up: `config` lists the [config](/docs/concepts/config) keys the function reads (never their values), and a run that changes the scope says which keys, as in `runs stock.release (scope: actor)`. In `--json` they're `config` and `scopeChanges`.
+A listener with a [`when`](/docs/concepts/jobs#only-some-events-when) gets a `when` row (`conditional` in `--json`). When they apply, two more rows show up: `config` lists the [config](/docs/concepts/config) keys the function reads (never their values), and a run that changes the scope says which keys, as in `runs stock.release (scope: actor)`. In `--json` they're `config` and `scopeChanges`.
 
 ## graph
 

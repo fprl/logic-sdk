@@ -113,10 +113,19 @@ export function makeJobs(deps: JobsDeps) {
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
 
   /**
-   * What a commit queues: one delivery per listener of each event, and the calls it scheduled. Events and calls due now
-   * past `maxEventDepth` (a listener loop, a function scheduling itself with no delay) are dropped, reported once.
+   * What a commit queues: one delivery per listener of each event that its `when` lets through, and the calls it
+   * scheduled. Events and calls due now past `maxEventDepth` (a listener loop, a function scheduling itself with no
+   * delay) are dropped, reported once.
    */
-  function toJobs(envelopes: Envelope[], calls: CallJob[]): Job[] {
+  function toJobs(envelopes: Envelope[], calls: CallJob[], parsed: Map<Envelope, unknown>): Job[] {
+    /** Its `when`, if any. A throw is a bug in the app: it fails the mutation, naming the listener. */
+    const wants = (l: RegisteredListener, e: Envelope, payload: unknown) => {
+      try {
+        return !l.listener.when || l.listener.when(payload);
+      } catch (error) {
+        throw new Error(`[logic-sdk] ${l.id}'s when threw on ${e.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    };
     const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
@@ -124,7 +133,7 @@ export function makeJobs(deps: JobsDeps) {
     if (deepEvent) report(loop(deepEvent.name), { source: deepEvent.name });
     else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
-      (byEvent.get(e.name) ?? []).map((l): Delivery => {
+      (byEvent.get(e.name) ?? []).filter((l) => wants(l, e, parsed.get(e))).map((l): Delivery => {
         const job = deliveryOf(l, e);
         const delay = l.listener.delay;
         if (delay) job.runAt = new Date(Date.parse(e.occurredAt) + delay * 1000).toISOString();

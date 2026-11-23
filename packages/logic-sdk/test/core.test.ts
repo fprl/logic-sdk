@@ -1256,3 +1256,56 @@ test("inProcess() and inline tests try once: a job with attempts left is failed,
   expect(tries).toBe(2);
   expect(outcomes).toEqual(["failed", "failed"]);
 });
+
+test("listener `when`: false, and the event gets no job for it; it sees the parsed payload; a throw fails the mutation", async () => {
+  const placed = event({ payload: z.object({ total: z.number(), currency: z.string().default("EUR") }) });
+  const place = mutation({
+    input: z.object({ total: z.number() }),
+    async handler({ db, emit }, { total }) {
+      (db.rows.orders ??= []).push({ total });
+      emit(placed, { total });
+    },
+  });
+  const seen: unknown[] = [];
+  const ran: number[] = [];
+  const fraud = listener({
+    event: () => placed,
+    when: (order) => {
+      seen.push(order);
+      if (order.total < 0) throw new Error("a bug in when");
+      return order.total > 5000;
+    },
+    async handler(_ctx, order) { ran.push(order.total); },
+  });
+  const always = listener({ event: () => placed, async handler() {} });
+  const modules = { o: { placed, place, fraud, always } };
+  const scope = { actor: "a", locale: "es" };
+
+  // a custom adapter sees exactly the jobs made: none for fraud on a small order
+  const enqueued: Job[] = [];
+  const adapter: JobsAdapter = { async enqueue(_tx, jobs) { enqueued.push(...jobs); }, async deliver() {} };
+  const queued = createRegistry<Scope>({ modules, database: memoryDatabase(), services: { log: [] }, jobs: { adapter, scope: { load: (s) => s } } });
+  await queued.as(scope).run(place, { total: 100 });
+  await queued.as(scope).run(place, { total: 9000 });
+  expect(deliveriesIn(enqueued).map((d) => `${d.listener} ${(d.envelope.payload as { total: number }).total}`)).toEqual(["o.always 100", "o.fraud 9000", "o.always 9000"]);
+  expect(seen).toEqual([{ total: 100, currency: "EUR" }, { total: 9000, currency: "EUR" }]); // parsed: the default is there
+
+  // inProcess: it doesn't run; a throw fails the mutation and rolls it back
+  const database = memoryDatabase();
+  const app = createRegistry<Scope>({ modules, database, services: { log: [] } }).as(scope);
+  await app.run(place, { total: 100 });
+  await app.run(place, { total: 9000 });
+  expect(ran).toEqual([9000]);
+  await expect(app.run(place, { total: -1 })).rejects.toThrow("[logic-sdk] o.fraud's when threw on o.placed: a bug in when");
+  expect(database.store.rows.orders).toEqual([{ total: 100 }, { total: 9000 }]);
+
+  // the test registry: no queued job for it; perform, which names the listener, skips `when`
+  const t = createTestRegistry(createRegistry<Scope>({ modules, database: memoryDatabase(), services: { log: [] } }), { jobs: "manual" });
+  await t.begin();
+  await t.as(scope).run(place, { total: 100 });
+  expect(t.jobs.queued.map((d) => d.listener)).toEqual(["o.always"]);
+  ran.length = 0;
+  expect(await t.jobs.perform(fraud, { total: 100, currency: "EUR" }, { scope })).toEqual("done");
+  expect(ran).toEqual([100]);
+  await t.rollback();
+});
