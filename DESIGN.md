@@ -449,6 +449,7 @@ listener({ event: () => orders.placed, when: (order) => order.total > 5000, asyn
 - **The event only, no scope.** Both precedents give only the event. A scope here would be a second one: with a durable adapter the handler runs as `load(store(scope))`, not the emitter's, the reason `ctx.event` carries no scope. If who emitted matters, the event says so. A second argument can be added later without breaking anyone.
 - **Sync, and no runtime check that it returned a boolean.** The type refuses an async `when`; one that slips through (a cast, JavaScript) returns a Promise, which is truthy, so the listener runs for every event, as without `when`. Runtime checks are for security rules: a policy must return exactly `true`; this is a filter.
 - **`t.jobs.perform(listener, payload)` skips it:** it names the listener.
+- **Left as they are:** the `when`s of one event share one parsed object, so one that mutates its payload changes what the next sees (the handler parses its own). An event emitted by a `run` the mutation didn't await can land after the commit's checks; that's a floating promise in the app, for a `check` rule if it shows up, not more runtime.
 - **What would change it:** a real listener whose skip depends on who emitted, not on what happened (then the emitting scope as a second argument), or a check rule if async `when`s show up.
 
 ### Tests: hooks, and jobs inline or manual
