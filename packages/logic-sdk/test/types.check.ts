@@ -417,3 +417,10 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   // @ts-expect-error a cron from the shop's init
   admin.createRegistry({ modules: { admin: { sweep } } });
 }
+
+// `when` gets the event's parsed payload, and is sync: a Promise would always pass
+{
+  listener({ event: () => ev, when: (p) => p.id !== "", handler: async () => {} });
+  // @ts-expect-error async: a Promise is truthy, so it would never filter
+  listener({ event: () => ev, when: async (p) => p.id !== "", handler: async () => {} });
+}

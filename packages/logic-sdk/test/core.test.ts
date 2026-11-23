@@ -1296,7 +1296,7 @@ test("listener `when`: false, and the event gets no job for it; it sees the pars
   await app.run(place, { total: 100 });
   await app.run(place, { total: 9000 });
   expect(ran).toEqual([9000]);
-  await expect(app.run(place, { total: -1 })).rejects.toThrow("a bug in when");
+  await expect(app.run(place, { total: -1 })).rejects.toThrow("[logic-sdk] o.fraud's when threw on o.placed: a bug in when");
   expect(database.store.rows.orders).toEqual([{ total: 100 }, { total: 9000 }]);
 
   // the test registry: no queued job for it; perform, which names the listener, skips `when`

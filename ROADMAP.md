@@ -72,7 +72,7 @@ Agreed as after 0.5.0, not forgotten: live tests on deployed Workers (with Queue
    - **Done:** the database queue's claim tested with concurrent sweepers on real Postgres (CI sets `DATABASE_URL` for every workspace).
    - **SQLite and other ORMs:** see "Before 0.5.0".
    - **Then `vercelQueue`,** like `cloudflareQueue`: alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider.
-   - **Listener options:** `attempts`, `delay` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
+   - **Listener options:** `attempts`, `delay`, `when` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
    - **Done: crons.** `cron({ schedule, run, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with `databaseQueue` or `outbox` (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).
 
    Until per-listener options exist, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
