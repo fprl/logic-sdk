@@ -112,7 +112,11 @@ export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, E extends b
   readonly meta?: Readonly<Record<string, unknown>>;
   /** Who may call it (from `authorize`). Runs on every call, before validation. */
   readonly authorize?: Policy<never>;
-  /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Requires `authorize` and `output`. */
+  /**
+   * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
+   * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
+   * (other functions, jobs, scripts).
+   */
   readonly expose?: true;
   readonly handler: (ctx: never, input: never) => Promise<unknown>;
   /** Phantom types, never set at runtime. */
@@ -377,14 +381,22 @@ type Def<C extends Config, K extends Kind, IS, OS, R, P> = {
  */
 type Exposure<C extends Config, OS, X> = [X] extends [true]
   ? {
-      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). */
+      /**
+       * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
+       * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
+       * (other functions, jobs, scripts).
+       */
       expose: true;
       authorize: Policy<ScopeOf<C>>;
       /** What callers get back, checked before it leaves. */
       output: OS;
     }
   : {
-      /** `true`: adapters may publish it (HTTP, oRPC, AI tools). Leave it out for internal functions. */
+      /**
+       * Callers outside your server can run it: HTTP and oRPC publish every exposed function, AI tools the ones whose
+       * `meta` opts in. They're untrusted, so it needs `authorize` and `output`. Without it, only your own code runs it
+       * (other functions, jobs, scripts).
+       */
       expose?: X;
       /** What callers get back, checked before it leaves. */
       output?: OS;
@@ -536,7 +548,14 @@ export interface InProcess extends JobsAdapter {
  * `createRegistry({ jobs })`: where background work goes, and what every adapter applies. `load` inside `scope` is
  * checked at startup: requiring it here would report a missing one as a wrong `store`.
  */
-export type JobsOptions<S = object, T = any> =
+export type JobsOptions<S = object, T = any> = {
+  /**
+   * Max chain of listener → mutation → event → listener… before queueing stops, reported. Calls `ctx.schedule` runs
+   * right away count too, so a function that schedules itself with no delay stops the same way. Default 8 (real chains
+   * are 2 or 3).
+   */
+  maxEventDepth?: number;
+} & (
   | {
       /** `inProcess()` (default), or a durable one like `databaseQueue(database)`. Its own options go in its factory. */
       adapter?: InProcess;
@@ -548,7 +567,8 @@ export type JobsOptions<S = object, T = any> =
       adapter?: JobsAdapter;
       /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
       scope: JobScope<S, T>;
-    };
+    }
+);
 
 export interface Call<M = unknown> {
   id: string;
@@ -580,15 +600,9 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
    * still running at a restart is lost.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
-  /** Failures after commit land here (listeners, the jobs adapter). They never fail the caller. */
+  /** Failures no caller waits for: jobs, and the work after commit that runs them. They never fail the caller. */
   onError?: (error: unknown, info: FailureInfo) => void;
   now?: () => Date;
-  /**
-   * Max chain of listener → mutation → event → listener… before queueing stops, reported. Calls `ctx.schedule` runs
-   * right away count too, so a function that schedules itself with no delay stops the same way. Default 8 (real chains
-   * are 2 or 3).
-   */
-  maxEventDepth?: number;
 }
 
 /** A registry bound to who is calling: `const caller = registry.as(scope)`. */
