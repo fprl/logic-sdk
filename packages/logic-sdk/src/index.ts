@@ -223,6 +223,9 @@ type CronDef<S, F extends Fn> = {
   attempts?: number;
 } & (undefined extends FnIn<F> ? { input?: FnIn<F> } : { input: FnIn<F> });
 
+/** How deep `ctx.run` calls may nest. Past it, a function is running itself without end. */
+const MAX_RUN_DEPTH = 64;
+
 function checkAttempts(what: string, attempts: number | undefined) {
   if (attempts !== undefined && !(Number.isInteger(attempts) && attempts >= 1))
     throw new Error(`[logic-sdk] ${what} attempts must be a whole number of tries, 1 or more (got ${attempts}).`);
@@ -245,7 +248,8 @@ interface TxState {
 }
 interface Frame {
   scope: object;
-  depth: number;
+  /** The calls that led here, outermost first. How many there are is the next call's depth. */
+  trail: readonly string[];
   /** Inherited, for actions to pass on as ctx.signal. */
   signal?: AbortSignal;
   /** Passed to this very call: checked before it starts. */
@@ -434,10 +438,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
-  /** The frame a call runs in: one level deeper, with this call's scope patch and signal. */
+  /** The frame for a call from here: its scope patch and signal. `invoke` adds the call to the trail. */
   const enter = (frame: Frame, options: RunOptions | undefined): Frame => ({
     ...frame,
-    depth: frame.depth + 1,
     scope: options?.scope ? { ...frame.scope, ...options.scope } : frame.scope,
     signal: options?.signal ?? frame.signal,
     abortOn: options?.signal,
@@ -536,17 +539,25 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     now,
     wrap,
     report,
-    runAs: (fn, input, scope, eventDepth, queued) => invoke(fn, input, enter({ scope, depth: -1, eventDepth, queued }, undefined), ["query", "mutation", "action"]),
-    listenerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, depth: 0, eventDepth, queued }, id),
+    runAs: (fn, input, scope, eventDepth, queued) => invoke(fn, input, enter({ scope, trail: [], eventDepth, queued }, undefined), ["query", "mutation", "action"]),
+    listenerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, trail: [id], eventDepth, queued }, id),
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────
-  async function invoke(fn: Fn, rawInput: unknown, frame: Frame, allowed: Kind[]): Promise<any> {
+  async function invoke(fn: Fn, rawInput: unknown, outer: Frame, allowed: Kind[]): Promise<any> {
     const id = idOf(fn);
     if (!allowed.includes(fn.kind))
       throw new Error(`[logic-sdk] ${id} is a ${fn.kind}; it can't be run from here (allowed: ${allowed.join(", ")}).`);
+    const depth = outer.trail.length;
+    // a function that runs itself, through other modules or not, never returns: stop it with the path, not run out of memory
+    if (depth > MAX_RUN_DEPTH)
+      throw new Error(
+        `[logic-sdk] ctx.run nested past ${MAX_RUN_DEPTH} calls: … → ${[...outer.trail.slice(-6), id].join(" → ")}. ` +
+          "Recurse in a plain helper that takes ctx, or make each step separate work (an event, or ctx.schedule).",
+      );
+    const frame: Frame = { ...outer, trail: [...outer.trail, id] };
 
-    const call: Call = { id, kind: fn.kind, meta: fn.meta, input: rawInput, scope: frame.scope, depth: frame.depth };
+    const call: Call = { id, kind: fn.kind, meta: fn.meta, input: rawInput, scope: frame.scope, depth };
 
     /** Authorize, then validate, before any transaction opens: denied or bad calls never touch the database. */
     const prepare = async () => {
@@ -556,7 +567,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         if (fn.authorize(frame.scope as never) !== true) throw new DomainError("forbidden", `${id}.forbidden`);
       }
       // no `input`: the function takes nothing, whatever an adapter sends (AI tools send `{}`)
-      return fn.input ? parseInput(fn.input, rawInput, id, frame.depth > 0) : undefined;
+      return fn.input ? parseInput(fn.input, rawInput, id, depth > 0) : undefined;
     };
     const execute = async (input: unknown, ctx: unknown) => {
       // SAFETY: the handler's types were erased when it was registered. `ctx` was built for its kind,
@@ -642,7 +653,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     as: (scope) => ({
       scope,
       run: (fn: Fn, input?: unknown, options?: RunOptions) =>
-        invoke(fn, input, enter({ scope, depth: -1, eventDepth: 0 }, options), ["query", "mutation", "action"]), // depth 0
+        invoke(fn, input, enter({ scope, trail: [], eventDepth: 0 }, options), ["query", "mutation", "action"]),
     }),
     definitions: { functions, events, listeners, crons },
     idOf,

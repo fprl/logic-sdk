@@ -84,7 +84,7 @@ $ logic-sdk check
 | Code | Severity | What it catches |
 |---|---|---|
 | `cross-module-import` | error | Importing a file inside a module instead of its index, from another module or from code outside the modules (routes, pages). Path aliases and `#` imports included |
-| `run-cycle` | error | Modules running each other in a circle |
+| `run-cycle` | error | Modules running each other's mutations or actions in a circle. Runs of queries don't count: modules read each other both ways |
 | `network-in-transaction` | error | `fetch()` inside a query or mutation |
 | `async-can` | error | A `can*` record check that's async or awaited. A Promise is never falsy, so `if (!canX(...))` would never deny |
 | `unused-can` | error | A `can*` call whose result is thrown away |

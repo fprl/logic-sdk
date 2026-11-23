@@ -30,7 +30,9 @@ export function check(project: Project): Problem[] {
           : `Import it as \`import * as ${i.target} from "${i.index}"\` and call its functions through the registry: caller.run(${i.target}.fn, input).`,
       });
 
-  // 2. No run cycles between modules (an event breaks them)
+  // 2. No cycles of writes between modules (an event breaks them). A query can't write, emit or schedule, so runs of
+  // queries don't count: modules read each other's data both ways. A named target that isn't a known function counts.
+  const kindOf = new Map(project.functions.map((f) => [f.id, f.kind]));
   const graph = new Map<string, Map<string, string>>(); // module → module → an example "a.fn → b.fn"
   for (const f of [...project.functions, ...project.listeners])
     for (const e of f.runs) {
@@ -46,7 +48,7 @@ export function check(project: Project): Problem[] {
         continue;
       }
       const to = e.to.slice(0, e.to.indexOf("."));
-      if (to === f.module) continue;
+      if (to === f.module || kindOf.get(e.to) === "query") continue;
       const edges = graph.get(f.module) ?? new Map<string, string>();
       graph.set(f.module, edges);
       if (!edges.has(to)) edges.set(to, `${f.id} → ${e.to}`);
@@ -56,9 +58,9 @@ export function check(project: Project): Problem[] {
     problems.push({
       code: "run-cycle",
       severity: "error",
-      message: `Modules run each other in a circle: ${[...names, names[0]].join(" → ")} (${cycle.map((s) => s.step).join(", ")}).`,
+      message: `Modules run each other's mutations or actions in a circle: ${[...names, names[0]].join(" → ")} (${cycle.map((s) => s.step).join(", ")}). Runs of queries don't count.`,
       at: null,
-      fix: "Break the cycle with an event: emit it in one module, react with a listener in the other.",
+      fix: "Make one direction an event: emit it in one module, react with a listener in the other. If the caller needs the result inside its transaction, move that write into the module that owns the data.",
     });
   }
 

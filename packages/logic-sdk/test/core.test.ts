@@ -250,6 +250,18 @@ test("wrap sees every call with depth", async () => {
   expect(calls).toEqual(["0:mutation:items.addTwo", "1:mutation:items.add", "1:mutation:items.add", "0:listener:log.onAdded", "0:listener:log.onAdded"]);
 });
 
+test("ctx.run nests 64 deep, and a function that runs itself fails fast with the path", async () => {
+  const countdown = query({ input: z.number(), handler: async ({ run }, n): Promise<number> => (n === 0 ? 0 : run(countdown, n - 1)) });
+  const ping = query({ handler: async ({ run }): Promise<never> => run(pong) });
+  const pong = query({ handler: async ({ run }): Promise<never> => run(ping) });
+  const app = createRegistry<Scope>({ modules: { a: { countdown, ping }, b: { pong } } }).as({ actor: "ana", locale: "es" });
+  expect(await app.run(countdown, 64)).toBe(0);
+  await expect(app.run(countdown, 65)).rejects.toThrow("ctx.run nested past 64 calls: … → a.countdown → a.countdown");
+  await expect(app.run(ping)).rejects.toThrow(
+    "ctx.run nested past 64 calls: … → b.pong → a.ping → b.pong → a.ping → b.pong → a.ping → b.pong. Recurse in a plain helper",
+  );
+});
+
 test("custom jobs adapter: one delivery per listener, enqueued inside the transaction, delivered after", async () => {
   const seen: string[] = [];
   const { app } = setup({

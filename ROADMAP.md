@@ -101,6 +101,7 @@ Agreed as after 0.5.0, not forgotten: a week in a real app (the owner's call, 20
 - **A module registry,** shadcn-style: `logic-sdk add auth` copies a module (tables, functions, tests) into your app, as code you own.
 - **An admin panel** as a package (`@logic-sdk/admin`): a form per function from its JSON Schema, run as a chosen scope, filtered by `meta`. Built on `registry.definitions.functions` and run options.
 - **Seeds:** a docs recipe, not a feature. A seed script calls real mutations through `registry.as(scope)`.
+- **`check`'s per-file rules as an oxlint plugin,** for feedback in the editor and severities the app sets. Only if waiting for `check` in CI proves too late.
 - Turbo if build caching starts to matter, tsdown only if CJS is needed, oxfmt, deploying apps/web.
 
 Skipped: model callbacks and observers (we chose explicit), notifications, caching, broadcasting, soft deletes, a REPL console.

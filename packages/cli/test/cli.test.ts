@@ -114,6 +114,17 @@ test("renamed definers (mutation: defineMutation) are checked like any other", (
   expect(codes(r)).toEqual(codes(cli(broken, "check", "--json")));
 });
 
+test("run-cycle counts writes: modules may read each other both ways, not run each other's mutations or actions", () => {
+  const r = cli(fixture("cycles"), "check", "--json");
+  expect(r.code).toBe(1);
+  const cycles = r.json().problems.filter((p: { code: string }) => p.code === "run-cycle").map((p: { message: string }) => p.message);
+  expect(cycles).toEqual([
+    expect.stringContaining("billing → bookings → billing (billing.charge → bookings.markPaid, bookings.confirm → billing.charge)"),
+    expect.stringContaining("crm → mail → crm (crm.log → mail.send, mail.send → crm.log)"),
+  ]); // properties ↔ bookings runs only queries
+  expect(r.json().problems).toHaveLength(2);
+});
+
 test("a module can be a single file, and explicit ids are what the CLI shows and links", () => {
   const r = cli(fixture("files"), "check", "--json");
   // found in source by export name, reported by id
