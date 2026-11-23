@@ -38,13 +38,13 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 Agreed with the owner, collected from every conversation up to 2026-11-22. Don't move one to "later" without asking them. An item marked API is shown as code before it's built.
 
-1. **Done. The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get the SQL for their migrations. Prototyped: the whole suite passes on it, and one scenario list passes on Drizzle (PGlite, postgres.js, node-postgres) and a Prisma-shaped client.
-2. **Done. SQLite, plain (API, approved: `drizzleAdapter(() => drizzle("app.db"), options)`, the adapter opens the connections).** node:sqlite and bun:sqlite on a disk: a connection per transaction, one at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Prototyped on the seam, same scenarios.
+1. **Done ([56](https://github.com/fprl/logic-sdk/pull/56)). The SQL seam for other ORMs (API).** The jobs table written once per database in SQL, behind one `query(client, text, params)` on the database adapter. One shape for every database, `databaseQueue(database)` (the owner: "api looks good", 2026-11-22). Drizzle keeps its re-exported table, others get `jobsSchema`. One scenario list runs with no ORM and through Drizzle, on PGlite, and on real Postgres with postgres.js in CI. Not tested: real Prisma (its shape only), node-postgres in CI.
+2. **Done ([57](https://github.com/fprl/logic-sdk/pull/57)). SQLite, plain (API, approved: `drizzleAdapter(() => drizzle("app.db"), options)`, the adapter opens the connections).** node:sqlite and bun:sqlite on a disk: a connection per transaction, one at a time (WAL, `BEGIN IMMEDIATE`), one reads. `logic-sdk/drizzle/pg` and `logic-sdk/drizzle/sqlite`, same names in both. No Turso, no libsql, no MySQL. Tested on node:sqlite and bun:sqlite, with Node processes racing and killed on one file. Not tested: better-sqlite3.
 3. **Done ([47](https://github.com/fprl/logic-sdk/pull/47)). One test suite for every adapter:** commit and rollback, crash, slow job, retry, fence, replace, cron dedupe, concurrent sweepers, on real Postgres. It's the conformance suite "Dispatcher contract" promises.
 4. **Done ([49](https://github.com/fprl/logic-sdk/pull/49)). The examples use jobs:** the shop on each host, with `databaseQueue`, and a queue on Workers. Asked for with the one-app-three-hosts demo.
 5. **Live tests on deployed Workers (with Queues) and Vercel,** run by hand from Actions, as files-sdk does. Needs the owner's accounts and secrets.
-6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error.
-7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them.
+6. **A function from one `init` compiles inside another's registry,** with the wrong scope. Make it a type error. Rechecked 2026-11-23: still compiles, and the handler gets `undefined` for its scope's fields.
+7. **Without `waitUntil`, a job isn't marked done until the jobs it queued finish.** Laravel only queues them. Rechecked 2026-11-23: a listener whose mutation queues a 500 ms listener returns at 531 ms.
 8. **pg-boss: a crash on the last try never reaches `onError`.** Report it, or show why it can't be (documented today).
 9. **Done ([53](https://github.com/fprl/logic-sdk/pull/53)). Rolling deploys:** a job whose code this process doesn't have uses its attempts, like Laravel.
 10. **Casts and `!` left in the CLI.** The type cost of per-kind meta is measured and small (DESIGN.md, "Type cost of the setup").
@@ -54,9 +54,9 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 14. **Before the Version PR merges:** squash the changesets into what changed since 0.4.0.
 15. **Try it in a real app,** then release on an explicit go.
 
-Waiting on the owner, from the audit of 2026-11-22 (each is an API change): rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `transactionAttempts` under 1 as listeners' `attempts` do.
+Waiting on the owner (each is an API change). From the seam's quality review: the other-ORM example `satisfies SqlDatabase`, so a forgotten `query` errors there. From the audit of 2026-11-22: rename `Dispatcher` and `DeliveryOutcome` to the words the docs use, unexport pg-boss's `queueName` and `CALLS_QUEUE`, drop the `backoff` option. From the quality review of the same day: unexport `internal()` and `Overrides`, and refuse `transactionAttempts` under 1 as listeners' `attempts` do.
 
-Agreed as after 0.5.0, not forgotten: actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
+Agreed as after 0.5.0, not forgotten: pg-boss through `query`, so it takes any ORM (passes on PGlite in Fable's spike, array parameters untested on postgres.js); a `close()` on the SQLite adapter, once someone needs one; actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
 ## Next
 
