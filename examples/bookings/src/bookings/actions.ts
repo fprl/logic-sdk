@@ -18,7 +18,6 @@ import { Booking } from "./schema";
 export const checkout = action({
   input: z.object({ bookingId: z.uuid() }),
   authorize: anyone,
-  expose: true,
   output: z.object({ booking: Booking, chargeId: z.string() }),
   async handler(ctx, input) {
     const { total } = await ctx.run(amountDue, { bookingId: input.bookingId });

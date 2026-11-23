@@ -17,13 +17,13 @@ A flag is just data your code reads. What matters is where it lives, because tha
 Resolve the flags once, where you build the scope, and every function sees them:
 
 ```ts
-resolveScope: async (request) => {
+async function scopeOf(request: Request): Promise<Scope> {
   const session = await auth.getSession(request);
   return {
     ...scopeFrom(session),
     flags: { newCheckout: await flagsFor(session, "new-checkout") },
   };
-},
+}
 ```
 
 Policies read only the scope, so this is the one place a flag can gate `authorize`:
@@ -54,7 +54,7 @@ export const checkout = action({
 });
 ```
 
-Queries and mutations can't call it on purpose: a mutation may roll back and retry, and a network call inside it can't. If you pass the flag into an exposed function as input, a client can set it too, so pass it only to internal ones.
+Queries and mutations can't call it on purpose: a mutation may roll back and retry, and a network call inside it can't. If you pass the flag into a published function as input, a client can set it too, so pass it only to internal ones.
 
 ## In your database, read by queries
 

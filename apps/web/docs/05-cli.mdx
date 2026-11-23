@@ -18,16 +18,16 @@ Every function and listener, like a route list:
 
 ```txt
 $ logic-sdk list
-NAME                  KIND       ACCESS           DESCRIPTION
-bookings.confirm      mutation   staff exposed    Confirm a pending booking: holds its dates…
-bookings.checkout     action     anyone exposed   Charge the guest and confirm the booking…
-availability.hold     mutation   internal         Reserve a date range on a property's calendar
-tasks.prepareStay     listener   -                Create the key-handover task and email the gu…
+NAME                  KIND       POLICY   DESCRIPTION
+bookings.confirm      mutation   staff    Confirm a pending booking: holds its dates…
+bookings.checkout     action     anyone   Charge the guest and confirm the booking…
+availability.hold     mutation   none     Reserve a date range on a property's calendar
+tasks.prepareStay     listener   -        Create the key-handover task and email the gu…
 ```
 
-ACCESS is the `authorize` policy as written, then `exposed` or `internal`.
+POLICY is the `authorize` policy as written (`inline` for an arrow), or `none`. What's published is in your router and tools, not on the function.
 
-Filter with `--module bookings`, `--kind mutation` or `--exposed` (only `expose: true`).
+Filter with `--module bookings` or `--kind mutation`.
 
 ## show
 
@@ -35,12 +35,11 @@ Everything about one function, listener or event:
 
 ```txt
 $ logic-sdk show bookings.cancel
-bookings.cancel  mutation · exposed
+bookings.cancel  mutation
 Cancel a booking and free its dates
 src/bookings/mutations.ts:52:14
 
 policy      member
-exposed     yes (adapters may publish it)
 input       { bookingId: uuid }
 output      { id: uuid, propertyId: uuid, status: "pending" | "confirmed" | … }
 checks      canCancel

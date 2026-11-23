@@ -13,7 +13,6 @@ export interface FnInfo {
   kind: "query" | "mutation" | "action";
   description: string | null; // the JSDoc above it, first paragraph
   authorize: string | null; // the policy as written in source ("member"), "inline", or null without authorize
-  exposed: boolean; // expose: true, so adapters may publish it
   takesInput: boolean; // false: declared without `input`, so it's called as run(fn)
   input: JsonSchema | null;
   output: JsonSchema | null;
@@ -133,14 +132,11 @@ export async function loadProject(root: string): Promise<Project> {
   };
 
   // The app's own logic-sdk, so the CLI reads modules with the version the app runs.
-  const core = (await load("logic-sdk")) as Partial<typeof Core>;
-  if (typeof core.describeModules !== "function")
-    throw new CliError("core-too-old", "This app's logic-sdk has no describeModules().", "Update logic-sdk.");
+  const core = (await load("logic-sdk")) as typeof Core; // SAFETY: the peer range pins the app's logic-sdk to this CLI's
 
   const modules: Record<string, object> = {};
   for (const [key, { index }] of Object.entries(source.modules)) modules[key] = await load(index);
   const described = core.describeModules(modules);
-  if (!Array.isArray(described.crons)) throw new CliError("core-too-old", "This app's logic-sdk doesn't know crons.", "Update logic-sdk.");
 
   // Source is keyed by `<module>.<export>`; ids can differ when a definition sets its own `id`.
   const idByExport = new Map<string, string>();
@@ -157,7 +153,6 @@ export async function loadProject(root: string): Promise<Project> {
       description: s?.doc ?? null,
       // the name as written in source; else the function's own name (`const member = …` names it), else "inline"
       authorize: f.fn.authorize ? (s?.authorize ?? (f.fn.authorize.name || "inline")) : null,
-      exposed: f.exposed,
       takesInput: f.fn.input !== undefined,
       input: f.fn.input ? jsonSchemaOf(f.fn.input, "input") : null,
       output: f.fn.output ? jsonSchemaOf(f.fn.output, "output") : null,

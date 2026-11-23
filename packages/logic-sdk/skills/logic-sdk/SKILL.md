@@ -14,6 +14,7 @@ src/
   logic.ts       export const { query, mutation, action, event, listener, createRegistry } = init<Config>();   // Config's db: DrizzleDb<Db>, so queries can't write
   policies.ts    Scope type and policies: sync type guards over scope (anyone, member, admin)
   registry.ts    createRegistry({ modules: { bookings, ... } })   // only what this init() defined: another's is a type error
+  rpc.ts         export const router = { bookings: { confirm: toORPCProcedure(bookings.confirm) } }   // the API: only what's listed is reachable
   <module>/
     index.ts       export * from each public file below. Other modules import ONLY this.
     queries.ts     query({...})     reads
@@ -44,9 +45,8 @@ export const canCancel = (actor: Actor, b: BookingRow) => actor.role === "admin"
 /** Cancel a booking and free its dates */
 export const cancel = mutation({
   input: z.object({ bookingId: z.uuid() }),
-  output: Booking,                                         // required with expose: what callers may see
+  output: Booking,                                         // what callers may see: unknown fields stripped
   authorize: member,                                       // who may call it, on every call; narrows ctx.scope
-  expose: true,                                            // adapters may publish it; omit = internal
   async handler(ctx, input) {
     const b = await findBooking(ctx, input.bookingId);     // account-scoped: other accounts' ids are 404
     if (!canCancel(ctx.scope.actor, b)) throw ctx.errors.deny();             // 403
@@ -66,7 +66,7 @@ export const cancel = mutation({
 3. **Call other modules only with `run(otherModule.fn, input)`.** Import them as `import * as availability from "../availability"`. Never import their `data.ts` or `schema.ts`, from a module or from routes and pages; `logic-sdk check` fails the build if you do (path aliases and `#` imports included).
 4. **Within a module, use helpers.** Shared logic is a plain function in `data.ts` taking `ctx`. `ctx.run` your own module's function only when you want its `authorize`, validation and tracing.
 5. **Always filter by `ctx.scope.accountId`** in `data.ts` helpers, writes included. Loading helpers throw `ctx.errors.notFound()`. Scope is who and where (actor, account, locale); input is what.
-6. **Authorize every function a user, client or AI tool may call.** `authorize: member` (a policy from `policies.ts`) says who may call it: sync, reads only scope, runs on every call including nested ones. `expose: true` lets adapters publish it and requires `authorize` and `output`. No `expose` = internal: only your code calls it.
+6. **Authorize every function a user, client or AI tool may call.** `authorize: member` (a policy from `policies.ts`) says who may call it: sync, reads only scope, runs on every call including nested ones. Publish a function by listing it in `src/rpc.ts` (`toORPCProcedure(fn)`) or an agent's tools (`toAITool(caller, fn)`); both refuse one without `authorize`. A hand-written route or Server Action can `caller.run` anything, nothing stops it: only call functions that have `authorize` from them. Give published functions an `output` so nothing unintended leaves.
 7. **Record rules are `can*` predicates.** Load through a scoped helper, then `if (!canX(ctx.scope.actor, record)) throw ctx.errors.deny();`. `can*` is sync, its result is always used, and the same predicate feeds UI flags in list queries: `can: { cancel: canCancel(actor, b) }`. A rule that must hold at commit goes in the write's `WHERE` or a `FOR UPDATE` re-select.
 8. **Errors:** `throw ctx.errors.reject("snake_reason", details?)` when a rule says no, `ctx.errors.conflict(...)` when someone got there first, `ctx.errors.notFound()`, `ctx.errors.deny()`. Codes are namespaced to your module for you. Never return error objects; never throw plain `Error` for expected cases. Catch only in actions; in a mutation, catch only to rethrow your own error.
 9. **Need the result? `run` it. Just a consequence? `emit`** and let the owning module react in its `listeners.ts`.

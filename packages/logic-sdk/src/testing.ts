@@ -1,6 +1,7 @@
 import {
   replaceKeyOf,
   type Caller,
+  type DatabaseAdapter,
   type DeepPartial,
   type CallJob,
   type Delivery,
@@ -63,7 +64,7 @@ export interface TestRegistry<S extends object, Mods extends Record<string, obje
   readonly events: readonly Envelope[];
   /** The test transaction itself: read rows to assert on them. */
   readonly db: any;
-  /** The registry bound to this test's transaction, for adapters: `toFetchHandler(t.registry, …)`. */
+  /** The registry bound to this test's transaction, for adapters: an oRPC context's `caller: t.registry.as(scope)`. */
   readonly registry: Registry<S, Mods, Cf>;
   readonly jobs: TestJobs<S>;
 }
@@ -146,15 +147,15 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     return open;
   };
 
-  function start(db: unknown, close: () => Promise<void>): Open<S, Mods, Cf> {
-    const database = registryOptions.database;
+  /** `db` is the test's transaction, and `database` the adapter nested in it (none without a database). */
+  function start(db: unknown, database: DatabaseAdapter<unknown, unknown> | undefined, close: () => Promise<void>): Open<S, Mods, Cf> {
     const events: Envelope[] = [];
     const stubs: Open<S, Mods, Cf>["stubs"] = new Map();
     const queued: Delivery[] = [];
     const scheduled: CallJob[] = [];
     const failures: unknown[] = [];
     const derived = registry[INTERNAL].derive({
-      database: db !== undefined && database?.nest ? database.nest(db) : database,
+      database,
       services: options.services,
       config: options.config,
       now: clock,
@@ -196,7 +197,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         );
       const database = registryOptions.database;
       if (!database) {
-        open = start(undefined, async () => {});
+        open = start(undefined, undefined, async () => {});
         return;
       }
       if (!database.nest) throw new Error("[logic-sdk] This database adapter can't nest transactions, so tests can't roll back.");
@@ -213,7 +214,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           if (!(e instanceof Rollback)) throw e;
         });
       const tx = await Promise.race([opened.promise, done]); // `done` settles first only if the transaction failed to open
-      open = start(tx, async () => {
+      open = start(tx, database.nest(tx), async () => {
         released.resolve();
         await done;
       });

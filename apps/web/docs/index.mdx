@@ -11,7 +11,6 @@ export const confirm = mutation({
   input: z.object({ bookingId: z.uuid() }),
   output: Booking,
   authorize: staff,
-  expose: true,
 
   async handler(ctx, input) {
     const booking = await findBooking(ctx, input.bookingId);
@@ -44,7 +43,7 @@ await caller.run(bookings.confirm, { bookingId });
 - **Side effects after commit.** Mutations emit events, and listeners send the email once the data is safe.
 - **Who is calling, everywhere.** The scope you bind reaches every nested call and listener. Policies narrow its type.
 - **Authorization on every call.** A function's `authorize` policy runs whoever calls it: HTTP, an agent, a job or another function.
-- **Internal by default.** Only functions with `expose: true` reach HTTP, RPC or AI tools.
+- **Internal by default.** A function reaches clients only when you publish it: in your oRPC router or an agent's tools, which refuse one without `authorize`, or from your own route, which should only call functions that have one.
 - **Tests without mocks.** Each test is a real transaction on a real database, always rolled back.
 - **Any runtime.** Node, Bun and Cloudflare Workers, under any framework. No decorators, classes, codegen or build step.
 

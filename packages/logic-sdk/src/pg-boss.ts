@@ -67,7 +67,8 @@ const rowOf = (job: Job, replaceKey?: string): JobInsert<Job> => ({
   singletonKey: replaceKey,
 });
 
-// SAFETY: `check` requires a database adapter, and its transactions are Drizzle's (`drizzleAdapter`), which `execute` SQL
+// SAFETY: `check` requires a database adapter. Only `drizzleAdapter`'s (Postgres) transactions run pg-boss's SQL: another
+// adapter fails at the first enqueue. Any adapter's `query` is for after 0.5.0 (pg-boss passes arrays and JSON).
 const inTx = (tx: unknown): Db => fromDrizzle(tx as DrizzleTransactionLike, sql);
 
 /**

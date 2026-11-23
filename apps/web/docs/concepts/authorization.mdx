@@ -56,26 +56,24 @@ export const block = mutation({
 - **Must return exactly `true`.** Anything else is `forbidden` (403), even when nobody is signed in, like Laravel.
 - **Sync, and reads only the scope.** No database, no input. A policy that returns a Promise throws.
 
-## `expose`: who may publish it
+## Publishing: your routes, not a flag
 
-`authorize` says who may call. `expose: true` says adapters ([HTTP](/docs/adapters/fetch), [oRPC](/docs/adapters/orpc), [AI tools](/docs/adapters/ai)) may publish it:
+A function is published by passing it to an adapter: your oRPC router, an AI tool, a route that calls it. That list is your API surface, in one file you review, like Rails' `routes.rb` or Laravel's `routes/api.php`:
 
 ```ts
-/** Cancel a booking and free its dates */
-export const cancel = mutation({
-  input: z.object({ bookingId: z.uuid() }),
-  output: Booking,
-  authorize: member,
-  expose: true,
-  ...
-});
+// src/rpc.ts
+export const router = {
+  bookings: { cancel: toORPCProcedure(bookings.cancel), list: toORPCProcedure(bookings.list) },
+};
 ```
 
-`expose: true` requires `authorize` and an [`output`](/docs/concepts/output). Leaving either out is a type error: you can't publish something without saying who may call it and what they get back.
+The adapters need `authorize`: a published function says who may call it, and everyone is a decision too (`authorize: anyone`). Without one, `toORPCProcedure` and `toAITool` are a type error, and throw if a cast gets through. Add an [`output`](/docs/concepts/output) too: it decides what leaves.
+
+Next.js, TanStack Start and Convex do the opposite: a server function is an endpoint by definition, and their docs tell you to check auth inside each one. Here nothing is reachable until you list it.
 
 ## Internal functions
 
-No `expose`, and it's internal: other functions `run` it, and your own server code (jobs, webhooks, scripts) calls it with `caller.run`. No adapter publishes it, at the type level too. `authorize` is optional here, and still runs if you set it.
+A function no adapter publishes is internal: other functions `run` it, and your own server code (jobs, webhooks, scripts) calls it with `caller.run`. `authorize` is optional there, and still runs if you set it.
 
 ## Record rules: `can*`
 
@@ -104,7 +102,6 @@ The same predicate feeds your UI, so the button and the rule never disagree:
 export const list = query({
   output: z.array(Booking.extend({ can: z.object({ cancel: z.boolean() }) })),
   authorize: member,
-  expose: true,
 
   async handler(ctx) {
     const rows = await listBookings(ctx);
@@ -136,7 +133,7 @@ Laravel's policies are the same shape: boolean methods on a user and a record.
 
 - **Nested calls keep the scope**, and each callee's `authorize` runs against it.
 - **Listeners run with the emitter's scope.** A booking confirmed by a guest reaches `tasks.prepareStay` as that guest.
-- So **listeners and jobs run internal functions**, which carry no `authorize` or one that fits the job. Keep exposed functions thin: check, then `run` the internal function that does the work.
+- So **listeners and jobs run internal functions**, which carry no `authorize` or one that fits the job. Keep published functions thin: check, then `run` the internal function that does the work.
 - **Acting as someone else on purpose** is a scope change for one call, and every check inside it sees the new one. `logic-sdk show` lists it on that run: `tasks.create (scope: actor)`.
 
 ```ts
@@ -179,4 +176,4 @@ const [row] = await ctx.db
 | Laravel | Policies are boolean methods on (user, record). A failed policy is a 403, signed in or not |
 | Phoenix 1.8 | Scopes: an explicit scope, secure by default, passed by hand to every function. Here it's bound once |
 | Next.js | Recommends a Data Access Layer that checks who's calling. This is that layer, as a library |
-| Convex | Internal functions are callable only from your own code. Same idea as functions without `expose` |
+| Convex | Functions are public unless `internal*`. Here they're internal unless an adapter publishes them |

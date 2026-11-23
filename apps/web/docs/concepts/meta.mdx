@@ -18,7 +18,7 @@ type Config = {
 // a module
 /** Cancel a booking */
 export const cancel = mutation({
-  meta: { tags: ["bookings"], ai: { tool: true, description: "Use when the guest asks to cancel" } },
+  meta: { tags: ["bookings"], ai: { description: "Use when the guest asks to cancel" } },
   ...
 });
 ```
@@ -45,4 +45,4 @@ export type RateLimitMeta = ForFunctions<{ rateLimit?: { max: number } }>;
 export type QueueMeta = ForListeners<{ queue?: { priority: number } }>;
 ```
 
-Adapters read it from `registry.definitions.functions`, each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
+Adapters read it from the function (`fn.meta`), each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.

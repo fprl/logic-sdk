@@ -79,8 +79,6 @@ export const cancel = mutation({
   output: Booking,
   // Who may call it, on every call
   authorize: staff,
-  // Adapters (HTTP, oRPC, AI) may publish it
-  expose: true,
 
   async handler(ctx, input) {
     const booking = await findBooking(ctx, input.bookingId);
@@ -134,4 +132,4 @@ await caller.run(bookings.cancel, { bookingId });
   </Step>
 </Steps>
 
-From here, publish exposed functions over [HTTP](/docs/adapters/fetch) or [oRPC](/docs/adapters/orpc), or read how [authorization](/docs/concepts/authorization) and [transactions](/docs/concepts/transactions) work.
+From here, publish functions through [oRPC](/docs/adapters/orpc) or your own [HTTP routes](/docs/adapters/fetch), or read how [authorization](/docs/concepts/authorization) and [transactions](/docs/concepts/transactions) work.

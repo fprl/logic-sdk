@@ -11,7 +11,6 @@ export const Range = z
 export const check = query({
   input: Range,
   authorize: anyone,
-  expose: true,
   output: z.object({ available: z.boolean() }),
   async handler(ctx, input) {
     const { propertyId, from, to } = input;

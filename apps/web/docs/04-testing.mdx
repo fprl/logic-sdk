@@ -46,7 +46,7 @@ t.stub(availability.hold, async () => {
 });
 ```
 
-- **`t.registry`** is bound to the test's transaction, so adapters run in the same rollback: `toFetchHandler(t.registry, ...)`.
+- **`t.registry`** is bound to the test's transaction, so adapters run in the same rollback: an oRPC router's context is `{ caller: t.registry.as(scope) }`.
 - **One test at a time per `t`:** they share one connection. `test.concurrent` makes `begin` throw.
 
 ## Jobs in tests

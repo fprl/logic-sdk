@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { DatabaseAdapter, Job, ReadWrite, SqlDatabase } from "../index.ts";
+import { causes } from "../errors.ts";
 
 export { databaseQueue, jobsSchema, outbox, type DatabaseQueueOptions, type OutboxOptions, type StoredJobs } from "../postgres.ts";
 
@@ -45,7 +46,6 @@ export function drizzleAdapter<Db extends Transactional>(
 ): SqlDatabase<Db, Transaction<Db>> { // the whole transaction, for `nest`; mutations see it as a DrizzleTx
   return {
     db,
-    transactions: "interactive",
     transactionAttempts: options.transactionAttempts,
     transaction: (fn) => db.transaction(fn),
     nest: (tx) => drizzleAdapter(tx), // the test registry's savepoints
@@ -63,7 +63,7 @@ const RETRYABLE = new Set(["40001", "40P01"]);
 
 /** The SQLSTATE of a driver error, also when Drizzle wraps it (`DrizzleQueryError.cause`). Use it to map constraints. */
 export function sqlState(error: unknown): string | undefined {
-  for (let e: any = error, i = 0; e && i < 5; e = e.cause, i++) if (typeof e.code === "string") return e.code;
+  for (const e of causes(error)) if ("code" in e && typeof e.code === "string") return e.code;
   return undefined;
 }
 

@@ -46,3 +46,14 @@ export const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 
 /** A payload that stopped matching its event's schema (a deploy changed it while it waited): delivering again won't help. */
 export class StalePayload extends Error {}
+
+/**
+ * Throw where there's no valid session, outside your functions (a route, a middleware): `toResponse` makes it a 401.
+ * Inside a function, a policy answers instead (a scope with no actor, then `forbidden`).
+ */
+export const unauthenticated = (code = "unauthenticated", details?: unknown) => new DomainError("unauthenticated", code, details);
+
+/** An error and the ones it wraps (`cause`), five deep at most: a driver's error usually arrives wrapped by the ORM. */
+export function* causes(error: unknown): Generator<object> {
+  for (let e = error, i = 0; typeof e === "object" && e !== null && i < 5; e = "cause" in e ? e.cause : undefined, i++) yield e;
+}

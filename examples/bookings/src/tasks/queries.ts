@@ -8,7 +8,6 @@ import { Task, tasks } from "./schema";
 export const list = query({
   input: z.object({}).optional(),
   authorize: agent,
-  expose: true,
   output: z.array(Task),
   handler: (ctx) => ctx.db.select().from(tasks).where(eq(tasks.accountId, ctx.scope.accountId)),
 });

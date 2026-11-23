@@ -80,10 +80,13 @@ export interface StoredJobs extends JobsAdapter {
 }
 
 /** Both: rows in `logic_jobs`, claimed by receipt. Without `via` they run here; with it they're sent. */
+/** Seconds to wait after a failed try: e^attempt, capped at e^10 (about 6 hours), the curve Graphile Worker uses. */
+export const defaultBackoff = (attempt: number) => Math.exp(Math.min(attempt, 10));
+
 export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxOptions, via?: JobsAdapter): StoredJobs {
   const lease = options.lease ?? 300;
   const maxAttempts = options.maxAttempts ?? 10;
-  const backoff = options.backoff ?? ((attempt: number) => Math.exp(Math.min(attempt, 10)));
+  const backoff = options.backoff ?? defaultBackoff;
   /** Outside a mutation: on the database itself. */
   const query = (text: string, params: unknown[]) => database.query(database.db, text, params);
   const list = (ids: string[]) => JSON.stringify(ids);

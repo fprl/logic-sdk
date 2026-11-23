@@ -58,8 +58,6 @@ export type {
   Envelope,
   Errors,
   EventDef,
-  ExposedFn,
-  ExposedOf,
   FailureInfo,
   Fn,
   FnIn,
@@ -82,6 +80,8 @@ export type {
   MutationCtx,
   Out,
   Policy,
+  PublishableFn,
+  ScopeOfFn,
   QueryCtx,
   ReadWrite,
   Registered,
@@ -101,7 +101,7 @@ export type {
   SqlDatabase,
   SweepResult,
 } from "./types.ts";
-export { DomainError, isDomainError, type ErrorKind } from "./errors.ts";
+export { DomainError, isDomainError, unauthenticated, type ErrorKind } from "./errors.ts";
 export { inProcess, replaceKeyOf } from "./jobs.ts";
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ type OnlyKnownKeys<C> = { [K in Exclude<keyof C, keyof Config>]: never };
  * ```
  */
 export function init<C extends Config & OnlyKnownKeys<C>>() {
-  // One implementation behind the typed signature of `Constructor`; `checkExposure` is the runtime half that matters.
+  // One implementation behind the typed signature of `Constructor`: the types are the contract, the adapters check `authorize`.
   const make =
     <K extends Kind>(kind: K) =>
     (def: object) =>
@@ -250,7 +250,8 @@ interface Frame {
   signal?: AbortSignal;
   /** Passed to this very call: checked before it starts. */
   abortOn?: AbortSignal;
-  eventDepth?: number;
+  /** Hops in the chain of events and calls due now that led here: 0 for a call from outside. */
+  eventDepth: number;
   /** Inside a job: where the jobs it queues wait until it's settled. */
   queued?: Job[];
   tx?: TxState;
@@ -318,17 +319,8 @@ function assertPlain(value: unknown, what: string, hint: string): void {
 const isBranded = (v: unknown): v is Fn | EventDef | Listener | Cron => !!v && typeof v === "object" && BRAND in v;
 
 /**
- * Publishing needs `authorize` and `output`. The types say so; this holds for JS callers and casts too, because an
- * exposed function nobody authorizes is a hole, not a type error.
- */
-function checkExposure(id: string, fn: Fn) {
-  if (fn.expose && !fn.authorize) throw new Error(`[logic-sdk] ${id} has expose: true but no authorize. Say who may call it.`);
-  if (fn.expose && !fn.output) throw new Error(`[logic-sdk] ${id} has expose: true but no output. Say what callers may see.`);
-}
-
-/**
- * What `createRegistry` finds in your modules, without a database or services: every function, event and
- * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
+ * What `createRegistry` finds in your modules, without a database or services: every function, event, listener and
+ * cron with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
@@ -353,10 +345,7 @@ export function describeModules(modules: Record<string, object>) {
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
       else if (value.kind === "cron") crons.push({ id, module, name, cron: value });
-      else {
-        checkExposure(id, value);
-        functions.push({ id, module, name, kind: value.kind, fn: value, exposed: value.expose === true });
-      }
+      else functions.push({ id, module, name, kind: value.kind, fn: value });
     }
   }
   return { ids, functions, events, listeners, crons };
@@ -398,10 +387,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     }
   };
 
-  if (functions.some((f) => f.kind === "mutation") && database?.transactions !== "interactive")
+  if (!database && functions.some((f) => f.kind === "mutation"))
     throw new Error(
-      "[logic-sdk] Mutations need a database adapter with interactive transactions (e.g. drizzleAdapter(db)). " +
-        "Drivers without them (Cloudflare D1, HTTP drivers) are not supported for mutations.",
+      "[logic-sdk] Mutations need a database: createRegistry({ database: drizzleAdapter(db) }). It needs interactive " +
+        "transactions, so Cloudflare D1 and HTTP drivers can't run mutations.",
     );
   for (const l of listeners)
     if (!ids.has(l.event))
@@ -472,7 +461,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       db: tx.db,
       emit: (event, payload) => {
         // reserve the slot now so events keep emit order, even with async schemas
-        const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
+        const envelope = envelopeOf(event, payload, frame.scope, frame.eventDepth + 1);
         tx.events.push(envelope);
         checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`, (parsed) => tx.parsed.set(envelope, parsed));
       },
@@ -498,7 +487,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           input: structuredClone(input),
           scope: storedScope(frame.scope, `the scope scheduling ${fnId}`),
           attempts,
-          depth: waits ? 0 : (frame.eventDepth ?? 0) + 1, // due now, it's the next hop of this chain; a real wait starts a new one
+          depth: waits ? 0 : frame.eventDepth + 1, // due now, it's the next hop of this chain; a real wait starts a new one
         };
         if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
         if (replace !== undefined) {
@@ -537,7 +526,6 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 
   const { toJobs, deliver, jobs, due, checkHold } = makeJobs({
     listeners,
-    events,
     crons,
     functions,
     idOf,
@@ -651,11 +639,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   return {
-    modules: options.modules,
     as: (scope) => ({
       scope,
       run: (fn: Fn, input?: unknown, options?: RunOptions) =>
-        invoke(fn, input, enter({ scope, depth: -1 }, options), ["query", "mutation", "action"]), // depth 0
+        invoke(fn, input, enter({ scope, depth: -1, eventDepth: 0 }, options), ["query", "mutation", "action"]), // depth 0
     }),
     definitions: { functions, events, listeners, crons },
     idOf,
