@@ -52,3 +52,8 @@ export class StalePayload extends Error {}
  * Inside a function, a policy answers instead (a scope with no actor, then `forbidden`).
  */
 export const unauthenticated = (code = "unauthenticated", details?: unknown) => new DomainError("unauthenticated", code, details);
+
+/** An error and the ones it wraps (`cause`), five deep at most: a driver's error usually arrives wrapped by the ORM. */
+export function* causes(error: unknown): Generator<object> {
+  for (let e = error, i = 0; typeof e === "object" && e !== null && i < 5; e = "cause" in e ? e.cause : undefined, i++) yield e;
+}

@@ -31,7 +31,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 
 ## 3. Secure by default
 
-- ✅ **Private by default, published on purpose.** `authorize: staff` says who may call a function. Nothing is reachable from outside until you list it in your oRPC router or your agent's tools, and the adapters refuse a function without `authorize`. The API surface is one file, in review.
+- ✅ **Private by default, published on purpose.** `authorize: staff` says who may call a function. Nothing is reachable from outside until you publish it: your oRPC router and your agent's tools refuse a function without `authorize`, and your own routes are your code, calling functions that have one. The API surface is in files you review.
 - ✅ **Policies are written once and narrow types.** A `staff` function gets a non-null `scope.actor`, because its policy runs on every call, nested ones too.
 - ✅ **Record rules the Rails way.** Load through a scoped helper (404 for other accounts), then a sync `can*` check (403), reused for UI flags. The CLI keeps `can*` checks sync and used.
 - ✅ **Scope is explicit and typed:** actor, tenant, locale. Row-level tenancy lives in `data.ts` helpers that take `scope.accountId`.

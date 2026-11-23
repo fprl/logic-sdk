@@ -1,18 +1,14 @@
 import { ORPCError, os, type DecoratedProcedure } from "@orpc/server";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { isDomainError, type Caller, type ErrorKind, type Fn, type Kind, type PublishableFn } from "./index.ts";
-import type { ScopeOf } from "./types.ts";
+import { isDomainError, type Caller, type ErrorKind, type Fn, type Kind, type PublishableFn, type ScopeOfFn } from "./index.ts";
 
 /** oRPC context a procedure expects: bind who is calling per request, in your handler or middleware. */
 export type ORPCContext<S extends object> = { caller: Caller<S> };
 
-/** The scope of the `init` that defined `F`. */
-type ScopeOfFn<F> = F extends Fn<Kind, unknown, unknown, true, infer C> ? ScopeOf<C> : object;
-
 /** `toORPCProcedure(fn)`: an oRPC procedure, so `.use`, `.meta` and `.errors` work as on your own. */
 export type ProcedureOf<F> =
   F extends Fn<Kind, infer I, infer O>
-    ? DecoratedProcedure<ORPCContext<ScopeOfFn<F>>, ORPCContext<ScopeOfFn<F>>, StandardSchemaV1<I, I>, StandardSchemaV1<O, O>, {}>
+    ? DecoratedProcedure<ORPCContext<ScopeOfFn<F>>, object, StandardSchemaV1<I, I>, StandardSchemaV1<O, O>, {}>
     : never;
 
 /** Domain error kind → oRPC error code (and so HTTP status through oRPC's handlers). */

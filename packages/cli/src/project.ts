@@ -132,14 +132,11 @@ export async function loadProject(root: string): Promise<Project> {
   };
 
   // The app's own logic-sdk, so the CLI reads modules with the version the app runs.
-  const core = (await load("logic-sdk")) as Partial<typeof Core>;
-  if (typeof core.describeModules !== "function")
-    throw new CliError("core-too-old", "This app's logic-sdk has no describeModules().", "Update logic-sdk.");
+  const core = (await load("logic-sdk")) as typeof Core; // SAFETY: the peer range pins the app's logic-sdk to this CLI's
 
   const modules: Record<string, object> = {};
   for (const [key, { index }] of Object.entries(source.modules)) modules[key] = await load(index);
   const described = core.describeModules(modules);
-  if (!Array.isArray(described.crons)) throw new CliError("core-too-old", "This app's logic-sdk doesn't know crons.", "Update logic-sdk.");
 
   // Source is keyed by `<module>.<export>`; ids can differ when a definition sets its own `id`.
   const idByExport = new Map<string, string>();

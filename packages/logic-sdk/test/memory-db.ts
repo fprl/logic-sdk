@@ -7,7 +7,6 @@ export function memoryDatabase(store: Store = { rows: {} }): DatabaseAdapter<Sto
   return {
     store,
     db: store,
-    transactions: "interactive",
     async transaction(fn) {
       const tx: Store = { rows: structuredClone(store.rows) };
       const result = await fn(tx);

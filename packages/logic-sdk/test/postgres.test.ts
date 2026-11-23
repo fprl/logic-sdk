@@ -31,7 +31,6 @@ seamScenarios("jobs table: PGlite, no ORM", {
     const client = await openPglite();
     const database: SqlDatabase = {
       db: client,
-      transactions: "interactive",
       transaction: (fn) => client.transaction(fn),
       query: async (on, text, params) => (await on.query(text, params)).rows,
     };
@@ -56,7 +55,6 @@ if (url) {
       const client = await openPostgres(url);
       const database: SqlDatabase = {
         db: client,
-        transactions: "interactive",
         transaction: (fn) => client.begin(fn) as Promise<any>, // postgres.js types it for returning an array of queries
         query: (on, text, params) => on.unsafe(text, params),
       };

@@ -121,6 +121,8 @@ export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends b
  * `toAITool(caller, fn)`. Everyone is a decision too: `authorize: anyone`, with `const anyone = () => true`.
  */
 export type PublishableFn<K extends Kind = Kind, I = unknown, O = unknown, C extends Config = any> = Fn<K, I, O, true, C>;
+/** The scope of the `init` that defined `F`: what a caller running it must be bound to. */
+export type ScopeOfFn<F> = F extends Fn<Kind, unknown, unknown, true, infer C> ? ScopeOf<C> : object;
 /** What callers pass to a function. */
 export type FnIn<F> = F extends Fn<Kind, infer I, unknown> ? I : never;
 /** What a function returns. */
@@ -141,11 +143,11 @@ export interface EventDef<I = unknown, O = I> {
  * What a jobs adapter stores and delivers. Fully JSON: `payload` is what was emitted (validated),
  * and listeners get it parsed again by the event's payload schema at delivery.
  */
-export interface Envelope<P = unknown, S = object> {
+export interface Envelope {
   id: string;
   name: string;
-  payload: P;
-  scope: S;
+  payload: unknown;
+  scope: object;
   occurredAt: string;
   /** Hops in the chain: 1 for an event a caller's mutation emitted, +1 each time a listener's mutation emits (or a call it schedules to run now). */
   depth: number;
@@ -155,13 +157,13 @@ export interface Envelope<P = unknown, S = object> {
  * One listener's share of one event: what a queue carries, one message each, so a failing listener retries alone.
  * `id` (`<listener id>@<event id>`) is the key to dedupe on.
  */
-export interface Delivery<P = unknown, S = object> {
+export interface Delivery {
   /** What kind of job this is. Stored with it, so jobs queued today still run when other kinds exist. */
   kind: "delivery";
   id: string;
   /** The listener's id, `"<module>.<id or export>"`. */
   listener: string;
-  envelope: Envelope<P, S>;
+  envelope: Envelope;
   /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
   attempts: number;
   /** When it may run (ISO), for a listener with a `delay`. Absent: right away. */
@@ -378,7 +380,7 @@ type Def<C extends Config, K extends Kind, IS, OS, R, P, A> = {
   handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
 };
 /**
- * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'output' is missing")
+ * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'handler' is missing")
  * instead of "No overload matches this call". Keep `output: OS` plain: `OS & Schema` makes TypeScript compare the whole
  * schema type structurally on every definition (about 10x slower to check).
  */
@@ -389,7 +391,7 @@ export type Constructor<C extends Config, K extends Kind> = <
   P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>,
   // `authorize`'s return type, inferred after an inline policy is typed: `never` when there's none. `P` can't tell,
   // since an inline policy takes its default.
-  A = never,
+  A extends boolean = never,
 >(
   def: Def<C, K, IS, OS, R, P, A>,
 ) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [A] extends [never] ? false : true, C>;
@@ -407,7 +409,6 @@ export type OwnModules<C extends Config, Mods> = {
 export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   /** Root handle, used by top-level queries. */
   readonly db: Db;
-  readonly transactions: "interactive";
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
   /** An adapter bound to an existing transaction (nested transactions become savepoints). Used by the test helper. */
   nest?(tx: Tx): DatabaseAdapter<Tx, Tx>;
@@ -653,8 +654,6 @@ export interface Jobs {
 
 /** What `createRegistry` returns. `Cf` is your config's type, so tests can override parts of it. */
 export interface Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> {
-  /** The modules you registered (typed), for adapters that build typed routers. */
-  readonly modules: Mods;
   /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
   as(scope: S): Caller<S>;
   /** Everything you registered, with ids. Adapters and plugins read this. */

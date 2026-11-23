@@ -20,7 +20,7 @@ What's done, what's next, and what's known to be missing. Decisions and their re
 
 ## Done
 
-- **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call) plus `expose: true`; record rules as sync `can*` checks in the handler; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
+- **API (0.2.0):** `query`/`mutation`/`action`/`on`; `authorize: policy` (sync, scope-only, narrows, runs on every call), and `expose: true` (replaced in 0.5.0 by explicit publishing); record rules as sync `can*` checks in the handler; single-call `init<Config>()`; lazy `on(() => event)`; helpers take `ctx`; `createRegistry({ modules })` and `registry.as(scope)`.
 - **Transactions:** the policy check and validation before the transaction opens (policy first); transaction state per attempt; lost races retried (40001/40P01, 3 attempts with jitter).
 - **Errors:** `ctx.errors.reject`/`conflict`/`notFound`/`deny`, namespaced per module; `unauthenticated()` in the core; six kinds, no HTTP in core; bad input on a nested call is a bug (500).
 - **Contracts:** publishing is explicit (`toORPCProcedure(fn)` in your router, `toAITool(caller, fn)`), and needs `authorize`; `output` strips what leaves; typed `meta` per function, visible in `wrap`.

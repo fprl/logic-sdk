@@ -1,4 +1,5 @@
 import type { Job, Jobs, JobsAdapter } from "./index.ts";
+import { defaultBackoff } from "./stored-jobs.ts";
 
 /** What the adapter uses of a Cloudflare Queue binding: `env.JOBS` fits. */
 export interface QueueBinding {
@@ -81,7 +82,7 @@ export async function handleQueue(registry: { jobs: Pick<Jobs, "run"> }, batch: 
       message.ack();
     } catch {
       // already reported to onError. databaseQueue's curve, so a listener's tries aren't spent back to back.
-      message.retry({ delaySeconds: Math.ceil(Math.exp(Math.min(message.attempts, 10))) });
+      message.retry({ delaySeconds: Math.ceil(defaultBackoff(message.attempts)) });
     }
   }
 }

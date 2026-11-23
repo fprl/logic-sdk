@@ -55,7 +55,6 @@ seamScenarios("jobs table: node:sqlite, no ORM", {
     // one call at a time is all this list needs: the isolation is the Drizzle adapter's, tested below
     const database: SqlDatabase<DatabaseSync, DatabaseSync> = {
       db,
-      transactions: "interactive",
       async transaction(fn) {
         db.exec("begin immediate");
         try {

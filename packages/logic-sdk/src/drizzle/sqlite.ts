@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { DatabaseAdapter, Job, ReadWrite, SqlDatabase } from "../index.ts";
+import { causes } from "../errors.ts";
 
 export { databaseQueue, jobsSchema, outbox, type DatabaseQueueOptions, type OutboxOptions, type StoredJobs } from "../sqlite.ts";
 
@@ -61,7 +62,6 @@ export function drizzleAdapter<Db extends SyncSqlite>(
 
   return {
     db: reader,
-    transactions: "interactive",
     transactionAttempts: options.transactionAttempts,
     transaction,
     nest: (tx) => savepoints(tx),
@@ -77,7 +77,6 @@ function savepoints<Tx extends Pick<SyncSqlite, "all" | "run">>(tx: Tx): SqlData
   const takeTurn = turns();
   return {
     db: tx,
-    transactions: "interactive",
     transaction: (fn) =>
       takeTurn(async () => {
         exec(tx, "SAVEPOINT logic_sdk");
@@ -189,8 +188,8 @@ const settlesBy = (promise: Promise<void>, time: number) =>
 
 /** SQLITE_BUSY, also when Drizzle wraps it: someone else is writing. Laravel matches the same message. */
 function isBusy(error: unknown): boolean {
-  for (let e: any = error, i = 0; e && i < 5; e = e.cause, i++)
-    if (e.code === "SQLITE_BUSY" || /database is locked/.test(e.message)) return true;
+  for (const e of causes(error))
+    if (("code" in e && e.code === "SQLITE_BUSY") || (e instanceof Error && /database is locked/.test(e.message))) return true;
   return false;
 }
 

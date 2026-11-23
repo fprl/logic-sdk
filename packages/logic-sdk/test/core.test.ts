@@ -318,7 +318,7 @@ test("guards: unregistered functions and missing database", async () => {
   const { app } = setup();
   await expect(app.run(stray)).rejects.toThrow(/isn't registered/);
   let threw = false;
-  try { createRegistry({ modules: { items } }); } catch (e) { threw = /database adapter/.test((e as Error).message); }
+  try { createRegistry({ modules: { items } }); } catch (e) { threw = /Mutations need a database/.test((e as Error).message); }
   expect(threw).toBe(true);
 });
 
@@ -577,6 +577,11 @@ test("registry.jobs.run: a throw retries while the job has tries left; rules and
   expect(await r.jobs.run(job({ kind: "gone" }))).toEqual("failed"); // a rule said no
   await expect(r.jobs.run(job({ kind: "taken" }))).rejects.toMatchObject({ kind: "conflict" }); // a lost race retries
   expect(await r.jobs.run(job({ nope: 1 }))).toEqual("failed"); // the payload no longer matches its schema
+  runs = 0;
+  const forOld = { ...job({ kind: "fine" }), envelope: { ...job({ kind: "fine" }).envelope, name: "x.renamed" } };
+  expect(await r.jobs.run(forOld)).toEqual("failed"); // queued for an event this listener no longer listens to: never run
+  expect(runs).toBe(0);
+  expect(reported.at(-1)).toMatchObject({ source: "x.react", outcome: "failed" });
   await expect(r.jobs.run(job({ kind: "fine" }, "x.gone"))).rejects.toThrow(/x\.gone isn't a registered listener/); // code not here: a try like any other
   expect(reported.at(-1)).toMatchObject({ source: "x.gone", attempt: 1, outcome: "retry" });
   expect(await r.jobs.run(job({ kind: "fine" }, "x.gone"), { attempt: 3 })).toEqual("failed"); // the last try: kept for jobs.retry
@@ -663,12 +668,6 @@ test("authorize runs before validation: anonymous callers never see a protected 
   const { d } = regSetup();
   // @ts-expect-error invalid on purpose
   await expect(d.as({ actor: null, locale: "es" }).run(add, { name: 1 })).rejects.toMatchObject({ kind: "forbidden" });
-});
-
-test("adapters without interactive transactions are refused", () => {
-  let msg = "";
-  try { createRegistry({ modules: { items }, database: { ...memoryDatabase(), transactions: "none" } as any }); } catch (e) { msg = (e as Error).message; }
-  expect(/interactive transactions/.test(msg)).toBe(true);
 });
 
 test("invalid or denied calls never open a transaction", async () => {

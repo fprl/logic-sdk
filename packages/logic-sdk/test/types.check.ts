@@ -64,7 +64,6 @@ const onEv = listener({ event: () => ev, handler: async ({ event, services }, pa
 const registry = create({ modules: { c: { ev, getOne, ping, write, act, onEv } }, database: memoryDatabase(), services: { mail: () => {} } });
 // @ts-expect-error services are typed from init
 create({ modules: {}, services: { nope: 1 } });
-const mods: { c: { ev: typeof ev } } = { c: registry.modules.c };
 const app = registry.as({ actor: "a", tenant: "t" });
 async function check() {
   const r = await app.run(getOne, { id: "x" });
@@ -374,12 +373,11 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const prisma = {} as PrismaClient;
   const database = {
     db: prisma,
-    transactions: "interactive",
     transaction: (fn) => prisma.$transaction(fn),
     query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
   } satisfies SqlDatabase<PrismaClient, PrismaTx>;
   // @ts-expect-error without query, jobs can't use your database
-  ({ db: prisma, transactions: "interactive", transaction: (fn) => prisma.$transaction(fn) }) satisfies SqlDatabase<PrismaClient, PrismaTx>;
+  ({ db: prisma, transaction: (fn) => prisma.$transaction(fn) }) satisfies SqlDatabase<PrismaClient, PrismaTx>;
   const { createRegistry } = init<{ scope: { who: string }; db: ReadWrite<PrismaClient, PrismaTx> }>();
   createRegistry({ modules: {}, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
 }

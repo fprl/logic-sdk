@@ -85,14 +85,14 @@ A second Fable pass reviewed the built code and found real bugs. All are fixed, 
 1. **Pure services in mutations.** A mutation that needs a pure dependency (a pricing table, an id generator) currently has to use `db`, `now`, or a plain import. Should there be a `deps` slot for side-effect-free things, or is that the slope back to mocks?
 2. **A durable dispatcher.** Settled as a ladder of dispatchers (`inProcess`, after-commit queues, `databaseQueue`, `outbox(database, queue)`, `pgBoss`); see "Next: listeners, plugins, durable events, crons".
 3. **A Postgres `READ ONLY` transaction for queries**, as an adapter flag. Today it's a type-level guard only.
-4. **An MCP and AI SDK tools adapter** (`toAITools(registry)`): each exposed function is already `description` + `inputSchema` + `execute`. oRPC's MCP package covers it via `toORPCRouter` in the meantime.
+4. **An MCP and AI SDK tools adapter** (`toAITools(registry)`): each exposed function is already `description` + `inputSchema` + `execute`. oRPC's MCP package covers it via `toORPCRouter` in the meantime. *(Superseded by "Explicit publishing": no `expose`, adapters take functions one at a time.)*
 5. **The name.** `logic-sdk` ("Logic SDK") was free on npm and GitHub on 2026-11-19. `bounded` was taken by an unrelated agent-guardrails tool with its own `bounded` command. Whether the `@logic-sdk` scope is free couldn't be checked without logging in.
 
 ## 0.2.0: authorization, settled
 
 Reviewed against Laravel's current docs, 37signals' Fizzy source, Next.js, Convex, Phoenix and the RPC libraries, then stress-tested in several independent reviews.
 
-- **`authorize` and `expose` are two keys.** Every reference stack separates "reachable" (`"use server"`, Convex `query` vs `internalQuery`, TanStack `createServerFn`) from "who" (checks in the body, middleware). `expose: true` without `authorize` is a type error, so you still can't publish something without deciding who.
+- **`authorize` and `expose` are two keys.** Every reference stack separates "reachable" (`"use server"`, Convex `query` vs `internalQuery`, TanStack `createServerFn`) from "who" (checks in the body, middleware). `expose: true` without `authorize` is a type error, so you still can't publish something without deciding who. *(Superseded by "Explicit publishing": no `expose`, adapters take functions one at a time.)*
 - **Policies are sync type guards over scope, passed by reference.** Sync because TS can't narrow through a Promise and because they run before validation and before any database work. Return-style narrowing (tRPC's `next({ ctx })`) works too, but needs runtime identity checks to be safe; not worth a new concept for the handful of policies an app has.
 - **Policy before validation, and exactly `true`.** Anonymous callers never see a protected function's schema errors (Laravel authorizes first); a truthy non-boolean or a Promise fails closed.
 - **Record rules stay in `execute`, the Fizzy way.** Load through a scoped helper (404 for what you can't see), then a sync `can*` predicate (403), reused for UI flags in lists. Rejected: an async policy that loads the record (`ctx.auth`): it reads before the transaction, retries reuse the stale row, and lists need the predicate anyway. Rejected: `ctx.authorize(fn, record)`: a second way to call the same predicate. The CLI keeps the pattern safe instead: `async-can` (an async `can*` would fail open when negated) and `unused-can`.
@@ -139,7 +139,7 @@ export const sendReceipt = listener({
 - **Nouns, like the other definers:** `query`, `mutation`, `action`, `event`, `listener`, in a file called `listeners.ts`. The field is `event`, matching the `event()` it points at. Fable preferred keeping the name `on`; we chose consistency.
 - **The CLI reads object keys,** which is simpler and sturdier than positional arguments.
 - **The thunk stays.** Listeners run at module evaluation and module barrels import each other; accepting both `placed` and `() => placed` would be two ways to do one thing. What would change it: a typed string id (`event: "orders.placed"`) checked against the registry type, which costs the one-way type flow.
-- **Options are flat,** like `authorize` and `expose`, not under `config: {}` (which already means `ctx.config`). They arrive with durable delivery (below).
+- **Options are flat,** like `authorize` and `attempts`, not under `config: {}` (which already means `ctx.config`). They arrive with durable delivery (below).
 
 ### No `description` field: JSDoc for people, adapter meta for tools
 
@@ -207,7 +207,7 @@ createRegistry({ modules, plugins: [audit(), rateLimit({ store })] });  // a val
 
 - **Namespaced by plugin name** on both sides (`meta.rateLimit`, `ctx.audit`): no collisions, and it greps.
 - **Types:** `FunctionMetaOf<C>` and `ListenerMetaOf<C>` add `{ [P in Plugins as P["name"]]?: P["meta"] }`, and the ctx per kind adds `{ [P in Plugins as P["name"]]: P["ctx"][K] }`, so a plugin can add to mutations only.
-- **Runtime:** `{ name, wrap?, ctx?: { query?, mutation?, action? }, onRegister? }`. `wrap` is the existing hook; `onRegister` sees every definition, for checks like "every exposed mutation has a rate limit".
+- **Runtime:** `{ name, wrap?, ctx?: { query?, mutation?, action? }, onRegister? }`. `wrap` is the existing hook; `onRegister` sees every definition, for checks like "every published mutation has a rate limit".
 - **Jobs are core, not a plugin.** Scheduling needs the transaction handle, which is the dispatcher's seam.
 - **What would change it:** a plugin whose ctx type depends on per-function order. Same test as middleware above.
 

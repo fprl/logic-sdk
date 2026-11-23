@@ -81,6 +81,7 @@ export type {
   Out,
   Policy,
   PublishableFn,
+  ScopeOfFn,
   QueryCtx,
   ReadWrite,
   Registered,
@@ -249,7 +250,8 @@ interface Frame {
   signal?: AbortSignal;
   /** Passed to this very call: checked before it starts. */
   abortOn?: AbortSignal;
-  eventDepth?: number;
+  /** Hops in the chain of events and calls due now that led here: 0 for a call from outside. */
+  eventDepth: number;
   /** Inside a job: where the jobs it queues wait until it's settled. */
   queued?: Job[];
   tx?: TxState;
@@ -317,8 +319,8 @@ function assertPlain(value: unknown, what: string, hint: string): void {
 const isBranded = (v: unknown): v is Fn | EventDef | Listener | Cron => !!v && typeof v === "object" && BRAND in v;
 
 /**
- * What `createRegistry` finds in your modules, without a database or services: every function, event and
- * listener with its id. For tools (the CLI, docs generators) that inspect an app without running it.
+ * What `createRegistry` finds in your modules, without a database or services: every function, event, listener and
+ * cron with its id. For tools (the CLI, docs generators) that inspect an app without running it.
  */
 export function describeModules(modules: Record<string, object>) {
   const ids = new Map<object, string>();
@@ -385,10 +387,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     }
   };
 
-  if (functions.some((f) => f.kind === "mutation") && database?.transactions !== "interactive")
+  if (!database && functions.some((f) => f.kind === "mutation"))
     throw new Error(
-      "[logic-sdk] Mutations need a database adapter with interactive transactions (e.g. drizzleAdapter(db)). " +
-        "Drivers without them (Cloudflare D1, HTTP drivers) are not supported for mutations.",
+      "[logic-sdk] Mutations need a database: createRegistry({ database: drizzleAdapter(db) }). It needs interactive " +
+        "transactions, so Cloudflare D1 and HTTP drivers can't run mutations.",
     );
   for (const l of listeners)
     if (!ids.has(l.event))
@@ -459,7 +461,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       db: tx.db,
       emit: (event, payload) => {
         // reserve the slot now so events keep emit order, even with async schemas
-        const envelope = envelopeOf(event, payload, frame.scope, (frame.eventDepth ?? 0) + 1);
+        const envelope = envelopeOf(event, payload, frame.scope, frame.eventDepth + 1);
         tx.events.push(envelope);
         checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`, (parsed) => tx.parsed.set(envelope, parsed));
       },
@@ -485,7 +487,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           input: structuredClone(input),
           scope: storedScope(frame.scope, `the scope scheduling ${fnId}`),
           attempts,
-          depth: waits ? 0 : (frame.eventDepth ?? 0) + 1, // due now, it's the next hop of this chain; a real wait starts a new one
+          depth: waits ? 0 : frame.eventDepth + 1, // due now, it's the next hop of this chain; a real wait starts a new one
         };
         if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
         if (replace !== undefined) {
@@ -524,7 +526,6 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 
   const { toJobs, deliver, jobs, due, checkHold } = makeJobs({
     listeners,
-    events,
     crons,
     functions,
     idOf,
@@ -638,11 +639,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   return {
-    modules: options.modules,
     as: (scope) => ({
       scope,
       run: (fn: Fn, input?: unknown, options?: RunOptions) =>
-        invoke(fn, input, enter({ scope, depth: -1 }, options), ["query", "mutation", "action"]), // depth 0
+        invoke(fn, input, enter({ scope, depth: -1, eventDepth: 0 }, options), ["query", "mutation", "action"]), // depth 0
     }),
     definitions: { functions, events, listeners, crons },
     idOf,

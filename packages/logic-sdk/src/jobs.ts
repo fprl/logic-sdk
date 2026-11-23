@@ -18,7 +18,6 @@ import type {
   Jobs,
   ListenerEvent,
   RegisteredCron,
-  RegisteredEvent,
   RegisteredFn,
   RegisteredListener,
   RunJobOptions,
@@ -59,7 +58,6 @@ export const deliveryOf = (l: RegisteredListener, e: Envelope): Delivery => ({
 /** What running jobs needs from the registry: its definitions, and how it runs a function or a listener's handler. */
 export interface JobsDeps {
   listeners: readonly RegisteredListener[];
-  events: readonly RegisteredEvent[];
   crons: readonly RegisteredCron[];
   functions: readonly RegisteredFn[];
   idOf(x: object): string;
@@ -71,7 +69,7 @@ export interface JobsDeps {
   wrap(call: Call, next: () => Promise<unknown>): Promise<unknown>;
   report(error: unknown, info: FailureInfo): void;
   /** Run a function as `scope`, like `registry.as(scope).run`. `eventDepth`: the chain's hops so far (a scheduled call's `depth`). */
-  runAs(fn: Fn, input: unknown, scope: object, eventDepth: number | undefined, queued: Job[] | undefined): Promise<unknown>;
+  runAs(fn: Fn, input: unknown, scope: object, eventDepth: number, queued: Job[] | undefined): Promise<unknown>;
   /** The ctx a listener's handler gets, as `scope`, in an event chain `eventDepth` deep. */
   listenerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined): ActionCtx<any>;
 }
@@ -81,7 +79,7 @@ export interface JobsDeps {
  * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, events, crons, functions, idOf, jobsAdapter, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
+  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
   const keepFailed = jobsAdapter.fail?.bind(jobsAdapter);
   const enqueue = jobsAdapter.enqueue?.bind(jobsAdapter);
 
@@ -91,7 +89,6 @@ export function makeJobs(deps: JobsDeps) {
     const name = idOf(l.event);
     byEvent.set(name, [...(byEvent.get(name) ?? []), l]);
   }
-  const eventByName = new Map(events.map((e) => [e.id, e.event]));
 
   const listenerById = new Map(listeners.map((l) => [l.id, l]));
 
@@ -207,7 +204,7 @@ export function makeJobs(deps: JobsDeps) {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
       return attemptOnce(async () => {
-        await runAs(c.cron.run, c.cron.input, c.cron.scope, undefined, queued);
+        await runAs(c.cron.run, c.cron.input, c.cron.scope, 0, queued);
         return "done";
       });
     }
@@ -225,17 +222,16 @@ export function makeJobs(deps: JobsDeps) {
     const l = listenerById.get(job.listener);
     if (!l) return missing("listener", job.listener);
     const { envelope } = job;
-    const event = eventByName.get(envelope.name);
     return attemptOnce(async () => {
       const scope = await scopeOf(job, envelope.scope, attempt);
       if (!scope) return "discarded";
       await wrap({ id: l.id, kind: "listener", meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
-        let payload = envelope.payload;
-        if (event) {
-          const r = await event.payload["~standard"].validate(payload);
-          if (r.issues) throw new StalePayload(`[logic-sdk] ${envelope.name} payload no longer matches its schema: ${JSON.stringify(describeIssues(r.issues))}`);
-          payload = r.value;
-        }
+        // its listener's event now: one renamed without an `id`, or a listener moved to another event, leaves stale jobs
+        if (idOf(l.event) !== envelope.name)
+          throw new StalePayload(`[logic-sdk] ${l.id} now listens to ${idOf(l.event)}, and this job is for ${envelope.name}.`);
+        const r = await l.event.payload["~standard"].validate(envelope.payload);
+        if (r.issues) throw new StalePayload(`[logic-sdk] ${envelope.name} payload no longer matches its schema: ${JSON.stringify(describeIssues(r.issues))}`);
+        const payload = r.value;
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
         return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
       });

@@ -1,5 +1,5 @@
 import { jsonSchema, tool, type Tool } from "ai";
-import { isDomainError, type Caller, type FnIn, type FnOut, type ForFunctions, type PublishableFn } from "./index.ts";
+import { isDomainError, type Caller, type FnIn, type FnOut, type ForFunctions, type PublishableFn, type ScopeOfFn } from "./index.ts";
 
 /**
  * What this adapter reads from a function's `meta` (not a listener's). Add it to your meta shape:
@@ -39,12 +39,12 @@ const noInput = jsonSchema({ type: "object", properties: {}, additionalPropertie
  * to `onError` and the model gets "internal_error", so internals never land in its context.
  */
 export function toAITool<F extends PublishableFn>(
-  caller: Caller<object>,
+  caller: Caller<ScopeOfFn<F>>,
   fn: F,
   options: AIToolOptions = {},
 ): Tool<FnIn<F>, FnOut<F>> {
-  const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
   if (!fn.authorize) throw new Error("[logic-sdk] toAITool publishes a function, so it needs authorize: say who may call it (everyone is `authorize: anyone`).");
+  const onError = options.onError ?? ((e) => console.error("[logic-sdk] tool failed unexpectedly", e));
   return tool({
     description: options.description ?? aiMeta(fn)?.description,
     inputSchema: fn.input ?? noInput,

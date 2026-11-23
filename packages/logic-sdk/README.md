@@ -98,7 +98,7 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 - **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `drizzleAdapter(db, { transactionAttempts })`.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
-- **Internal by default.** A function reaches HTTP, RPC or an AI tool only when you list it in your router or tools, and only with an `authorize`.
+- **Internal by default.** A function reaches clients only when you publish it: in your oRPC router or an agent's tools, which refuse one without `authorize`, or from your own route, which should only call functions that have one.
 - **Agents included.** `toAITool` gives an agent your functions, under the same policies and transactions as your API, one function at a time.
 - **Settings in one place.** Declare `config` once, fill it from env at the entry, read `ctx.config` anywhere. The CLI fails the build if a module reads env.
 - **Errors without HTTP.** `ctx.errors.reject`, `conflict`, `notFound`, `deny`; adapters map them to statuses.
