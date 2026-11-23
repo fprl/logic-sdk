@@ -1,12 +1,12 @@
 // What the jobs table promises on any database, whatever runs its SQL: every database and driver runs this one list.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { init, type Dispatcher, type Job, type SqlDatabase } from "../src/index.ts";
+import { init, type JobsAdapter, type Job, type SqlDatabase } from "../src/index.ts";
 import type { StoredJobs } from "../src/stored-jobs.ts";
 
 export interface Target {
   databaseQueue(database: SqlDatabase): StoredJobs;
-  outbox(database: SqlDatabase, queue: Dispatcher): StoredJobs;
+  outbox(database: SqlDatabase, queue: JobsAdapter): StoredJobs;
   /** `$1` on Postgres, `?` on SQLite. */
   param: string;
   /** A time that's over, in SQL. */
@@ -29,7 +29,7 @@ export function seamScenarios(name: string, target: Target) {
     // spread: postgres.js's rows are an Array subclass, which toMatchObject won't match to a plain one
     const run = async (text: string, params: unknown[] = []) => [...(await running.database.query(running.database.db, text, params))];
 
-    async function app(adapter?: (database: SqlDatabase) => Dispatcher) {
+    async function app(adapter?: (database: SqlDatabase) => JobsAdapter) {
       const { database } = running;
       await run("delete from logic_jobs");
       await run("delete from logic_cron_runs");

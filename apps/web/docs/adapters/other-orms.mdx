@@ -6,7 +6,7 @@ description: Prisma, or anything that can run SQL in a transaction, with the sam
 A database adapter is a small object. `transaction` gives you mutations. `query` adds jobs in your database: it runs one SQL statement, on the database or inside the transaction it's given.
 
 ```ts
-import type { DatabaseAdapter } from "logic-sdk";
+import type { SqlDatabase } from "logic-sdk";
 import { databaseQueue } from "logic-sdk/postgres";
 
 const database = {
@@ -14,7 +14,7 @@ const database = {
   transactions: "interactive",
   transaction: (fn) => prisma.$transaction(fn),
   query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
-} satisfies DatabaseAdapter<PrismaClient, Prisma.TransactionClient>;
+} satisfies SqlDatabase<PrismaClient, Prisma.TransactionClient>;
 
 createRegistry({
   modules,
@@ -23,6 +23,7 @@ createRegistry({
 });
 ```
 
+- **`SqlDatabase` is a `DatabaseAdapter` with `query`,** so a forgotten `query` is a type error here, not a failed job later. Mutations alone need only `DatabaseAdapter`.
 - **`outbox(database, queue)` has the same shape,** from the same import.
 - **`query` gets `$1`, `$2`… and only strings and numbers,** and resolves the rows as objects. The SQL casts them itself, so your driver doesn't have to guess a type.
 - **The type of your database** is `db: ReadWrite<PrismaClient, Prisma.TransactionClient>` in `Config`: what queries get, and what mutations get.

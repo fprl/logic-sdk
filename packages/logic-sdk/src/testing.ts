@@ -1,21 +1,21 @@
 import {
-  internal,
   replaceKeyOf,
   type Caller,
   type DeepPartial,
   type CallJob,
   type Delivery,
-  type DeliveryOutcome,
-  type Dispatcher,
   type Envelope,
   type Fn,
   type FnIn,
   type FnOut,
   type Job,
+  type JobOutcome,
+  type JobsAdapter,
   type Listener,
   type Registry,
 } from "./index.ts";
 import { deliveryOf } from "./jobs.ts";
+import { INTERNAL } from "./types.ts";
 
 export interface TestOptions<Cf = unknown> {
   /** Replace services (e.g. `{ mailer: memoryMailer() }`). */
@@ -45,7 +45,7 @@ export interface TestJobs<S> {
    */
   drain(options?: { until?: Date | string }): Promise<void>;
   /** Run one listener by hand, as if its event had been emitted as `scope`. Throws its failure, like `drain()`. */
-  perform<O>(listener: Listener<O>, payload: O, options: { scope: S; attempt?: number }): Promise<DeliveryOutcome>;
+  perform<O>(listener: Listener<O>, payload: O, options: { scope: S; attempt?: number }): Promise<JobOutcome>;
   /** Run the crons due in `at`'s minute (default: the test's now), here and now. Resolves their ids; throws a failure. */
   tick(at?: Date | string): Promise<string[]>;
 }
@@ -88,7 +88,7 @@ class Rollback extends Error {}
  * is everything else; the rest runs now. It holds and replaces what your app's adapter does, so a test fails where
  * production would.
  */
-const testJobs = (mode: TestOptions["jobs"], app: Dispatcher | undefined, queued: Delivery[], scheduled: CallJob[]): Dispatcher => ({
+const testJobs = (mode: TestOptions["jobs"], app: JobsAdapter | undefined, queued: Delivery[], scheduled: CallJob[]): JobsAdapter => ({
   holds: app?.holds,
   replaces: app?.replaces,
   async deliver(jobs, runner) {
@@ -130,7 +130,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
   registry: Registry<S, Mods, Cf>,
   options: TestOptions<Cf> = {},
 ): TestRegistry<S, Mods, Cf> {
-  const { options: registryOptions } = internal(registry);
+  const { options: registryOptions } = registry[INTERNAL];
   const fixed = options.now;
   const now = typeof fixed === "function" ? fixed : fixed === undefined ? undefined : () => new Date(fixed);
   /** While `drain()` runs a job that waited, the time it was due: what `ctx.now()` reads then. */
@@ -153,7 +153,7 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
     const queued: Delivery[] = [];
     const scheduled: CallJob[] = [];
     const failures: unknown[] = [];
-    const derived = internal(registry).derive({
+    const derived = registry[INTERNAL].derive({
       database: db !== undefined && database?.nest ? database.nest(db) : database,
       services: options.services,
       config: options.config,
@@ -273,12 +273,12 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
         const state = current();
         const registered = state.registry.definitions.listeners.find((l) => l.listener === listener);
         if (!registered) throw new Error("[logic-sdk] t.jobs.perform got a listener that isn't registered: export it from its module.");
-        const envelope = internal(state.registry).envelope(registered.event, payload, scope);
+        const envelope = state.registry[INTERNAL].envelope(registered.event, payload, scope);
         return settle(state, () => state.registry.jobs.run(deliveryOf(registered, envelope), { attempt }));
       },
       async tick(at) {
         const state = current();
-        const jobs = internal(state.registry).due(at === undefined ? clock() : new Date(at));
+        const jobs = state.registry[INTERNAL].due(at === undefined ? clock() : new Date(at));
         for (const job of jobs) await settle(state, () => state.registry.jobs.run(job));
         return jobs.map((job) => job.cron);
       },

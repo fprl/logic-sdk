@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
 import { z } from "zod";
-import { inProcess, init, type DatabaseAdapter, type Dispatcher, type ForListeners, type ReadWrite } from "../src/index.ts";
+import { inProcess, init, type ForListeners, type JobsAdapter, type ReadWrite, type SqlDatabase } from "../src/index.ts";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
 type Scope = { actor: string | null; tenant: string };
@@ -276,6 +276,8 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   // @ts-expect-error queries can't write
   d.query({ handler: async (ctx) => ctx.db.insert });
   d.mutation({ handler: async (ctx) => ctx.db.insert });
+  // @ts-expect-error no savepoints: one rolled back would keep the events emitted inside it
+  d.mutation({ handler: async (ctx) => ctx.db.transaction });
   d.createRegistry({ modules: {}, database: drizzleAdapter({} as PgliteDatabase) });
   // @ts-expect-error the registry still needs the database
   d.createRegistry({ modules: {} });
@@ -343,7 +345,7 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
 // an adapter that keeps jobs needs jobs.scope
 {
   const { createRegistry } = init<{ scope: { userId: string; role: string } }>();
-  const queue: Dispatcher = { async deliver() {} };
+  const queue: JobsAdapter = { async deliver() {} };
   createRegistry({ modules: {}, jobs: { adapter: inProcess() } });
   createRegistry({ modules: {}, jobs: { adapter: queue, scope: { load: (saved) => saved } } });
   createRegistry({
@@ -371,7 +373,9 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
     transactions: "interactive",
     transaction: (fn) => prisma.$transaction(fn),
     query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
-  } satisfies DatabaseAdapter<PrismaClient, PrismaTx>;
+  } satisfies SqlDatabase<PrismaClient, PrismaTx>;
+  // @ts-expect-error without query, jobs can't use your database
+  ({ db: prisma, transactions: "interactive", transaction: (fn) => prisma.$transaction(fn) }) satisfies SqlDatabase<PrismaClient, PrismaTx>;
   const { createRegistry } = init<{ scope: { who: string }; db: ReadWrite<PrismaClient, PrismaTx> }>();
   createRegistry({ modules: {}, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
 }
@@ -386,4 +390,22 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   query({ handler: async (ctx) => ctx.db.insert });
   // @ts-expect-error the function, not a connection
   sqlite.drizzleAdapter(open());
+}
+
+// A module defined with another init() would run with this registry's scope: an error, events aside
+{
+  const shop = init<{ scope: { user: string | null } }>();
+  const admin = init<{ scope: { admin: string } }>();
+  const placed = shop.event({ payload: z.object({ id: z.string() }) });
+  const refund = shop.mutation({ handler: async (ctx) => ctx.scope.user });
+  const audit = shop.listener({ event: () => placed, handler: async () => {} });
+  const sweep = shop.cron({ schedule: "0 * * * *", run: refund, scope: { user: null } });
+  const ban = admin.mutation({ handler: async (ctx) => ctx.scope.admin });
+  admin.createRegistry({ modules: { admin: { ban, placed } } });
+  // @ts-expect-error a mutation from the shop's init
+  admin.createRegistry({ modules: { admin: { ban, refund } } });
+  // @ts-expect-error a listener from the shop's init
+  admin.createRegistry({ modules: { admin: { audit } } });
+  // @ts-expect-error a cron from the shop's init
+  admin.createRegistry({ modules: { admin: { sweep } } });
 }

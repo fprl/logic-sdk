@@ -7,7 +7,7 @@ import postgres from "postgres";
 import { z } from "zod";
 import { drizzleAdapter } from "../src/drizzle/pg.ts";
 import { init, type DatabaseAdapter, type FailureInfo, type Job } from "../src/index.ts";
-import { CALLS_QUEUE, pgBoss, pgBossId, queueName, work, type PgBossMeta } from "../src/pg-boss.ts";
+import { pgBoss, pgBossId, work, type PgBossMeta } from "../src/pg-boss.ts";
 
 // pg-boss polls and backs off in real time: these wait for its workers, a few seconds at most.
 setDefaultTimeout(20_000);
@@ -141,8 +141,8 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     return b;
   }
   /** pg-boss's rows for a listener's job about `name`. */
-  const rowsAbout = (listener: string, name: string) => boss.findJobs<Job>(queueName(listener), { data: { envelope: { payload: { name } } } });
-  const callRow = async (id: string) => (await boss.findJobs<Job>(CALLS_QUEUE, { id: pgBossId(id) }))[0];
+  const rowsAbout = (listener: string, name: string) => boss.findJobs<Job>(`logic-sdk.${listener}`, { data: { envelope: { payload: { name } } } });
+  const callRow = async (id: string) => (await boss.findJobs<Job>("logic-sdk.calls", { id: pgBossId(id) }))[0];
 
   beforeAll(async () => {
     backend = open();
@@ -216,7 +216,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     const at = new Date("2028-02-29T09:00:00Z");
     expect(await registry.jobs.tick(at)).toEqual(["x.leapDay"]);
     expect(await other.jobs.tick(at)).toEqual(["x.leapDay"]);
-    expect(await boss.findJobs(queueName("x.leapDay"))).toHaveLength(1); // one row, so one run
+    expect(await boss.findJobs("logic-sdk.x.leapDay")).toHaveLength(1); // one row, so one run
     await until(() => ran.includes("digest"));
   });
 
@@ -234,7 +234,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     const second = await app.run(plan, { n: 11, delay: 120, replace: "booking-1" });
     await expect(app.run(plan, { n: 12, delay: 60, replace: "booking-1", fail: true })).rejects.toThrow();
 
-    const waiting = await boss.findJobs<Job>(CALLS_QUEUE, { key: "x.remind@booking-1" });
+    const waiting = await boss.findJobs<Job>("logic-sdk.calls", { key: "x.remind@booking-1" });
     expect(waiting.map((j) => j.id)).toEqual([pgBossId(second)]);
     expect(waiting[0]?.data).toMatchObject({ id: second, input: { n: 11 } });
     expect(await callRow(first)).toBeUndefined();
@@ -242,7 +242,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
 
   test("ctx.schedule replace: two transactions replacing the same key at once leave one waiting call", async () => {
     const ids = await Promise.all([20, 21, 22].map((n) => app.run(plan, { n, delay: 60, replace: "booking-3" })));
-    const waiting = await boss.findJobs<Job>(CALLS_QUEUE, { key: "x.remind@booking-3" });
+    const waiting = await boss.findJobs<Job>("logic-sdk.calls", { key: "x.remind@booking-3" });
     expect(waiting.map((j) => j.id)).toHaveLength(1);
     expect(ids.map(pgBossId)).toEqual(expect.arrayContaining(waiting.map((j) => j.id)));
   });
@@ -253,7 +253,7 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     await until(async () => (await callRow(started))?.state === "retry"); // failed its first try: back in line with one left
     const newer = await app.run(plan, { n: 2, delay: 60, replace: "booking-2" });
 
-    const rows = await boss.findJobs<Job>(CALLS_QUEUE, { key: "x.remind@booking-2" });
+    const rows = await boss.findJobs<Job>("logic-sdk.calls", { key: "x.remind@booking-2" });
     expect(rows.map((j) => j.data.id).sort()).toEqual([started, newer].sort());
     expect((await callRow(newer))?.state).toBe("created");
   });
@@ -273,14 +273,14 @@ describe.each(backends)("pgBoss on %s", (_name, open) => {
     const enqueuer = await start(); // a web process: started, never called work()
     const web = createRegistry({ modules: { x: modules.x, y: { fresh } }, database: backend.database, jobs: { adapter: pgBoss(enqueuer), scope: { load: (saved) => saved } } });
     await web.as({ actor: "ana" }).run(add, { name: "first" });
-    expect(await enqueuer.findJobs<Job>(queueName("y.fresh"), { data: { envelope: { payload: { name: "first" } } } })).toHaveLength(1);
-    expect(await enqueuer.getQueue(queueName("y.fresh"))).toMatchObject({ expireInSeconds: 77 }); // created with its meta
+    expect(await enqueuer.findJobs<Job>("logic-sdk.y.fresh", { data: { envelope: { payload: { name: "first" } } } })).toHaveLength(1);
+    expect(await enqueuer.getQueue("logic-sdk.y.fresh")).toMatchObject({ expireInSeconds: 77 }); // created with its meta
   });
 
   test("meta.pgBoss tunes the listener's queue and its workers", async () => {
-    const queue = await boss.getQueue(queueName("x.react"));
+    const queue = await boss.getQueue("logic-sdk.x.react");
     expect(queue).toMatchObject({ expireInSeconds: 120, retryDelayMax: 1 });
-    const workers = boss.getWipData().filter((w) => w.name === queueName("x.react"));
+    const workers = boss.getWipData().filter((w) => w.name === "logic-sdk.x.react");
     expect(workers.every((w) => w.options.localConcurrency === 2 && w.options.perJobResults === true)).toBe(true);
     expect(workers.length).toBeGreaterThan(0);
   });

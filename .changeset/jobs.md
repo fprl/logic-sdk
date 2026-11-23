@@ -25,5 +25,5 @@ await registry.jobs.run(message.body, { attempt: message.attempts }); // a queue
 - Every definer takes an optional `id`, local to its module (`listener({ id: "send" })` in `notifications` is `notifications.send`), so you can rename an export without orphaning queued jobs. Duplicates throw at `createRegistry`. The CLI shows and links definitions by these ids.
 - Jobs carry `kind: "delivery"`, and their id is now `<listener id>@<event id>` (BullMQ rejects `:` in job ids).
 - `registry.jobs.sweep()` runs what the adapter has due; adapters that store nothing resolve zeros. `registry.jobs.retry(id)` only revives failed jobs and returns whether it did, and throws on `inProcess()`. `databaseQueue`'s `retry` used to reset any row, so it could run a pending one twice at once.
-- The adapter contract (`Dispatcher`) gets optional `sweep(run, options)` and `retry(id)`.
+- The adapter contract (`JobsAdapter`) gets optional `sweep(run, options)` and `retry(id)`.
 - `registry.functions`, `registry.events` and `registry.listeners` are now `registry.definitions.functions`, `.events` and `.listeners`.

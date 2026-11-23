@@ -1,4 +1,4 @@
-import type { Dispatcher, Job, Jobs } from "./index.ts";
+import type { Job, Jobs, JobsAdapter } from "./index.ts";
 
 /** What the adapter uses of a Cloudflare Queue binding: `env.JOBS` fits. */
 export interface QueueBinding {
@@ -30,7 +30,7 @@ const encoder = new TextEncoder();
  * them); behind an outbox it's durable: `jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, load } }`.
  * Run them with `handleQueue(registry, batch)` in your consumer.
  */
-export function cloudflareQueue(queue: QueueBinding): Dispatcher {
+export function cloudflareQueue(queue: QueueBinding): JobsAdapter {
   return {
     holds: { max: MAX_DELAY }, // delaySeconds, up to 24 hours
     async deliver(jobs) {

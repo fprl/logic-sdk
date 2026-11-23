@@ -7,13 +7,13 @@ import type {
   CronJob,
   DatabaseAdapter,
   Delivery,
-  DeliveryOutcome,
-  Dispatcher,
   Envelope,
   FailureInfo,
   Fn,
   InProcess,
   Job,
+  JobOutcome,
+  JobsAdapter,
   JobScope,
   Jobs,
   ListenerEvent,
@@ -39,7 +39,7 @@ const IN_PROCESS: InProcess = {
  */
 export const inProcess = (): InProcess => IN_PROCESS;
 /** `inProcess()`: runs each job right after commit, in this process, so no scope waits at rest. */
-export const runsNow = (adapter: Dispatcher) => adapter === IN_PROCESS;
+export const runsNow = (adapter: JobsAdapter) => adapter === IN_PROCESS;
 
 /**
  * What makes a scheduled call replaceable, `<function id>@<key>`: a newer call with the same one replaces it while it
@@ -63,7 +63,7 @@ export interface JobsDeps {
   crons: readonly RegisteredCron[];
   functions: readonly RegisteredFn[];
   idOf(x: object): string;
-  dispatcher: Dispatcher;
+  jobsAdapter: JobsAdapter;
   database: DatabaseAdapter<unknown, unknown> | undefined;
   jobScope: JobScope | undefined;
   maxEventDepth: number;
@@ -81,9 +81,9 @@ export interface JobsDeps {
  * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, events, crons, functions, idOf, dispatcher, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
-  const keepFailed = dispatcher.fail?.bind(dispatcher);
-  const enqueue = dispatcher.enqueue?.bind(dispatcher);
+  const { listeners, events, crons, functions, idOf, jobsAdapter, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
+  const keepFailed = jobsAdapter.fail?.bind(jobsAdapter);
+  const enqueue = jobsAdapter.enqueue?.bind(jobsAdapter);
 
   // ── listeners ────────────────────────────────────────────────────────────
   const byEvent = new Map<string, RegisteredListener[]>();
@@ -104,7 +104,7 @@ export function makeJobs(deps: JobsDeps) {
    * kept in memory it'd be lost on restart. Laravel's sync queue drops the delay; we refuse instead.
    */
   function checkHold(what: string, seconds: number) {
-    const { holds } = dispatcher;
+    const { holds } = jobsAdapter;
     if (!holds)
       throw new Error(`[logic-sdk] ${what} waits ${seconds}s, but your jobs adapter can't hold jobs (inProcess() can't). Use databaseQueue(database).`);
     if (holds !== true && seconds > holds.max)
@@ -121,7 +121,7 @@ export function makeJobs(deps: JobsDeps) {
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
     const loop = (what: string) => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (maxEventDepth): stopped queueing ${what} (a loop?)`);
-    if (deepEvent) report(loop(deepEvent.name), { source: "(dispatcher)" });
+    if (deepEvent) report(loop(deepEvent.name), { source: "(jobs adapter)" });
     else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
     const deliveries = envelopes.filter(fits).flatMap((e) =>
       (byEvent.get(e.name) ?? []).map((l): Delivery => {
@@ -136,7 +136,7 @@ export function makeJobs(deps: JobsDeps) {
 
   /** An adapter that couldn't take a commit's jobs: each one may be lost, so each is reported. */
   const reportEach = (error: unknown, jobs: Job[]) => {
-    for (const job of jobs) report(error, { source: "(dispatcher)", job });
+    for (const job of jobs) report(error, { source: "(jobs adapter)", job });
   };
 
   /** What `onError` hears about a job. */
@@ -159,7 +159,7 @@ export function makeJobs(deps: JobsDeps) {
    * help and there are tries left. `fail` keeps a job that failed for good. The jobs it queues land in `queued`, for
    * `deliver` to run once this one is settled; without it (`registry.jobs.run`, in a consumer) they're delivered at once.
    */
-  async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}, queued?: Job[]): Promise<DeliveryOutcome> {
+  async function runJob(job: Job, { attempt = 1, fail }: RunJobOptions = {}, queued?: Job[]): Promise<JobOutcome> {
     const info = infoOf(job, attempt);
     // read before narrowing: a job queued by another version can have a kind this one doesn't know
     const { id, kind }: { id: string; kind: string } = job;
@@ -169,7 +169,7 @@ export function makeJobs(deps: JobsDeps) {
       return "failed" as const;
     };
     /** One try of the job's `attempts`. */
-    const attemptOnce = async (work: () => Promise<DeliveryOutcome>): Promise<DeliveryOutcome> => {
+    const attemptOnce = async (work: () => Promise<JobOutcome>): Promise<JobOutcome> => {
       const { attempts } = job;
       // its last try was claimed but never finished: a crash, or slower than the lease (Laravel checks this too)
       if (attempt > attempts)
@@ -248,7 +248,7 @@ export function makeJobs(deps: JobsDeps) {
     while (jobs.length) {
       const batch = jobs;
       jobs = [];
-      await dispatcher.deliver(batch, runnerInto(jobs)).catch((e) => reportEach(e, batch));
+      await jobsAdapter.deliver(batch, runnerInto(jobs)).catch((e) => reportEach(e, batch));
     }
   }
 
@@ -277,13 +277,13 @@ export function makeJobs(deps: JobsDeps) {
     },
     async sweep(options) {
       const queued: Job[] = [];
-      const result = (await dispatcher.sweep?.(runnerInto(queued), options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 };
+      const result = (await jobsAdapter.sweep?.(runnerInto(queued), options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 };
       await deliver(queued);
       return result;
     },
     async retry(id) {
-      if (!dispatcher.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(database), outbox(database, queue) and pgBoss(boss) do.`);
-      return dispatcher.retry(id);
+      if (!jobsAdapter.retry) throw new Error(`[logic-sdk] your jobs adapter keeps no jobs, so there's nothing to retry (${id}). databaseQueue(database), outbox(database, queue) and pgBoss(boss) do.`);
+      return jobsAdapter.retry(id);
     },
   };
 

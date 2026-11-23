@@ -10,8 +10,14 @@ interface Transactional {
   execute(query: SQL, mode: "objects"): PromiseLike<Record<string, unknown>[]>;
 }
 
-/** The transaction type of a Drizzle database: `type Tx = DrizzleTx<typeof db>`. */
-export type DrizzleTx<Db extends Transactional> = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Drizzle's transaction for a database. Nested `transaction` calls on it are savepoints. */
+type Transaction<Db extends Transactional> = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * What mutations get: the transaction, minus `transaction`. A savepoint there would roll back writes but not the events
+ * and calls queued inside it. `type Tx = DrizzleTx<typeof db>`.
+ */
+export type DrizzleTx<Db extends Transactional> = Omit<Transaction<Db>, "transaction">;
 
 /** What queries get: the database minus write methods. A type-level guard, not a runtime one. */
 export type DrizzleReader<Db> = Omit<
@@ -35,7 +41,7 @@ export type DrizzleAdapterOptions = Pick<DatabaseAdapter, "transactionAttempts">
 export function drizzleAdapter<Db extends Transactional>(
   db: Db,
   options: DrizzleAdapterOptions = {},
-): SqlDatabase<Db, DrizzleTx<Db>> {
+): SqlDatabase<Db, Transaction<Db>> {
   return {
     db,
     transactions: "interactive",

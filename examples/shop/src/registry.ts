@@ -1,4 +1,4 @@
-import type { Dispatcher, SqlDatabase } from "logic-sdk";
+import type { JobsAdapter, SqlDatabase } from "logic-sdk";
 import { databaseQueue, type DrizzleTx } from "logic-sdk/drizzle/pg";
 import * as catalog from "./catalog";
 import { createRegistry, type Db, type Mailer, type Settings } from "./logic";
@@ -10,7 +10,7 @@ export const createShop = (options: {
   settings: Settings;
   mailer?: Mailer;
   /** Where this host's jobs go. Default: the database is the queue. */
-  jobs?: Dispatcher;
+  jobs?: JobsAdapter;
   waitUntil?: (promise: Promise<unknown>) => void;
 }) =>
   createRegistry({

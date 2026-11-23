@@ -5,7 +5,7 @@
 **Any ORM that can run SQL in a transaction has `databaseQueue` and `outbox`,** through one `query` method on the database adapter.
 
 ```ts
-import type { DatabaseAdapter } from "logic-sdk";
+import type { SqlDatabase } from "logic-sdk";
 import { databaseQueue } from "logic-sdk/postgres";
 
 const database = {
@@ -13,7 +13,7 @@ const database = {
   transactions: "interactive",
   transaction: (fn) => prisma.$transaction(fn),
   query: (client, text, params) => client.$queryRawUnsafe(text, ...params),
-} satisfies DatabaseAdapter<PrismaClient, Prisma.TransactionClient>;
+} satisfies SqlDatabase<PrismaClient, Prisma.TransactionClient>;
 
 createRegistry({ modules, database, jobs: { adapter: databaseQueue(database), scope } });
 ```

@@ -1,7 +1,7 @@
 // Jobs in your database, written in the mutation's transaction: run from there (databaseQueue), or kept until a queue
 // has them (outbox). The table's statements are SQL, one set per database (postgres.ts, sqlite.ts), and run through
 // the database adapter's `query`, so this file knows no ORM and no driver.
-import { replaceKeyOf, type DeliveryOutcome, type Dispatcher, type Job, type Runner, type SqlDatabase, type SweepResult } from "./index.ts";
+import { replaceKeyOf, type Job, type JobOutcome, type JobsAdapter, type Runner, type SqlDatabase, type SweepResult } from "./index.ts";
 
 /**
  * The table's statements for one database. Parameters are strings and numbers only, so no driver has to guess a type:
@@ -72,7 +72,7 @@ export interface OutboxOptions {
 }
 
 /** What `databaseQueue` and `outbox` return. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
-export interface StoredJobs extends Dispatcher {
+export interface StoredJobs extends JobsAdapter {
   /** What's due (retries, delayed jobs, what a crash left behind), claimed one at a time. */
   sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
   /** Put a failed row back in line, with a fresh set of attempts. `false` when no failed row has that id. */
@@ -80,7 +80,7 @@ export interface StoredJobs extends Dispatcher {
 }
 
 /** Both: rows in `logic_jobs`, claimed by receipt. Without `via` they run here; with it they're sent. */
-export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxOptions, via?: Dispatcher): StoredJobs {
+export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxOptions, via?: JobsAdapter): StoredJobs {
   const lease = options.lease ?? 300;
   const maxAttempts = options.maxAttempts ?? 10;
   const backoff = options.backoff ?? ((attempt: number) => Math.exp(Math.min(attempt, 10)));
@@ -124,7 +124,7 @@ export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxO
    */
   async function run(job: Job, claim: Claim, runner: Runner): Promise<keyof SweepResult> {
     const stopExtending = keepExtending(job, claim, runner);
-    let outcome: DeliveryOutcome;
+    let outcome: JobOutcome;
     try {
       outcome = await runner
         .run(job, {
@@ -143,7 +143,7 @@ export function storedJobs(sql: JobsSql, database: SqlDatabase, options: OutboxO
   }
 
   /** Hand claimed jobs to `via` in one send. Done once the queue has them; a failed send keeps them all for a retry. */
-  async function handOff(queue: Dispatcher, jobs: Job[], claim: Claim, runner: Runner): Promise<keyof SweepResult> {
+  async function handOff(queue: JobsAdapter, jobs: Job[], claim: Claim, runner: Runner): Promise<keyof SweepResult> {
     const ids = jobs.map((j) => j.id);
     try {
       await queue.deliver(jobs, runner);
