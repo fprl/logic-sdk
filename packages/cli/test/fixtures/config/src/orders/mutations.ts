@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { mutation } from "../logic";
 import { orderLink } from "./data";
-import { linkFor } from "../lib/links"; // reads env through ../env: flagged
 
 /** Place an order */
 export const place = mutation({
@@ -9,7 +8,7 @@ export const place = mutation({
   async handler(ctx, { items }) {
     const { config } = ctx;
     if (items > config.orders.maxItems) throw ctx.errors.reject("too_many_items");
-    return { link: orderLink(ctx, "1"), legacy: linkFor("1") };
+    return { link: orderLink(ctx, "1") };
   },
 });
 

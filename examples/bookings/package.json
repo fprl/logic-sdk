@@ -17,7 +17,6 @@
     "test": "vitest run",
     "typecheck": "tsc",
     "test:pg": "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5440/postgres vitest run",
-    "check": "logic-sdk check",
     "logic-sdk": "logic-sdk"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// `npx logic-sdk check`. The CLI itself lives in @logic-sdk/cli, so apps that never use it
+// `npx logic-sdk list`. The CLI itself lives in @logic-sdk/cli, so apps that never use it
 // (a Worker, a Next.js app) don't download its parser and loader.
 const CLI = "@logic-sdk/cli";
 

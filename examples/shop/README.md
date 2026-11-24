@@ -9,7 +9,7 @@ What to look at:
 
 - **Prices come from the catalog, never from the client.** `place` runs `catalog.reserve`, which takes stock and returns prices in the same transaction. One item short and the whole order rolls back, stock included.
 - **A rule, written once.** `canCancel` (customers until it ships, staff any time) guards `cancel`, and `mine` returns it as `can.cancel` so the UI shows the button only when it would work.
-- **Settings from `ctx.config`.** `place` reads `ctx.config.orders.maxItems`, the receipt reads `ctx.config.app.url`. Each host fills them from its own env with `settingsFrom(...)`; modules never read env (`logic-sdk check` fails if they do).
+- **Settings from `ctx.config`.** `place` reads `ctx.config.orders.maxItems`, the receipt reads `ctx.config.app.url`. Each host fills them from its own env with `settingsFrom(...)`; modules never read env.
 - **Someone else's order doesn't exist for you.** Loads go through `findOrder`, scoped to the customer (staff see all), so another customer's id is a 404.
 - **The receipt is a job, and it isn't lost.** On Node and Next.js the database is the queue (`databaseQueue`). On Workers it goes through Cloudflare Queues, behind an `outbox`. The listener is the same on all three: three attempts, and an idempotency key because a job can run twice.
 - **Two cancels at once, one wins.** `setStatus` only moves an order from the status it was read in; the loser gets `orders.changed` and rolls back, so stock is released once.
@@ -37,7 +37,6 @@ bun run dev                        # Node on http://localhost:3000
 bun run dev:worker                 # Workers on http://localhost:8787
 ANTHROPIC_API_KEY=... bun run dev:next   # Next.js on http://localhost:3200
 bun run test                       # PGlite in-process, plus the Worker inside workerd: no Docker needed
-bun run check                      # logic-sdk check: boundaries, rules, env
 ```
 
 ```bash

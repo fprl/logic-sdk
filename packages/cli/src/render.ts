@@ -2,7 +2,6 @@
 // with NO_COLOR), and a few layout helpers.
 import { styleText } from "node:util";
 import type { Loc } from "./analyze.ts";
-import type { Problem } from "./check.ts";
 import type { JsonSchema } from "./project.ts";
 
 type Format = Parameters<typeof styleText>[0];
@@ -62,13 +61,4 @@ export function shape(schema: JsonSchema | null, depth = 0): string {
     default:
       return Array.isArray(schema.type) ? schema.type.join(" | ") : String(schema.type);
   }
-}
-
-export function diagnostic(p: Problem): string {
-  const mark = p.severity === "error" ? paint(["red", "bold"], "✗") : paint(["yellow", "bold"], "!");
-  return [
-    `${mark} ${bold(p.code)}  ${dim(where(p.at))}`.trimEnd(),
-    `  ${p.message}`,
-    `  ${paint("green", "fix:")} ${p.fix}`,
-  ].join("\n");
 }

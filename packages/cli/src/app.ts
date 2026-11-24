@@ -1,8 +1,7 @@
 import { buildApplication, buildCommand, buildRouteMap, type CommandContext } from "@stricli/core";
 import { ParseError } from "./analyze.ts";
-import { check } from "./check.ts";
 import { CliError, loadProject, type CronInfo, type FnInfo, type ListenerInfo, type Project } from "./project.ts";
-import { bold, diagnostic, dim, kind, paint, shape, table, where } from "./render.ts";
+import { bold, dim, kind, paint, shape, table, where } from "./render.ts";
 
 export interface Context extends CommandContext {
   readonly process: NodeJS.Process;
@@ -38,7 +37,6 @@ const runLabel = (e: { to: string; scope?: string[] }) => (e.scope ? `${e.to} (s
 const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.flatMap((e) => (e.scope ? [{ run: e.to, keys: e.scope }] : []));
 const plainRuns = <T extends FnInfo | ListenerInfo>(x: T) => ({ ...x, runs: x.runs.map((e) => e.to), scopeChanges: scopeChanges(x.runs) });
 const plainFn = (f: FnInfo) => ({ ...plainRuns(f), emits: f.emits.map((e) => e.to) });
-const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
@@ -195,24 +193,6 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
   }),
 });
 
-// ── check ────────────────────────────────────────────────────────────────────
-const checkCommand = buildCommand({
-  docs: { brief: "Check the rules: module boundaries, run cycles, side effects in transactions, record checks" },
-  parameters: { flags: { json } },
-  func: guarded(async function (this: Context, flags: { json?: boolean }) {
-    const p = await loadProject(this.cwd);
-    const problems = check(p);
-    const errors = problems.filter((x) => x.severity === "error").length;
-    if (errors) this.process.exitCode = 1;
-    if (flags.json) return print(this, { errors, warnings: problems.length - errors, problems });
-    if (!problems.length)
-      return out(this, `${paint("green", "✓")} ${count(p.functions.length, "function")}, ${count(p.listeners.length, "listener")}${p.crons.length ? `, ${count(p.crons.length, "cron")}` : ""} in ${count(p.modules.length, "module")}: no problems`);
-    out(this, problems.map(diagnostic).join("\n\n"));
-    const total = count(errors, "error");
-    out(this, `\n${errors ? paint("red", total) : total}, ${count(problems.length - errors, "warning")}`);
-  }),
-});
-
 function unknownName(p: Project, name: string) {
   const names = [...p.functions.map((f) => f.id), ...p.listeners.map((l) => l.id), ...p.crons.map((c) => c.id), ...p.events.map((e) => e.id)];
   const close = names.filter((n) => n.includes(name) || name.includes(n.split(".")[1] ?? "")).slice(0, 3);
@@ -225,8 +205,8 @@ function unknownName(p: Project, name: string) {
 
 export const app = buildApplication(
   buildRouteMap({
-    routes: { list, show, graph, check: checkCommand },
-    docs: { brief: "Inspect, graph and check an app built with logic-sdk" },
+    routes: { list, show, graph },
+    docs: { brief: "List, inspect and graph an app built with logic-sdk" },
   }),
   { name: "logic-sdk", scanner: { caseStyle: "allow-kebab-for-camel" } },
 );

@@ -25,7 +25,7 @@ type Config = {
 };
 ```
 
-Queries get a reader (no `insert`, `update`, `delete` or `execute`), mutations the transaction, without `transaction`: a savepoint that rolls back would still send the events emitted inside it. For a helper outside a ctx, the two sides are `DrizzleReader<Tx>` and `DrizzleTx<typeof db>`. Type helpers with those, not Drizzle's classes (`PgDatabase`, `PgTransaction`), which still have `transaction` and don't take `ctx.db`. The same goes for a library typed with them. A cast or plain JavaScript gets past the types; [`logic-sdk check`](/docs/cli) catches the call (`nested-transaction`).
+Queries get a reader (no `insert`, `update`, `delete` or `execute`), mutations the transaction, without `transaction`: a savepoint that rolls back would still send the events emitted inside it. For a helper outside a ctx, the two sides are `DrizzleReader<Tx>` and `DrizzleTx<typeof db>`. Type helpers with those, not Drizzle's classes (`PgDatabase`, `PgTransaction`), which still have `transaction` and don't take `ctx.db`. The same goes for a library typed with them.
 
 Without Drizzle, write the two sides yourself: `db: ReadWrite<MyReader, MyTx>`, from `logic-sdk`. A plain `db: MyTx` is what both get, so queries could then write.
 

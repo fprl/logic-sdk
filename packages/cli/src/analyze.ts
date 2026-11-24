@@ -1,5 +1,5 @@
-// Reads the app's source with a real parser (oxc): which functions run which, what they emit,
-// what each file imports. No regex, and no code is executed here.
+// Reads the app's source with a real parser (oxc): which functions run which, what they emit, the config keys and
+// record checks they use. No regex, and no code is executed here.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { parseSync } from "oxc-parser";
@@ -24,48 +24,15 @@ export interface SourceFn {
   emits: Edge[];
   checks: string[]; // can*(...) record checks it calls, directly or through this module's helpers
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), directly or through this module's helpers
-  fetches: Loc[]; // fetch(...) calls
-  dates: Loc[]; // new Date() / Date.now()
   doc?: string; // the first paragraph of the JSDoc block above the export, shown by list and show
-}
-export interface SourceImport {
-  from: string | null; // module that imports, or null for a file outside every module (a route, a page)
-  spec: string;
-  target: string; // module it reaches
-  internal: boolean; // reaches a file other than the module's index
-  index: string; // what to import instead: the module's index, written like `spec`
-  at: Loc;
-}
-/** A record check (`can*`) that can't work: async, awaited, or its result thrown away. */
-export interface CanIssue {
-  code: "async-can" | "unused-can";
-  name: string;
-  how: "declared" | "awaited" | "discarded";
-  at: Loc;
-}
-/** Something a module file does, itself or through a file it imports (`../lib/urls.ts` → `env.ts`): reading env, say. */
-export interface Reached {
-  module: string;
-  what: string; // "process.env", ".transaction()", `drizzle() from "drizzle-orm/pglite"`
-  at: Loc; // in the module file: the thing itself, or the import that leads to it
-  via?: Loc; // where it actually is, when it's in an imported file
 }
 export interface Source {
   /** `folder: false`: the module is a single file (fine for small modules). */
   modules: Record<string, { dir: string; index: string; folder: boolean }>;
   fns: Map<string, SourceFn>;
-  imports: SourceImport[];
-  cans: CanIssue[];
-  env: Reached[];
-  /** `x.transaction(...)` calls: a savepoint inside a mutation, which events made in it would escape. */
-  transactions: Reached[];
-  /** Database clients created (`drizzle(...)`): a module using one writes outside the mutation's transaction. */
-  dbClients: Reached[];
 }
 
 type Node = { type: string; start: number; [key: string]: any };
-/** One thing found in one file, before it's tied to a module. */
-type Hit = Pick<Reached, "what" | "at">;
 const WRAPPERS = new Set(["TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "ParenthesizedExpression"]);
 const unwrap = (n: Node | undefined): Node | undefined => (n && WRAPPERS.has(n.type) ? unwrap(n.expression) : n);
 const isFunction = (n: Node | undefined): n is Node =>
@@ -91,28 +58,6 @@ function sourceFiles(dir: string): string[] {
     if (statSync(path).isDirectory()) return SKIP_DIRS.has(name) || name.startsWith(".") ? [] : sourceFiles(path);
     return /\.([mc]?ts|tsx|[mc]?js|jsx)$/.test(name) && !/\.(test|spec|d)\.[mc]?[jt]sx?$/.test(name) ? [path] : [];
   });
-}
-
-/** Type-only: `import type`, `import { type A }`, `export type … from`. Erased at runtime, so it loads no code. */
-const typeOnly = (s: Node) =>
-  s.importKind === "type" ||
-  s.exportKind === "type" ||
-  (s.specifiers?.length > 0 && s.specifiers.every((sp: Node) => sp.importKind === "type" || sp.exportKind === "type"));
-
-/** Every specifier a file loads: imports, re-exports, and `import("...")` with a string. `values`: skip type-only ones. */
-function specifiers(program: Node, values = false): { spec: string; start: number; decl?: Node }[] {
-  const found: { spec: string; start: number; decl?: Node }[] = [];
-  for (const s of program.body) {
-    if (values && typeOnly(s)) continue;
-    if (s.type === "ImportDeclaration") found.push({ spec: s.source.value, start: s.start, decl: s });
-    if ((s.type === "ExportNamedDeclaration" || s.type === "ExportAllDeclaration") && s.source)
-      found.push({ spec: s.source.value, start: s.start });
-  }
-  walk(program, (n) => {
-    const src = n.type === "ImportExpression" ? n.source : undefined;
-    if (src?.type === "Literal" && typeof src.value === "string") found.push({ spec: src.value, start: n.start });
-  });
-  return found;
 }
 
 export class ParseError extends Error {}
@@ -195,113 +140,6 @@ const ctxIn = (fns: Node[], param: number | "any") => {
   return { kindOf, configPath, configKeys };
 };
 
-const ENV_PACKAGES = new Set(["process", "node:process"]);
-const directEnv = (program: Node, loc: (o: number) => Loc): Hit[] => {
-  const found: Hit[] = [];
-  const cf = new Set<string>(); // `import * as cf from "cloudflare:workers"`: cf.env counts
-  const processes = new Set(["process"]); // `import proc from "node:process"`: proc.env counts
-  for (const s of program.body) {
-    if (s.type !== "ImportDeclaration" || typeOnly(s)) continue;
-    const from = s.source.value;
-    for (const sp of s.specifiers) {
-      if (sp.importKind === "type") continue;
-      if (sp.type === "ImportSpecifier" && sp.imported?.name === "env" && (from === "cloudflare:workers" || ENV_PACKAGES.has(from)))
-        found.push({ what: `env from "${from}"`, at: loc(s.start) });
-      if (sp.type !== "ImportSpecifier" && from === "cloudflare:workers") cf.add(sp.local.name);
-      if (sp.type !== "ImportSpecifier" && ENV_PACKAGES.has(from)) processes.add(sp.local.name);
-    }
-  }
-  const isProcess = (n: Node | undefined): boolean => {
-    const o = unwrap(n);
-    if (o?.type === "Identifier") return processes.has(o.name);
-    return o?.type === "MemberExpression" && !o.computed && o.property?.name === "process" && ["globalThis", "global", "window", "self"].includes(o.object?.name);
-  };
-  walk(program, (n) => {
-    if (n.type === "MemberExpression") {
-      const key = n.computed ? (n.property?.type === "Literal" ? n.property.value : undefined) : n.property?.name;
-      if (key !== "env") return;
-      const o = unwrap(n.object);
-      if (isProcess(o)) found.push({ what: "process.env", at: loc(n.start) });
-      else if (o?.type === "MetaProperty") found.push({ what: "import.meta.env", at: loc(n.start) });
-      else if (o?.type === "Identifier" && o.name === "Bun") found.push({ what: "Bun.env", at: loc(n.start) });
-      else if (o?.type === "Identifier" && cf.has(o.name)) found.push({ what: 'env from "cloudflare:workers"', at: loc(n.start) });
-    }
-    // const { env } = process
-    if (n.type === "VariableDeclarator" && n.id?.type === "ObjectPattern" && isProcess(n.init) && n.id.properties.some((p: Node) => p.key?.name === "env"))
-      found.push({ what: "process.env", at: loc(n.start) });
-  });
-  return found;
-};
-
-/** Named like a database or a transaction: `db`, `ctx.db`, `tx`, `trx`, `database`, `ordersDb`, `pgTx`. */
-const DB_LIKE = /^(db|tx|trx|database)$|(Db|Tx)$/;
-/**
- * `db.transaction(...)` (or `tx["transaction"]`): modules never open a transaction, since a mutation already is one.
- * Only on something named like a database, so a payments service's own `transaction` method is left alone.
- */
-const directTransactions = (program: Node, loc: (o: number) => Loc): Hit[] => {
-  const found: Hit[] = [];
-  walk(program, (n) => {
-    const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
-    if (callee?.type !== "MemberExpression") return;
-    const key = callee.computed ? (callee.property?.type === "Literal" ? callee.property.value : undefined) : callee.property?.name;
-    const on = unwrap(callee.object);
-    const name = on?.type === "Identifier" ? on.name : on?.type === "MemberExpression" && !on.computed ? on.property?.name : undefined;
-    if (key === "transaction" && name && DB_LIKE.test(name)) found.push({ what: `${name}.transaction()`, at: loc(n.start) });
-  });
-  return found;
-};
-
-/** A Drizzle client created: `drizzle(...)` or `pg.drizzle(...)`, from a driver entry, `drizzle-orm/<driver>`. */
-const directDbClients = (program: Node, loc: (o: number) => Loc): Hit[] => {
-  const makers = new Map<string, string>(); // local name → the entry it came from
-  const namespaces = new Map<string, string>(); // `import * as pg from "drizzle-orm/node-postgres"`
-  for (const s of program.body) {
-    if (s.type !== "ImportDeclaration" || typeOnly(s) || !s.source.value.startsWith("drizzle-orm/")) continue;
-    for (const sp of s.specifiers) {
-      if (sp.type === "ImportSpecifier" && sp.importKind !== "type" && sp.imported?.name === "drizzle") makers.set(sp.local.name, s.source.value);
-      if (sp.type === "ImportNamespaceSpecifier") namespaces.set(sp.local.name, s.source.value);
-    }
-  }
-  const found: Hit[] = [];
-  if (makers.size || namespaces.size)
-    walk(program, (n) => {
-      const callee = n.type === "CallExpression" ? unwrap(n.callee) : undefined;
-      const from =
-        callee?.type === "Identifier"
-          ? makers.get(callee.name)
-          : callee?.type === "MemberExpression" && !callee.computed && callee.property?.name === "drizzle" && callee.object?.type === "Identifier"
-            ? namespaces.get(callee.object.name)
-            : undefined;
-      if (from) found.push({ what: `drizzle() from "${from}"`, at: loc(n.start) });
-    });
-  return found;
-};
-
-/** Record checks must be sync and their result used. */
-function canIssues(program: Node, loc: (o: number) => Loc): CanIssue[] {
-  const cans: CanIssue[] = [];
-  walk(program, (n) => {
-    const fnName =
-      n.type === "FunctionDeclaration" ? n.id?.name
-      : n.type === "VariableDeclarator" && isFunction(unwrap(n.init)) ? n.id?.name
-      : (n.type === "Property" || n.type === "MethodDefinition") && isFunction(n.value) ? n.key?.name
-      : undefined;
-    const fnNode = n.type === "FunctionDeclaration" ? n : n.type === "VariableDeclarator" ? unwrap(n.init) : n.value;
-    if (fnName && CAN.test(fnName) && fnNode?.async) cans.push({ code: "async-can", name: fnName, how: "declared", at: loc(n.start) });
-    /** The can* an expression calls, if that's what it is. */
-    const canCalled = (e: Node | undefined) => {
-      const name = e?.type === "CallExpression" ? calleeName(e) : undefined;
-      return name && CAN.test(name) ? name : undefined;
-    };
-    const awaited = n.type === "AwaitExpression" ? canCalled(unwrap(n.argument)) : undefined;
-    if (awaited) cans.push({ code: "async-can", name: awaited, how: "awaited", at: loc(n.start) });
-    const discarded = n.type === "ExpressionStatement" ? canCalled(unwrap(n.expression)) : undefined;
-    if (discarded) cans.push({ code: "unused-can", name: discarded, how: "discarded", at: loc(n.start) });
-  });
-  return cans;
-}
-
 export function analyze(root: string, registryFile: string): Source {
   // tsconfig `paths` (found from each file, like tsc) and package.json `imports` (#alias) resolve like any import.
   // Without symlinks, so paths stay comparable with the folders we list.
@@ -373,40 +211,16 @@ export function analyze(root: string, registryFile: string): Source {
     return found && { name: found[0], ...found[1] };
   };
 
-  /** `import * as links from "<this>"`: the spec without the inner path when it ends with it, else a relative path. */
-  const indexSpec = (spec: string, fromFile: string, resolved: string, m: { dir: string; index: string; folder: boolean }) => {
-    const noExt = (p: string) => p.replace(/\.[mc]?[jt]sx?$/, "");
-    const inner = noExt(relative(m.dir, resolved)).split(sep).join("/");
-    for (const tail of [inner, inner.replace(/(^|\/)index$/, "")])
-      if (tail && noExt(spec).endsWith("/" + tail)) {
-        const candidate = noExt(spec).slice(0, -tail.length - 1);
-        if (resolve(fromFile, candidate) === m.index) return candidate; // e.g. "#stock/*" has no "#stock"
-      }
-    const rel = noExt(relative(dirname(fromFile), m.folder ? m.dir : m.index)).split(sep).join("/");
-    return rel.startsWith(".") ? rel : `./${rel}`;
-  };
-
   const fns = new Map<string, SourceFn>();
-  const imports: SourceImport[] = [];
-  const cans: CanIssue[] = [];
 
-  /** Imports from `file` (in module `from`, or null) that land in another module. Returns where each local name points. */
-  const scanImports = (file: string, program: Node, loc: (o: number) => Loc, from: string | null) => {
+  /** Where each name imported from another module points: `import * as stock` → stock, `import { hold }` → stock.hold. */
+  const moduleImports = (file: string, program: Node) => {
     const local: Record<string, { mod: string; ns: boolean }> = {};
-    for (const { spec, start, decl } of specifiers(program)) {
-      const resolved = resolve(file, spec);
+    for (const s of program.body) {
+      if (s.type !== "ImportDeclaration") continue;
+      const resolved = resolve(file, s.source.value);
       const target = resolved ? moduleOf(resolved) : undefined;
-      if (!resolved || !target) continue;
-      for (const sp of decl?.specifiers ?? []) local[sp.local.name] = { mod: target.name, ns: sp.type === "ImportNamespaceSpecifier" };
-      if (target.name !== from)
-        imports.push({
-          from,
-          spec,
-          target: target.name,
-          internal: resolved !== target.index,
-          index: indexSpec(spec, file, resolved, target),
-          at: loc(start),
-        });
+      if (target) for (const sp of s.specifiers) local[sp.local.name] = { mod: target.name, ns: sp.type === "ImportNamespaceSpecifier" };
     }
     return local;
   };
@@ -414,56 +228,10 @@ export function analyze(root: string, registryFile: string): Source {
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
   type Found = Pick<SourceFn, "runs" | "emits" | "checks" | "config">;
 
-  /** App files a file loads at runtime (not packages, not modules, not type-only imports). */
-  const appImports = (file: string, program: Node) =>
-    specifiers(program, true).flatMap(({ spec, start }) => {
-      const target = resolve(file, spec);
-      return target && !target.includes(`${sep}node_modules${sep}`) && !moduleOf(target) ? [{ target, start }] : [];
-    });
-  /**
-   * What a module file does itself, or through the app files it loads. `direct` finds it in one file; the first one in
-   * an imported file is reported at the import. Memoized, so each file is looked at once.
-   */
-  const reach = (direct: (program: Node, loc: (o: number) => Loc) => Hit[]) => {
-    const found: Reached[] = [];
-    const memo = new Map<string, Hit | null>();
-    const via = (file: string, visiting: Set<string>): Hit | null => {
-      const known = memo.get(file);
-      if (known !== undefined) return known;
-      if (visiting.has(file)) return null; // a cycle: what's there is found by the file that started it
-      visiting.add(file);
-      const { program, loc } = read(file);
-      let first = direct(program, loc)[0] ?? null;
-      if (!first)
-        for (const { target } of appImports(file, program)) {
-          first = via(target, visiting);
-          if (first) break;
-        }
-      visiting.delete(file);
-      // "nothing here" is only final at the top: deeper, a cycle may have cut the search short
-      if (first || !visiting.size) memo.set(file, first);
-      return first;
-    };
-    const scan = (mod: string, file: string, program: Node, loc: (o: number) => Loc) => {
-      for (const r of direct(program, loc)) found.push({ module: mod, ...r });
-      for (const { target, start } of appImports(file, program)) {
-        const first = via(target, new Set());
-        if (first) found.push({ module: mod, what: first.what, at: loc(start), via: first.at });
-      }
-    };
-    return { found, scan };
-  };
-  // Modules get settings from ctx.config, never open a transaction (a mutation is one), and reach the database only
-  // through ctx.db: neither they nor what they import read env, call .transaction() or create a client.
-  const env = reach(directEnv);
-  const transactions = reach(directTransactions);
-  const dbClients = reach(directDbClients);
-
   for (const [mod, { dir, folder, index }] of Object.entries(modules)) {
     const files: File[] = (folder ? sourceFiles(dir) : [index]).map((f) => {
       const file = read(f);
-      for (const r of [env, transactions, dbClients]) r.scan(mod, f, file.program, file.loc);
-      const local = scanImports(f, file.program, file.loc, mod);
+      const local = moduleImports(f, file.program);
       const nameOf = (arg: Node | undefined): string => {
         const ns = arg?.type === "MemberExpression" && arg.object?.type === "Identifier" ? local[arg.object.name] : undefined;
         if (ns?.ns) return `${ns.mod}.${arg?.property.name}`;
@@ -536,12 +304,11 @@ export function analyze(root: string, registryFile: string): Source {
     for (const file of files) {
       const { program, loc, docAt } = file;
 
-      cans.push(...canIssues(program, loc));
       for (const s of program.body) {
         const decl = s.type === "ExportNamedDeclaration" ? s.declaration?.declarations?.[0] : undefined;
         const call = unwrap(decl?.init);
         if (call?.type !== "CallExpression" || decl.id?.type !== "Identifier") continue;
-        const fn: SourceFn = { key: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], fetches: [], dates: [], doc: docAt(s.start) };
+        const fn: SourceFn = { key: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], doc: docAt(s.start) };
 
         const def = call.arguments[0];
         const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];
@@ -553,13 +320,6 @@ export function analyze(root: string, registryFile: string): Source {
               ? `${authorize.object.name}.${authorize.property.name}`
               : "inline";
 
-        walk(call.arguments, (n) => {
-          if (n.type === "NewExpression" && n.callee?.name === "Date" && n.arguments.length === 0) fn.dates.push(loc(n.start));
-          if (n.type !== "CallExpression") return;
-          const callee = calleeName(n);
-          if (n.callee.type === "MemberExpression" && n.callee.object?.name === "Date" && callee === "now") fn.dates.push(loc(n.start));
-          if (n.callee.type === "Identifier" && callee === "fetch") fn.fetches.push(loc(n.start));
-        });
         // ctx is the first parameter: `handler(ctx, input)` in a function, `handler(ctx, payload)` in a listener
         const handlers = props.filter((p) => p.key?.name === "handler").map((p) => p.value).filter(isFunction);
         follow(call.arguments, file, ctxIn(handlers, 0), fn, new Set());
@@ -570,12 +330,5 @@ export function analyze(root: string, registryFile: string): Source {
     }
   }
 
-  // Everything else under the registry's folder (routes, pages, scripts) reaches modules only through their index.
-  for (const file of sourceFiles(dirname(registryFile)))
-    if (!moduleOf(file)) {
-      const { program, loc } = read(file);
-      scanImports(file, program, loc, null);
-    }
-
-  return { modules, fns, imports, cans, env: env.found, transactions: transactions.found, dbClients: dbClients.found };
+  return { modules, fns };
 }

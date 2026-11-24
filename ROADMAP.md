@@ -56,7 +56,7 @@ Agreed with the owner, collected from every conversation up to 2026-11-22. Don't
 
 Done, approved by the owner on 2026-11-23: the other-ORM example `satisfies SqlDatabase`; `Dispatcher` and `DeliveryOutcome` renamed `JobsAdapter` and `JobOutcome`; `queueName`, `CALLS_QUEUE`, `internal()` and `Overrides` unexported; `transactionAttempts` under 1 throws; no `transaction` on a Postgres mutation's `ctx.db` (a savepoint that rolled back still sent its events), with `check` failing on a `.transaction()` call or a database client in module code (`nested-transaction`, `db-client-in-module`). `backoff` stays: Laravel has it. After 0.5.0: whether it also takes a number or a list, as Laravel's does (it's a function today; more forms later break no one).
 
-Agreed as after 0.5.0, not forgotten: a week in a real app (the owner's call, 2026-11-23); the CLI showing where each function is published (`toORPCProcedure`, `toAITool` and `caller.run` references outside modules), with a `check` warning on a published function without `output`; live tests on deployed Workers (with Queues) and Vercel, run by hand from Actions, as files-sdk does (needs the owner's accounts); `logic-sdk show` listing every error a function can throw, nested calls included, and `check` failing on a code that isn't a literal (output designed 2026-11-19); pg-boss through `query`, so it takes any ORM (passes on PGlite in Fable's spike, array parameters untested on postgres.js); a `close()` on the SQLite adapter, once someone needs one; actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
+Agreed as after 0.5.0, not forgotten: a week in a real app (the owner's call, 2026-11-23); the CLI showing where each function is published (`toORPCProcedure`, `toAITool` and `caller.run` references outside modules); live tests on deployed Workers (with Queues) and Vercel, run by hand from Actions, as files-sdk does (needs the owner's accounts); `logic-sdk show` listing every error a function can throw, nested calls included (output designed 2026-11-19); pg-boss through `query`, so it takes any ORM (passes on PGlite in Fable's spike, array parameters untested on postgres.js); a `close()` on the SQLite adapter, once someone needs one; actors (`key`, `cancel`, an intentional continue; `key` first, since a job waiting for its key must not spend an attempt), `job` and `attempt` on `wrap`'s call, pruning failed rows, failed jobs kept without an outbox (Laravel's `failed_jobs` works with any queue), a second ORM adapter before 1.0, plugins, MySQL only when asked.
 
 ## Next
 
@@ -87,13 +87,12 @@ Agreed as after 0.5.0, not forgotten: a week in a real app (the owner's call, 20
    - `inspect()`: dev only, a live tree of calls, opened by the CLI
 5. **Ship the agent skill with the package.** Done: `skills/logic-sdk/SKILL.md` is in the tarball and the repo `AGENTS.md` is contributor-only. Next, two channels that stay in step with the installed version:
    - **TanStack Intent-compatible:** add the `tanstack-intent` keyword and `metadata.library_version` (kept current by the release), so `intent install` and `npx skills experimental_sync` find it. About 560 npm packages carry the keyword, tRPC and trigger.dev among them; Prisma ships `skills/` in its tarball the same way, without it.
-   - **A managed block in the app's AGENTS.md,** written by `logic-sdk init` (or `logic-sdk agents`), Next.js style (`next dev` writes `<!-- BEGIN:nextjs-agent-rules -->`): the rules in short, plus a pointer to `node_modules/logic-sdk/skills/logic-sdk/`. `check` warns when it's stale. Vercel's evals (Jan 2026) scored an always-on AGENTS.md index at 100% against 53 to 79% for skills alone, which were never invoked in 56% of runs, so the rules stay always-on and the skill holds the depth.
+   - **A managed block in the app's AGENTS.md,** written by `logic-sdk init` (or `logic-sdk agents`), Next.js style (`next dev` writes `<!-- BEGIN:nextjs-agent-rules -->`): the rules in short, plus a pointer to `node_modules/logic-sdk/skills/logic-sdk/`. Vercel's evals (Jan 2026) scored an always-on AGENTS.md index at 100% against 53 to 79% for skills alone, which were never invoked in 56% of runs, so the rules stay always-on and the skill holds the depth.
 6. **CLI later:** `init` (logic.ts, registry.ts, lint config, the AGENTS.md block), `add module`.
 
 ## Later
 
 - **Scheduled calls: done.** `ctx.schedule(fn, input, { at } | { delay })` from mutations, through the jobs adapter. Later: `cancel(id)` if re-checking proves not enough, and the CLI showing who schedules whom.
-- **A CLI check** that crons have a trigger in `wrangler.jsonc` or `vercel.json`, for apps with one trigger per cron. Only if missing triggers bite.
 - **Test helpers** (Laravel `Mail::fake()`, Rails `travel_to`): `expectEmitted`, `tx.advance("1h")`, `tx.drain()`.
 - **Opt-in savepoint `run`** for "try, and continue on failure" (e.g. coupons). `nest` already exists in the Drizzle adapter.
 - **A second database adapter** (Kysely or Prisma) before 1.0.
@@ -101,7 +100,6 @@ Agreed as after 0.5.0, not forgotten: a week in a real app (the owner's call, 20
 - **A module registry,** shadcn-style: `logic-sdk add auth` copies a module (tables, functions, tests) into your app, as code you own.
 - **An admin panel** as a package (`@logic-sdk/admin`): a form per function from its JSON Schema, run as a chosen scope, filtered by `meta`. Built on `registry.definitions.functions` and run options.
 - **Seeds:** a docs recipe, not a feature. A seed script calls real mutations through `registry.as(scope)`.
-- **`check`'s per-file rules as an oxlint plugin,** for feedback in the editor and severities the app sets. Only if waiting for `check` in CI proves too late.
 - Turbo if build caching starts to matter, tsdown only if CJS is needed, oxfmt, deploying apps/web.
 
 Skipped: model callbacks and observers (we chose explicit), notifications, caching, broadcasting, soft deletes, a REPL console.

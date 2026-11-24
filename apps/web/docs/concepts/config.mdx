@@ -54,15 +54,7 @@ export const place = mutation({
 
 Read `process.env`, `import.meta.env` or Cloudflare's `env` wherever your app starts: the registry file, routes, scripts, a `env.ts` with t3-env. Inside a module, read `ctx.config`.
 
-That keeps modules testable without touching globals, and the same code runs on Node, Workers and Vercel. `logic-sdk check` enforces it:
-
-```txt
-✗ env-in-module  src/orders/mutations.ts:12:18
-  src/orders/mutations.ts reads the environment (process.env). Modules don't read env, so tests can change settings and the CLI can load them.
-  fix: Read the value from ctx.config: declare it in Config's `config` in logic.ts, and fill it from your env at the entry, createRegistry({ config }). …
-```
-
-It follows the app files a module imports, so a helper in `src/lib/` that reads env is caught too.
+That keeps modules testable without touching globals, and the same code runs on Node, Workers and Vercel.
 
 ## Config, services or scope?
 
