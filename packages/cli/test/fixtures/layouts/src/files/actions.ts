@@ -5,7 +5,8 @@ import * as data from "./data";
 /** Delete what's stored */
 const purge = action({
   input: z.object({ key: z.string() }),
-  handler: async () => {},
+  output: z.object({ at: z.date() }), // declared, but JSON Schema has no Date
+  handler: async () => ({ at: new Date() }),
 });
 
 /** Store a file: the only way to record one */

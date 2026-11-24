@@ -106,6 +106,9 @@ test("any layout: each module is what its entry exports, followed through re-exp
     calledBy: ["files.clear", "files.remove"],
   });
   expect(cli(app, "graph", "--module", "files").out).toContain("schedules files.purgeStored");
+  // a declared output JSON Schema can't express is said so, not "not declared"
+  expect(cli(app, "show", "files.purgeStored", "--json").json()).toMatchObject({ declaresOutput: true, output: null });
+  expect(cli(app, "show", "files.purgeStored").out).toContain("declared, but not expressible as JSON Schema");
 });
 
 test("private functions: what no index exports, found by the definer that made it (aliases too), named as the runtime names it", () => {

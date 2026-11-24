@@ -17,6 +17,7 @@ export interface FnInfo {
   description: string | null; // the JSDoc above it, first paragraph
   authorize: string | null; // the policy as written in source ("member"), "inline", or null without authorize
   takesInput: boolean; // false: declared without `input`, so it's called as run(fn)
+  declaresOutput: boolean; // `output` set; its schema is null when it can't be shown as JSON Schema (a Date, a transform)
   input: JsonSchema | null;
   output: JsonSchema | null;
   meta: unknown;
@@ -165,6 +166,7 @@ export async function loadProject(root: string): Promise<Project> {
       // the name as written in source; else the function's own name (`const member = …` names it), else "inline"
       authorize: f.fn.authorize ? (s?.authorize ?? (f.fn.authorize.name || "inline")) : null,
       takesInput: f.fn.input !== undefined,
+      declaresOutput: f.fn.output !== undefined,
       input: f.fn.input ? jsonSchemaOf(f.fn.input, "input") : null,
       output: f.fn.output ? jsonSchemaOf(f.fn.output, "output") : null,
       meta: f.fn.meta ?? null,
@@ -188,6 +190,7 @@ export async function loadProject(root: string): Promise<Project> {
       description: p.doc ?? null,
       authorize: p.authorize ?? null,
       takesInput: p.takesInput,
+      declaresOutput: p.declaresOutput,
       input: null,
       output: null,
       meta: null,

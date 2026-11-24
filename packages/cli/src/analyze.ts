@@ -43,6 +43,7 @@ export interface PrivateFn extends SourceFn {
   name: string; // its variable name
   kind: FnKind;
   takesInput: boolean;
+  declaresOutput: boolean;
 }
 /** What the registry never sees, so it never runs: a listener, cron or event no index exports, or anything in a file no module reaches. */
 export interface Unregistered {
@@ -493,6 +494,7 @@ export function analyze(projectRoot: string, registryPath: string): Source {
           name: d.id.name,
           kind: def.private,
           takesInput: props.some((p) => p.key?.name === "input"),
+          declaresOutput: props.some((p) => p.key?.name === "output"),
         });
     }
   }

@@ -94,8 +94,10 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       row("policy", fn.authorize ?? dim("none (no authorize)"));
       if (fn.private) row("schemas", dim("not read for a private function (the CLI only reads its source)"));
       else {
-        row("input", fn.takesInput ? shape(fn.input) : dim("none"));
-        row("output", fn.output ? shape(fn.output) : dim("not declared (the handler's type)"));
+        // declared, but zod can't say it as JSON Schema: a Date, a transform
+        const unshown = dim("declared, but not expressible as JSON Schema (a Date or a transform in it)");
+        row("input", !fn.takesInput ? dim("none") : fn.input ? shape(fn.input) : unshown);
+        row("output", !fn.declaresOutput ? dim("not declared (the handler's type)") : fn.output ? shape(fn.output) : unshown);
       }
       if (fn.checks.length) row("checks", fn.checks.join(", "));
       if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));
