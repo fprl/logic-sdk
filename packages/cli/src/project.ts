@@ -20,6 +20,7 @@ export interface FnInfo {
   at: Loc | null;
   runs: Edge[];
   emits: Edge[];
+  schedules: Edge[];
   checks: string[]; // can*(...) record checks in its body or this module's helpers it calls
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), in its body or this module's helpers it calls
   calledBy: string[];
@@ -129,7 +130,7 @@ export async function loadProject(root: string): Promise<Project> {
   const core = (await load("logic-sdk")) as typeof Core; // SAFETY: the peer range pins the app's logic-sdk to this CLI's
 
   const modules: Record<string, object> = {};
-  for (const [key, { index }] of Object.entries(source.modules)) modules[key] = await load(index);
+  for (const [key, { entry }] of Object.entries(source.modules)) modules[key] = await load(entry);
   const described = core.describeModules(modules);
 
   // Source is keyed by `<module>.<export>`; ids can differ when a definition sets its own `id`.
@@ -154,6 +155,7 @@ export async function loadProject(root: string): Promise<Project> {
       at: s?.at ?? null,
       runs: real(s?.runs ?? []),
       emits: real(s?.emits ?? []),
+      schedules: real(s?.schedules ?? []),
       checks: s?.checks ?? [],
       config: s?.config ?? [],
       calledBy: [],
@@ -172,7 +174,10 @@ export async function loadProject(root: string): Promise<Project> {
 
   const byId = new Map(functions.map((f) => [f.id, f]));
   for (const caller of [...functions, ...listeners])
-    for (const edge of caller.runs) byId.get(edge.to)?.calledBy.push(caller.id);
+    for (const edge of [...caller.runs, ...("schedules" in caller ? caller.schedules : [])]) {
+      const callee = byId.get(edge.to);
+      if (callee && !callee.calledBy.includes(caller.id)) callee.calledBy.push(caller.id);
+    }
 
   const crons: CronInfo[] = described.crons.map((c) => ({
     id: c.id,

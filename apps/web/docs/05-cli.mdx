@@ -54,7 +54,7 @@ A listener with a [`when`](/docs/concepts/jobs#only-some-events-when) gets a `wh
 
 ## graph
 
-Who runs whom, and who reacts to which event:
+Who runs and schedules whom, and who reacts to which event:
 
 ```txt
 $ logic-sdk graph --module bookings
@@ -66,19 +66,13 @@ bookings
 └─ checkout  action    runs bookings.get, bookings.confirm
 ```
 
+`schedules` is a `ctx.schedule(...)` in a mutation: the call runs later, as a job. The function it schedules lists the mutation under `called by`.
+
 `--format mermaid` gives a diagram you can paste into a README or a pull request. `--format json` gives nodes and edges.
 
 ## The shape it expects
 
-A module is whatever your `createRegistry({ modules })` registers, wherever it lives: the CLI follows the imports in your registry file. A small module can be one file (`src/bookings.ts`); once it grows, make it a folder with an `index.ts`:
-
-```txt
-src/
-  registry.ts          createRegistry({ modules: { bookings, … } })
-  bookings/            or src/bookings.ts, src/modules/bookings/, …
-    index.ts           export * from each public file
-    mutations.ts       export const confirm = mutation({ … })
-```
+None, past the registry. A module is what your registry imports (`import * as bookings from "./bookings"`) and lists in `createRegistry({ modules })`. From that file the CLI follows what it exports, through `export *`, `export { a as b }` and imports, to where each function is declared, the way your app does. So lay files out however you like: one file, a folder with an `index.ts`, `bookings.ts` next to a `bookings/` folder, or anything else. A renamed export shows under its exported name, the one the registry uses.
 
 The registry file is `src/registry.ts` by default. If yours lives elsewhere, point to it in `package.json`:
 
@@ -99,6 +93,6 @@ Name your definers however you like (`mutation: defineMutation` works): function
 Two sources:
 
 1. **Your registry.** The CLI loads your modules (with [jiti](https://github.com/unjs/jiti), so TypeScript and extensionless imports just work) and asks your own `logic-sdk` what's registered: every function, its kind, schemas and listeners.
-2. **Your source.** It parses each module with [oxc](https://oxc.rs) and finds the `run(...)` and `emit(...)` calls inside each function, plus every import.
+2. **Your source.** It parses each module with [oxc](https://oxc.rs) and finds the `run(...)`, `emit(...)` and `schedule(...)` calls inside each function, and inside the helpers it calls by name (`findBooking(ctx, id)`), in its own files or the files they import.
 
-Static reading has limits. A `run` hidden inside a helper function isn't followed yet, a computed call like `run(fns[name], ...)` shows as `(dynamic)`, and a `run` inside an `if` is a possible edge, not a guaranteed one.
+Static reading has limits. A call through a method or a callback (`rules.check(ctx)`, `items.map(...)` handing ctx on) isn't followed, a computed call like `run(fns[name], ...)` shows as `(dynamic)`, and a `run` inside an `if` is a possible edge, not a guaranteed one.
