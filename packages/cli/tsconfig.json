@@ -4,5 +4,6 @@
   "include": ["src", "test"],
   // its own tsconfig `paths` (@/*) are part of what it tests; the CLI resolves them, this config doesn't know them
   // workers-env imports cloudflare:workers on purpose: it only exists inside workerd
-  "exclude": ["test/fixtures/holes", "test/fixtures/workers-env"]
+  // monorepo imports its workspace package through a node_modules link the test makes
+  "exclude": ["test/fixtures/holes", "test/fixtures/workers-env", "test/fixtures/monorepo"]
 }
