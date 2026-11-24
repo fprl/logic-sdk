@@ -7,7 +7,10 @@ import type * as Core from "logic-sdk";
 import { analyze, type Edge, type Loc } from "./analyze.ts";
 
 export interface FnInfo {
+  /** The registry's id. A private function has none: `files.(private) record`, its name in traces plus its variable name, or `files.<id>` when it sets `id`. */
   id: string;
+  /** Its module's index doesn't export it: only `ctx.run` from that module's own code runs it. */
+  private: boolean;
   module: string;
   name: string;
   kind: "query" | "mutation" | "action";
@@ -57,6 +60,14 @@ export interface EventInfo {
   listeners: string[];
 }
 export type JsonSchema = Record<string, any>;
+/** A listener, cron or event no module's index exports: the registry never sees it, so it never runs. */
+export interface UnregisteredInfo {
+  module: string;
+  name: string;
+  kind: "listener" | "cron" | "event";
+  description: string | null;
+  at: Loc;
+}
 export interface Project {
   root: string;
   modules: string[];
@@ -64,6 +75,7 @@ export interface Project {
   listeners: ListenerInfo[];
   crons: CronInfo[];
   events: EventInfo[];
+  unregistered: UnregisteredInfo[];
 }
 
 /** An expected failure: printed as a diagnostic, exit code 1 (or 2 for usage). */
@@ -142,6 +154,7 @@ export async function loadProject(root: string): Promise<Project> {
     const s = src(f);
     return {
       id: f.id,
+      private: false,
       module: f.module,
       name: f.name,
       kind: f.kind,
@@ -161,6 +174,32 @@ export async function loadProject(root: string): Promise<Project> {
       calledBy: [],
     };
   });
+  // private functions: only what the source says (their schemas would need the file loaded, and one may not be exported from it)
+  for (const u of source.unreached)
+    if (u.kind === "query" || u.kind === "mutation" || u.kind === "action")
+      functions.push({
+        id: u.key,
+        private: true,
+        module: u.module,
+        name: u.name,
+        kind: u.kind,
+        description: u.doc ?? null,
+        authorize: u.authorize ?? null,
+        takesInput: u.takesInput,
+        input: null,
+        output: null,
+        meta: null,
+        at: u.at,
+        runs: real(u.runs),
+        emits: real(u.emits),
+        schedules: real(u.schedules),
+        checks: u.checks,
+        config: u.config,
+        calledBy: [],
+      });
+  const unregistered = source.unreached.flatMap((u) =>
+    u.kind === "listener" || u.kind === "cron" || u.kind === "event" ? [{ module: u.module, name: u.name, kind: u.kind, description: u.doc ?? null, at: u.at }] : [],
+  );
   const listeners: ListenerInfo[] = described.listeners.map((l) => ({
     id: l.id,
     module: l.module,
@@ -206,5 +245,6 @@ export async function loadProject(root: string): Promise<Project> {
     listeners,
     crons,
     events,
+    unregistered,
   };
 }

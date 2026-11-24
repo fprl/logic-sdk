@@ -29,6 +29,16 @@ POLICY is the `authorize` policy as written (`inline` for an arrow), or `none`. 
 
 Filter with `--module bookings` or `--kind mutation`.
 
+A [private function](/docs/concepts/functions#private-functions), one its module's index doesn't export, is listed with `private` after its kind, under the name `wrap` sees: `bookings.(private) confirmPaid` (the runtime's `bookings.(private)` plus its variable name), or `bookings.<id>` when it sets `id`. A listener, cron or event that no index exports never runs, so it's listed apart:
+
+```txt
+bookings.(private) confirmPaid   mutation private   none   Confirm a booking the guest has just paid for
+
+Not registered: no index exports it, so it never runs
+NAME                KIND       WHERE
+bookings.onPaid     listener   src/bookings/listeners.ts:4:14
+```
+
 ## show
 
 Everything about one function, listener or event:
@@ -80,7 +90,7 @@ The registry file is `src/registry.ts` by default. If yours lives elsewhere, poi
 { "logic-sdk": { "registry": "lib/registry.ts" } }
 ```
 
-Name your definers however you like (`mutation: defineMutation` works): functions are matched by their registered names. If loading your app throws (a missing environment variable, say), you get `app-load-failed` with the file and line.
+Name your definers however you like (`mutation: defineMutation` works): registered functions are matched by their registered names. What no index reaches is found by its definer: a `const` made by a key destructured from `init()` of `logic-sdk`, aliases included. If loading your app throws (a missing environment variable, say), you get `app-load-failed` with the file and line.
 
 ## For scripts and agents
 

@@ -593,3 +593,49 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 - **The two that guarded real hazards leaked.** A network call in a mutation repeats when a deadlock retries the transaction, and a second database client writes outside it. No type sees either, but the rules only caught a bare `fetch(` and `drizzle()`: a Stripe client, axios or `new Pool()` passed, so a clean run proved little.
 - **The reference stacks don't ship such rules.** Convex enforces its rules in its runtime (`fetch` only in actions, [runtimes](https://docs.convex.dev/functions/runtimes)) and ships its lint rules as a separate ESLint plugin ([docs](https://docs.convex.dev/eslint)). Rails' first-party lint config is style ([rubocop-rails-omakase](https://github.com/rails/rubocop-rails-omakase)). Laravel's "`env()` only in config files" is advice in the docs that nothing checks ([helpers](https://github.com/laravel/docs/blob/12.x/helpers.md)). Elixir's `mix xref` reports dependency graphs and cycles and enforces nothing ([docs](https://hexdocs.pm/mix/Mix.Tasks.Xref.html)); Credo and `boundary` are community packages ([Credo](https://github.com/rrrene/credo), [boundary](https://github.com/sasa1977/boundary)).
 - **What would change it:** a hazard the types and the runtime can't hold, which a static rule catches reliably rather than by name.
+
+### Proposed (not built, 2026-11-24): private means not registered
+
+A query, mutation or action that the module's index doesn't reach isn't registered, and that makes it private. `ctx.run` runs it as part of the calling module. Everything that finds code by name refuses it. The case: `files.upload` is an action that checks a file's first bytes in storage, and then it needs a write. Actions have no `db`, so the write is a mutation, and a registered mutation can be called from any module, route or agent, which skips the check. Before logic-sdk, the owner's app did both in one function (`createFile`). The library made the split, so the library closes it.
+
+```text
+files/
+  index.ts      export * from './queries.ts', './mutations.ts', './actions.ts'   (not data.ts)
+  actions.ts    upload: checks the bytes, then ctx.run(record, input)
+  data.ts       record (a mutation) and helpers: exported from the file, not from the index
+```
+
+```ts
+// files/data.ts
+export const record = mutation({ input, authorize: member, async handler(ctx, input) { /* insert */ } });
+
+// files/actions.ts
+import { record } from "./data.ts";
+export const upload = action({ async handler(ctx, input) { /* check the bytes */ return ctx.run(record, input); } });
+```
+
+| | registered | not registered |
+|---|---|---|
+| `ctx.run` | runs as its own module | runs as the caller's module |
+| `ctx.schedule`, a cron's `run`, adapters, `registry.as().run`, `t.run` | yes | refused: "a stored job needs a name, export it" |
+
+- **Seen before running.** Nothing outside the module's files can reference `record`: it isn't on `files.*`. A deep import (`../files/data.ts`) is the app's linter's job. The owner's app already fails it with dependency-cruiser. If the import gets through anyway, `record` runs as the importing module, and its errors carry that module's namespace. Rejected: pinning each private to the first module that runs it, so a deep import throws. That's runtime machinery for what static analysis already catches.
+- **Names.**
+  - Without a build step the runtime can't see the variable name. A private is `files.<id>` when it sets `id`, and `files.(private)` otherwise.
+  - `deny()` with no code is `files.forbidden`.
+  - Nothing looks a private up by id, so two privates in one module may share it.
+- **Scheduled work stays registered.** A job row stores a name, and a fresh worker looks it up in what the index exported at startup. That's Oban's `worker` string ([worker.ex](https://github.com/oban-bg/oban/blob/main/lib/oban/worker.ex)), ActiveJob's `job_class` ([execution.rb](https://github.com/rails/rails/blob/main/activejob/lib/active_job/execution.rb)), and Laravel's `commandName` ([Queue.php](https://github.com/laravel/framework/blob/12.x/src/Illuminate/Queue/Queue.php)). A scheduled function that must not run on a stale reason re-checks it (rule 18): `purge` refuses while a row with its key exists.
+- **Tests go through the public function,** as with any unexported code, and as with Elixir's `defp`: "only accessible from within the module in which they are defined" ([Kernel](https://hexdocs.pm/elixir/Kernel.html#defp/2)).
+- **The CLI.**
+  - It shows a private under the name `wrap` sees, plus its variable name: `files.(private) record`, or `files.tidy` when it sets `id`. It never shows a name the runtime doesn't have (it used to guess `files.record`).
+  - A private is a node of its own, with its `run`, `emit` and `schedule` edges.
+  - It lists listeners, crons and events that no index reaches. Those never run, silently, and that's already true today. The list describes; it doesn't bring `check` back.
+  - What no index reaches is found by its definer: a `const` whose callee resolves to a key destructured from `init()` of `logic-sdk` (`{ mutation: m }` included). Registered functions are still matched by export name, whatever made them. Fable's review: this adds about 35 lines and one idea, the definer's kind, and removes nothing. Missed: a file nothing imports (a forgotten `export * from "./listeners"`), and definers wrapped in an app's own function.
+- **Small fix with it:** the "mutations need a database" check counts only registered functions, so an app whose only mutation is private hits a TypeError instead of the message.
+- **Convex doesn't need this.** In convex 1.51.0, a mutation's `ctx.storage` is `StorageWriter`, with `get`, `store` and `delete` ([storage.d.ts](https://unpkg.com/convex@1.51.0/dist/cjs-types/server/storage.d.ts)). "The file is stored as part of the mutation's transaction" ([store files](https://github.com/get-convex/convex-backend/blob/main/npm-packages/docs/docs/file-storage/store-files.mdx)). So the upload is one mutation there. Our storage (R2, S3, disk) can't join a Postgres transaction. Convex's `internalMutation` is callable by every function ([internal functions](https://docs.convex.dev/functions/internal-functions)), which is our default already, since only what an adapter lists is reachable.
+- **Rejected: `private: true` on an exported function,** checked against the caller at run time. `files.record` stays on the barrel, typechecks from anywhere, and fails only on the first call. The owner's requirement is to see it before running.
+- **Rejected: registering a private by a global id** (Trigger.dev's hidden tasks register when `task()` runs, keyed by a required `id`: [shared.ts](https://github.com/triggerdotdev/trigger.dev/blob/main/packages/trigger-sdk/src/v3/shared.ts)). It's a second registration path, and its page says both "only accessible to other tasks within the same file or module" and "can be imported and used without needing to re-export them" ([hidden tasks](https://trigger.dev/docs/hidden-tasks)). TanStack Start and Jotai name unexported things from their variable names with a compiler ([compiler.ts](https://github.com/TanStack/router/blob/main/packages/start-plugin-core/src/start-compiler/compiler.ts), [plugin-debug-label.ts](https://github.com/jotaijs/jotai-babel/blob/main/src/plugin-debug-label.ts)), and we have none. Packwerk dropped its privacy checker in 3.0 because it became "an API design tool" ([retrospective](https://shopify.engineering/a-packwerk-retrospective)).
+- **What would change it:**
+  - A private that has to be scheduled and can't re-check its reason. Then names are required.
+  - Tests needing to run privates directly, often.
+  - The core change spreading past `invoke`, `baseCtx` and `errorsFor`. Today it's one case in one app.

@@ -334,6 +334,35 @@ test("guards: unregistered functions and missing database", async () => {
   expect(threw).toBe(true);
 });
 
+test("a private function (its index doesn't export it) runs through ctx.run as part of its caller's module", async () => {
+  const record = mutation({
+    input: z.object({ name: z.string() }),
+    authorize: signedIn,
+    async handler({ db, errors }, { name }) {
+      if (name === "taken") throw errors.conflict("taken");
+      (db.rows.files ??= []).push({ name });
+      return name;
+    },
+  });
+  const count = query({ id: "count", handler: async ({ db }) => (db.rows.files ?? []).length });
+  const upload = action({ input: z.object({ name: z.string() }), handler: async ({ run }, input) => ({ name: await run(record, input), count: await run(count) }) });
+  const later = mutation({ handler: async ({ schedule }) => void schedule(record, { name: "x" }, { delay: 0 }) });
+  const calls: string[] = [];
+  const registry = createRegistry<Scope>({ modules: { files: { upload, later } }, database: memoryDatabase(), wrap: async (c, next) => { calls.push(c.id); return next(); } });
+  const ana = registry.as({ actor: "ana", locale: "es" });
+
+  expect(await ana.run(upload, { name: "a" })).toEqual({ name: "a", count: 1 });
+  expect(calls).toEqual(["files.upload", "files.(private)", "files.count"]);
+  await expect(ana.run(upload, { name: "taken" })).rejects.toMatchObject({ code: "files.taken" });
+  await expect(registry.as({ actor: null, locale: "es" }).run(upload, { name: "b" })).rejects.toMatchObject({ code: "files.forbidden" });
+  // anything that finds code by name refuses it: here from outside, and when scheduled
+  await expect(ana.run(record, { name: "c" })).rejects.toThrow(/runs only through ctx.run/);
+  await expect(ana.run(later)).rejects.toThrow(/ctx.schedule needs a function its module's index.ts exports/);
+  // createRegistry can't see a private mutation, so its missing database is caught when it runs
+  const viaAction = action({ handler: ({ run }) => run(mutation({ handler: async () => 1 })) });
+  await expect(createRegistry<Scope>({ modules: { x: { viaAction } } }).as({ actor: "ana", locale: "es" }).run(viaAction)).rejects.toThrow(/Mutations need a database/);
+});
+
 test("ctx errors are namespaced to the module they're thrown from", async () => {
   const fails = query({
     input: z.object({ kind: z.enum(["reject", "conflict", "notFound", "deny"]) }),

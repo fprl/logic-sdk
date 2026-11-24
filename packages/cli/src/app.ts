@@ -57,9 +57,13 @@ const list = buildCommand({
     ].filter(
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind),
     );
-    if (flags.json) return print(this, rows);
-    out(this, table(["NAME", "KIND", "POLICY", "DESCRIPTION"], rows.map((r) => [bold(r.id), kind(r.kind), r.kind === "listener" || r.kind === "cron" ? dim("-") : policy(r), r.description ?? ""])));
+    const unregistered = p.unregistered.filter((u) => (!flags.module || u.module === flags.module) && (!flags.kind || u.kind === flags.kind));
+    if (flags.json) return print(this, [...rows, ...unregistered.map((u) => ({ ...u, unregistered: true }))]);
+    out(this, table(["NAME", "KIND", "POLICY", "DESCRIPTION"], rows.map((r) => [bold(r.id), "private" in r && r.private ? `${kind(r.kind)} ${dim("private")}` : kind(r.kind), r.kind === "listener" || r.kind === "cron" ? dim("-") : policy(r), r.description ?? ""])));
     out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length + p.crons.length} · logic-sdk show <name> for details`));
+    if (unregistered.length)
+      out(this, `\n${paint("yellow", "Not registered", this.process.stdout)}: no index exports ${unregistered.length === 1 ? "it, so it never runs" : "them, so they never run"}\n` +
+        table(["NAME", "KIND", "WHERE"], unregistered.map((u) => [bold(`${u.module}.${u.name}`), kind(u.kind), where(u.at)])));
   }),
 });
 
@@ -85,7 +89,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const listenersOf = (eventId: string) => p.events.find((e) => e.id === eventId)?.listeners ?? [];
 
     if (fn) {
-      lines.push(`${bold(fn.id)}  ${kind(fn.kind)}`);
+      lines.push(`${bold(fn.id)}  ${kind(fn.kind)}${fn.private ? `  ${dim("private: only its module's own code runs it")}` : ""}`);
       lines.push(...(fn.description ? [fn.description] : []), dim(where(fn.at)), "");
       row("policy", fn.authorize ?? dim("none (no authorize)"));
       row("input", fn.takesInput ? shape(fn.input) : dim("none"));

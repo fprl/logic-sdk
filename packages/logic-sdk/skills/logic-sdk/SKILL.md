@@ -22,7 +22,7 @@ src/
     actions.ts     action({...})    network calls: payments, email, AI, webhooks out
     events.ts      event({...})     things that happened
     listeners.ts   listener({...})  reacting to OTHER modules' events
-    data.ts        private helpers taking ctx (findBooking(ctx, id)) and can* record checks. Never imported by other modules.
+    data.ts        private: helpers taking ctx (findBooking(ctx, id)), can* record checks, and functions the index doesn't export. Never imported by other modules.
     schema.ts      tables this module owns. Other modules never read them.
     <module>.test.ts
 ```
@@ -64,7 +64,7 @@ export const cancel = mutation({
 1. **Pick the kind by what it touches.** Only reads: `query`. Writes to our database: `mutation`. Talks to the network: `action`. Reacts to another module: `listener`.
 2. **Never put side effects in a mutation or query.** No email, HTTP or payments. They don't have `services` on purpose. Emit an event and react in a listener, or write an action that runs the mutation.
 3. **Call other modules only with `run(otherModule.fn, input)`.** Import them as `import * as availability from "../availability"`. Never import their `data.ts` or `schema.ts`, from a module or from routes and pages.
-4. **Within a module, use helpers.** Shared logic is a plain function in `data.ts` taking `ctx`. `ctx.run` your own module's function only when you want its `authorize`, validation and tracing.
+4. **Within a module, use helpers.** Shared logic is a plain function in `data.ts` taking `ctx`. `ctx.run` your own module's function only when you want its `authorize`, validation and tracing. When an action must write, put the mutation in `data.ts` and `ctx.run` it: the index doesn't export it, so nothing outside the module can skip the action's checks. A private function can't be scheduled, run by a cron, published or run from a test: test it through the action.
 5. **Always filter by `ctx.scope.accountId`** in `data.ts` helpers, writes included. Loading helpers throw `ctx.errors.notFound()`. Scope is who and where (actor, account, locale); input is what.
 6. **Authorize every function a user, client or AI tool may call.** `authorize: member` (a policy from `policies.ts`) says who may call it: sync, reads only scope, runs on every call including nested ones. Publish a function by listing it in `src/rpc.ts` (`toORPCProcedure(fn)`) or an agent's tools (`toAITool(caller, fn)`); both refuse one without `authorize`. A hand-written route or Server Action can `caller.run` anything, nothing stops it: only call functions that have `authorize` from them. Give published functions an `output` so nothing unintended leaves.
 7. **Record rules are `can*` predicates.** Load through a scoped helper, then `if (!canX(ctx.scope.actor, record)) throw ctx.errors.deny();`. `can*` is sync, its result is always used, and the same predicate feeds UI flags in list queries: `can: { cancel: canCancel(actor, b) }`. A rule that must hold at commit goes in the write's `WHERE` or a `FOR UPDATE` re-select.

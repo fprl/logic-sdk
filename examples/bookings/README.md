@@ -31,6 +31,6 @@ curl -X POST localhost:3000/rpc/properties/create \
 - **Policies** are plain functions in `src/policies.ts` (`anyone`, `member`, `staff`, `owner`, `agent`). A function opts in with `authorize: staff`; the guard narrows `ctx.scope`, so `ctx.scope.actor` is never null inside.
 - **`src/rpc.ts` is the API:** the functions a client may call, as oRPC procedures (`toORPCProcedure`, which needs `authorize`). The rest are internal: other modules `run` them, nobody calls them over the wire.
 - **Record rules** run in `handler`, after loading through an account-scoped helper: `if (!canCancel(ctx.scope.actor, booking)) throw ctx.errors.deny()` (`src/bookings/data.ts`). Another account's booking is a 404, not a 403.
-- **`checkout` doesn't pretend to be an admin.** A guest may pay but not read or confirm bookings, so the action runs two internal functions with no policy (`amountDue`, `confirmPaid`). The scope stays the guest's.
+- **`checkout` doesn't pretend to be an admin.** A guest may pay but not read or confirm bookings, so the action runs two private functions with no policy (`amountDue`, `confirmPaid` in `src/bookings/data.ts`, which the index doesn't export). Nothing else can run them, and the scope stays the guest's.
 
 Read in this order: `src/logic.ts` → `src/policies.ts` → `src/registry.ts` → `src/bookings/mutations.ts` → `src/bookings/actions.ts` → `src/enquiries/listeners.ts` → `src/rpc.ts` → `src/server.ts` → `test/app.test.ts`.

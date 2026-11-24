@@ -11,7 +11,7 @@ export const paint = (format: Format, text: string, stream: NodeJS.WriteStream =
 export const dim = (text: string) => paint("dim", text);
 export const bold = (text: string) => paint("bold", text);
 
-const KIND_COLOR = { query: "blue", mutation: "magenta", action: "yellow", listener: "cyan", cron: "green" } as const;
+const KIND_COLOR = { query: "blue", mutation: "magenta", action: "yellow", listener: "cyan", cron: "green", event: "dim" } as const;
 export const kind = (k: keyof typeof KIND_COLOR) => paint(KIND_COLOR[k], k);
 
 // eslint-disable-next-line no-control-regex
