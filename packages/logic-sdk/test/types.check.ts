@@ -420,3 +420,11 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   // @ts-expect-error async: a Promise is truthy, so it would never filter
   listener({ event: () => ev, when: async (p) => p.id !== "", handler: async () => {} });
 }
+
+// `fn.input` is the schema as written, so a form derives from the function it calls. Without input it's undefined.
+const noInput = query({ handler: async () => 1 });
+const idOnly = getOne.input.pick({ id: true });
+const idField: z.ZodString = getOne.input.shape.id;
+const nothing: undefined = noInput.input;
+// @ts-expect-error a function without input has no schema to pick from
+noInput.input.pick;

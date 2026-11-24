@@ -41,6 +41,14 @@ export const list = query({
 await caller.run(catalog.list);
 ```
 
+A function keeps its schema as you wrote it, so a form can take its fields from the function it calls instead of a schema you export:
+
+```ts
+const fields = properties.update.input.pick({ name: true, city: true });
+```
+
+Without `input`, `fn.input` is `undefined`.
+
 `ctx` comes first everywhere: in handlers, in listeners (`handler(ctx, payload)`) and in your own helpers.
 
 ## ctx
