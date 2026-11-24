@@ -44,11 +44,11 @@ const list = buildCommand({
   parameters: {
     flags: {
       module: { kind: "parsed", parse: String, brief: "Only this module", optional: true },
-      kind: { kind: "enum", values: ["query", "mutation", "action", "listener", "cron"], brief: "Only this kind", optional: true },
+      kind: { kind: "enum", values: ["query", "mutation", "action", "listener", "cron", "event"], brief: "Only this kind", optional: true },
       json,
     },
   },
-  func: guarded(async function (this: Context, flags: { module?: string; kind?: FnInfo["kind"] | "listener" | "cron"; json?: boolean }) {
+  func: guarded(async function (this: Context, flags: { module?: string; kind?: FnInfo["kind"] | "listener" | "cron" | "event"; json?: boolean }) {
     const p = await loadProject(this.cwd);
     const rows = [
       ...p.functions.map((f) => plainFn(f)),
@@ -58,12 +58,12 @@ const list = buildCommand({
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind),
     );
     const unregistered = p.unregistered.filter((u) => (!flags.module || u.module === flags.module) && (!flags.kind || u.kind === flags.kind));
-    if (flags.json) return print(this, [...rows, ...unregistered.map((u) => ({ ...u, unregistered: true }))]);
+    if (flags.json) return print(this, [...rows, ...unregistered.map((u) => ({ id: null, ...u, unregistered: true }))]);
     out(this, table(["NAME", "KIND", "POLICY", "DESCRIPTION"], rows.map((r) => [bold(r.id), "private" in r && r.private ? `${kind(r.kind)} ${dim("private")}` : kind(r.kind), r.kind === "listener" || r.kind === "cron" ? dim("-") : policy(r), r.description ?? ""])));
     out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length + p.crons.length} · logic-sdk show <name> for details`));
     if (unregistered.length)
       out(this, `\n${paint("yellow", "Not registered", this.process.stdout)}: no index exports ${unregistered.length === 1 ? "it, so it never runs" : "them, so they never run"}\n` +
-        table(["NAME", "KIND", "WHERE"], unregistered.map((u) => [bold(`${u.module}.${u.name}`), kind(u.kind), where(u.at)])));
+        table(["NAME", "KIND", "WHERE"], unregistered.map((u) => [bold(u.module ? `${u.module}.${u.name}` : u.name), kind(u.kind), where(u.at)])));
   }),
 });
 
@@ -92,8 +92,11 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       lines.push(`${bold(fn.id)}  ${kind(fn.kind)}${fn.private ? `  ${dim("private: only its module's own code runs it")}` : ""}`);
       lines.push(...(fn.description ? [fn.description] : []), dim(where(fn.at)), "");
       row("policy", fn.authorize ?? dim("none (no authorize)"));
-      row("input", fn.takesInput ? shape(fn.input) : dim("none"));
-      row("output", fn.output ? shape(fn.output) : dim("not declared (the handler's type)"));
+      if (fn.private) row("schemas", dim("not read for a private function (the CLI only reads its source)"));
+      else {
+        row("input", fn.takesInput ? shape(fn.input) : dim("none"));
+        row("output", fn.output ? shape(fn.output) : dim("not declared (the handler's type)"));
+      }
       if (fn.checks.length) row("checks", fn.checks.join(", "));
       if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));
       if (fn.runs.length) row("runs", fn.runs.map(runLabel).join(", "));

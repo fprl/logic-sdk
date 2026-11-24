@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 
@@ -116,6 +117,37 @@ test("private functions: what no index exports, found by the definer that made i
   expect(rows).toContainEqual(expect.objectContaining({ name: "onStored", kind: "listener", unregistered: true }));
   expect(rows).toContainEqual(expect.objectContaining({ name: "stored", kind: "event", unregistered: true })); // unexported in its file too
   expect(cli(app, "list", "--module", "files").out).toContain("Not registered");
+});
+
+test("files no module reaches: what they define is listed as never running, tests aside", () => {
+  const rows: { name?: string; module?: string | null; unregistered?: boolean }[] = cli(fixture("layouts"), "list", "--json").json();
+  const stray = rows.filter((r) => r.unregistered).map((r) => `${r.module}.${r.name}`);
+  expect(stray).toEqual(expect.arrayContaining(["files.onRemoved", "files.onRemovedToo", "files.removed", "null.sweep"]));
+  expect(stray).not.toContain("files.scratch"); // defined in a test file
+});
+
+test("a private function in a file two modules import is each one's, as at runtime; a forgotten listener there is listed once", () => {
+  const app = fixture("layouts");
+  expect(cli(app, "show", "files.clear", "--json").json().runs).toEqual(["files.(private) log"]);
+  expect(cli(app, "show", "stock.reserve", "--json").json().runs).toEqual(["stock.(private) log"]);
+  const rows: { id: string | null; name: string; unregistered?: boolean }[] = cli(app, "list", "--json").json();
+  expect(rows.filter((r) => r.name === "log").map((r) => r.id).sort()).toEqual(["files.(private) log", "stock.(private) log"]);
+  expect(rows.filter((r) => r.name === "onAudited")).toHaveLength(1);
+});
+
+test("a monorepo: a module in a workspace package is read from its real path", () => {
+  const app = fixture("monorepo/apps/api");
+  // what a workspace install makes: the package linked into the app's node_modules (ignored by git, so made here)
+  const link = `${app}/node_modules/@acme/logic`;
+  if (!existsSync(link)) {
+    mkdirSync(`${app}/node_modules/@acme`, { recursive: true });
+    symlinkSync("../../../../packages/logic", link);
+  }
+  expect(cli(app, "show", "bookings.pay", "--json").json()).toMatchObject({
+    description: "Take the payment",
+    at: { file: "../../packages/logic/src/bookings/mutations.ts" },
+    runs: ["bookings.(private) record", "bookings.confirm"],
+  });
 });
 
 test("an app that throws while loading gets a diagnostic with the location, not a stack trace", () => {

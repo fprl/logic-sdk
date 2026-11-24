@@ -29,7 +29,7 @@ POLICY is the `authorize` policy as written (`inline` for an arrow), or `none`. 
 
 Filter with `--module bookings` or `--kind mutation`.
 
-A [private function](/docs/concepts/functions#private-functions), one its module's index doesn't export, is listed with `private` after its kind, under the name `wrap` sees: `bookings.(private) confirmPaid` (the runtime's `bookings.(private)` plus its variable name), or `bookings.<id>` when it sets `id`. A listener, cron or event that no index exports never runs, so it's listed apart:
+A [private function](/docs/concepts/functions#private-functions), one its module's index doesn't export, is listed with `private` after its kind, under the name `wrap` sees: `bookings.(private) confirmPaid` (the runtime's `bookings.(private)` plus its variable name), or `bookings.<id>` when it sets `id`. What the registry never sees is listed apart, because it never runs: a listener, cron or event no index exports, and anything defined in a file no module imports (a forgotten `export * from "./listeners"`). For those, the CLI reads every file in your registry's folder and each module's, skipping `node_modules` and test files.
 
 ```txt
 bookings.(private) confirmPaid   mutation private   none   Confirm a booking the guest has just paid for
@@ -104,5 +104,7 @@ Two sources:
 
 1. **Your registry.** The CLI loads your modules (with [jiti](https://github.com/unjs/jiti), so TypeScript and extensionless imports just work) and asks your own `logic-sdk` what's registered: every function, its kind, schemas and listeners.
 2. **Your source.** It parses each module with [oxc](https://oxc.rs) and finds the `run(...)`, `emit(...)` and `schedule(...)` calls inside each function, and inside the helpers it calls by name (`findBooking(ctx, id)`), in its own files or the files they import.
+
+In a monorepo, a module can live in a workspace package (`import * as bookings from "@acme/logic/bookings"`): the CLI reads it from its real path, as Node and TypeScript resolve it.
 
 Static reading has limits. A call through a method or a callback (`rules.check(ctx)`, `items.map(...)` handing ctx on) isn't followed, a computed call like `run(fns[name], ...)` shows as `(dynamic)`, and a `run` inside an `if` is a possible edge, not a guaranteed one.
