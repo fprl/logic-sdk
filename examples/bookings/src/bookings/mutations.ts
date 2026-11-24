@@ -44,22 +44,6 @@ export const confirm = mutation({
   },
 });
 
-/**
- * Confirm a booking the guest has just paid for
- *
- * Internal (no authorize, not in src/rpc.ts): `checkout` runs it once the guest has paid. Not reachable from
- * any adapter, so the gate is the action that runs it.
- */
-export const confirmPaid = mutation({
-  input: z.object({ bookingId: z.uuid() }),
-  output: Booking,
-  async handler(ctx, input) {
-    const b = await confirmBooking(ctx, input.bookingId);
-    ctx.emit(confirmed, { bookingId: b.id, enquiryId: b.enquiryId, guestEmail: b.guestEmail });
-    return b;
-  },
-});
-
 /** Cancel a booking and free its dates */
 export const cancel = mutation({
   input: z.object({ bookingId: z.uuid() }),

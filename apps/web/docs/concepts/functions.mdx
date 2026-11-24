@@ -108,6 +108,39 @@ Inside a module, you can call your own functions two ways. They aren't the same:
 
 **Across modules, always `run`**, through the other module's index. Never import its `data.ts` or `schema.ts`.
 
+## Private functions
+
+A function its module's index doesn't export is private: only that module's own code can reach it, and `ctx.run` runs it as part of the module that runs it. You need one when an action has to write. An action has no `db`, so the write is a mutation, and exported, any module, route or agent could call it directly and skip what the action checks first.
+
+```ts
+// files/data.ts: exported from the file, not from files/index.ts
+export const record = mutation({
+  input: fileInsertSchema.pick({ key: true, contentType: true, byteSize: true }),
+  authorize: member,
+  async handler(ctx, input) { /* insert */ },
+});
+
+// files/actions.ts
+import { record } from "./data.ts";
+
+/** Record an upload once its first bytes show the type the browser claimed */
+export const upload = action({
+  // ...
+  async handler(ctx, input) {
+    const head = await ctx.services.storage.download(input.key, { range: { start: 0, end: 511 } });
+    if (detectContentType(new Uint8Array(await head.arrayBuffer())) !== input.contentType) throw ctx.errors.reject("mismatch");
+    return ctx.run(record, input);
+  },
+});
+```
+
+| | Exported from the index | Private |
+|---|---|---|
+| `ctx.run` | Runs as its own module | Runs as the module that runs it: `files.(private)` in `wrap`, `files.<id>` if it sets `id` |
+| `ctx.schedule`, a cron's `run`, `registry.as(scope).run`, adapters, tests' `t.run` | Yes | Refused: they find code by name, and a private one has none |
+
+Test a private function through the exported one that runs it, as with any unexported code. Another module importing `files/data.ts` directly would run it as its own: keep imports to each module's index with your linter (`logic-sdk graph` shows the edge). A listener, cron or event the index doesn't export never runs.
+
 **Reads go both ways, writes go one way.** A properties page can `run` a bookings query while creating a booking `run`s a properties query: a query can't write, emit or schedule, so that's not a cycle. Don't have modules run each other's mutations or actions in a circle: make one direction an event.
 
 **`ctx.run` nests at most 64 calls deep.** Past that it throws a plain error with the path (`… → a.ping → b.pong → a.ping`), because a function that runs itself, directly or through other modules, never returns. Recurse in a helper that takes `ctx` instead, or make each step separate work: an event, or `ctx.schedule`.

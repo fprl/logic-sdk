@@ -30,7 +30,7 @@ test("descriptions come from the JSDoc above each export: its first paragraph, o
 
 test("list filters by module and kind", () => {
   const ids = cli(app, "list", "--module", "bookings", "--kind", "mutation", "--json").json().map((r: { id: string }) => r.id);
-  expect(ids.sort()).toEqual(["bookings.cancel", "bookings.confirm", "bookings.confirmPaid", "bookings.request"]);
+  expect(ids.sort()).toEqual(["bookings.(private) confirmPaid", "bookings.cancel", "bookings.confirm", "bookings.request"]);
 });
 
 test("show: schemas from the registry, edges from the source (through this module's helpers too)", () => {
@@ -40,7 +40,7 @@ test("show: schemas from the registry, edges from the source (through this modul
   expect(fn.runs).toEqual(["availability.hold"]); // in confirmBooking(ctx, id), a data.ts helper
   expect(fn.emits).toEqual(["bookings.confirmed"]);
   expect(fn.calledBy).toEqual([]);
-  expect(cli(app, "show", "bookings.confirmPaid", "--json").json().calledBy).toEqual(["bookings.checkout"]);
+  expect(cli(app, "show", "bookings.(private) confirmPaid", "--json").json()).toMatchObject({ private: true, calledBy: ["bookings.checkout"] });
   expect(fn.at).toMatchObject({ file: "src/bookings/mutations.ts" });
 });
 
@@ -49,14 +49,14 @@ test("show an event: who emits it and who listens", () => {
     id: "bookings.confirmed",
     module: "bookings",
     name: "confirmed",
-    emittedBy: ["bookings.confirm", "bookings.confirmPaid"],
+    emittedBy: ["bookings.confirm", "bookings.(private) confirmPaid"],
     listeners: ["enquiries.winOnBooking", "tasks.prepareStay"],
   });
 });
 
 test("graph: runs, emits and triggers, as JSON or Mermaid", () => {
   const { edges } = cli(app, "graph", "--format", "json").json();
-  expect(edges).toContainEqual({ from: "bookings.checkout", to: "bookings.confirmPaid", type: "runs" });
+  expect(edges).toContainEqual({ from: "bookings.checkout", to: "bookings.(private) confirmPaid", type: "runs" });
   expect(edges).toContainEqual({ from: "bookings.confirm", to: "bookings.confirmed", type: "emits" });
   expect(edges).toContainEqual({ from: "bookings.confirmed", to: "tasks.prepareStay", type: "triggers" });
   const mermaid = cli(app, "graph", "--format", "mermaid").out;
@@ -105,6 +105,17 @@ test("any layout: each module is what its entry exports, followed through re-exp
     calledBy: ["files.clear", "files.remove"],
   });
   expect(cli(app, "graph", "--module", "files").out).toContain("schedules files.purgeStored");
+});
+
+test("private functions: what no index exports, found by the definer that made it (aliases too), named as the runtime names it", () => {
+  const app = fixture("layouts");
+  expect(cli(app, "show", "files.upload", "--json").json().runs).toEqual(["files.(private) record", "files.tidy"]);
+  const rows: { id?: string; name?: string; kind: string; private?: boolean; unregistered?: boolean }[] = cli(app, "list", "--module", "files", "--json").json();
+  expect(rows).toContainEqual(expect.objectContaining({ id: "files.(private) record", kind: "mutation", private: true, calledBy: ["files.upload"] }));
+  expect(rows).toContainEqual(expect.objectContaining({ id: "files.tidy", private: true }));
+  expect(rows).toContainEqual(expect.objectContaining({ name: "onStored", kind: "listener", unregistered: true }));
+  expect(rows).toContainEqual(expect.objectContaining({ name: "stored", kind: "event", unregistered: true })); // unexported in its file too
+  expect(cli(app, "list", "--module", "files").out).toContain("Not registered");
 });
 
 test("an app that throws while loading gets a diagnostic with the location, not a stack trace", () => {

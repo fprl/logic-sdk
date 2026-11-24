@@ -29,14 +29,20 @@ export class DomainError extends Error {
 export const isDomainError = (e: unknown, code?: string): e is DomainError =>
   e instanceof DomainError && (code === undefined || e.code === code);
 
+/** The module part of an id: "bookings" for "bookings.confirm". */
+export const moduleOf = (id: string) => id.slice(0, id.indexOf("."));
+
+/** What a call its policy refused throws: "bookings.cancel.forbidden", and "files.forbidden" for an unnamed private function. */
+export const forbiddenOf = (id: string) => `${id.endsWith(".(private)") ? moduleOf(id) : id}.forbidden`;
+
 /** `ctx.errors` for one function or listener (`id` like "bookings.confirm"). */
 export const errorsFor = (id: string): Errors => {
-  const module = id.slice(0, id.indexOf("."));
+  const module = moduleOf(id);
   return {
     reject: (code, details) => new DomainError("rejected", `${module}.${code}`, details),
     conflict: (code, details) => new DomainError("conflict", `${module}.${code}`, details),
     notFound: (code = "not_found", details) => new DomainError("not_found", `${module}.${code}`, details),
-    deny: (code, details) => new DomainError("forbidden", code ? `${module}.${code}` : `${id}.forbidden`, details),
+    deny: (code, details) => new DomainError("forbidden", code ? `${module}.${code}` : forbiddenOf(id), details),
   };
 };
 

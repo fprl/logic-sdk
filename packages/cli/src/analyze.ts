@@ -30,10 +30,24 @@ export interface SourceFn {
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), directly or through this module's helpers
   doc?: string; // the first paragraph of the JSDoc block above the export, shown by list and show
 }
+/** What `init()` from "logic-sdk" defines: a definer's kind is the key it was destructured as. */
+export type DefinerKind = "query" | "mutation" | "action" | "listener" | "cron" | "event";
+const KINDS = new Set<string>(["query", "mutation", "action", "listener", "cron", "event"]);
+/**
+ * A definition in a module's files that no index reaches, so the registry never sees it. A query, mutation or action
+ * is private (`ctx.run` runs it as part of the module that runs it); a listener, cron or event never runs.
+ */
+export interface Unreached extends SourceFn {
+  module: string;
+  name: string; // its variable name
+  kind: DefinerKind;
+  takesInput: boolean;
+}
 export interface Source {
   /** Each module's entry: the file the registry imports it from. Its files are whatever that entry reaches. */
   modules: Record<string, { entry: string }>;
   fns: Map<string, SourceFn>;
+  unreached: Unreached[];
 }
 
 type Node = { type: string; start: number; [key: string]: any };
@@ -48,11 +62,22 @@ const calleeName = (call: Node): string | undefined =>
 
 /** An identifier or a string name: `export { a as "b" }`. */
 const idName = (n: Node): string => n.name ?? n.value;
-/** The names a declaration binds: `export const a = …, b = …`, `export function c() {}`. Types bind none we need. */
+/** The names a declarator binds: `a`, or `query` and `m` in `{ query, mutation: m }`. */
+const boundNames = (id: Node | undefined): string[] =>
+  id?.type === "Identifier" ? [id.name]
+  : id?.type === "ObjectPattern" ? id.properties.flatMap((p: Node) => (p.value?.type === "Identifier" ? [p.value.name] : []))
+  : [];
+/** The names a declaration binds: `export const a = …, b = …`, `export const { query } = init()`, `export function c() {}`. Types bind none we need. */
 const declaredNames = (d: Node | null | undefined): string[] =>
-  d?.type === "VariableDeclaration" ? d.declarations.flatMap((v: Node) => (v.id?.type === "Identifier" ? [v.id.name] : []))
+  d?.type === "VariableDeclaration" ? d.declarations.flatMap((v: Node) => boundNames(v.id))
   : (d?.type === "FunctionDeclaration" || d?.type === "ClassDeclaration") && d.id ? [d.id.name]
   : [];
+/** Every top-level `const` declarator, exported or not, with its statement (where its JSDoc sits). */
+const topConsts = (program: Node): { statement: Node; d: Node }[] =>
+  program.body.flatMap((top: Node) => {
+    const s = top.type === "ExportNamedDeclaration" ? top.declaration : top;
+    return s?.type === "VariableDeclaration" ? s.declarations.map((d: Node) => ({ statement: top, d })) : [];
+  });
 
 function walk(node: unknown, visit: (n: Node) => void): void {
   if (!node || typeof node !== "object") return;
@@ -267,6 +292,24 @@ export function analyze(root: string, registryFile: string): Source {
     return out;
   };
 
+  /** The kind of the definer `decl` names: the key it was destructured as from `init()` of "logic-sdk", so aliases work. */
+  const definerKind = (decl: Decl | undefined): DefinerKind | undefined => {
+    if (!decl) return undefined;
+    const { program } = read(decl.file);
+    const init = program.body
+      .filter((s: Node) => s.type === "ImportDeclaration" && s.source.value === "logic-sdk")
+      .flatMap((s: Node) => s.specifiers)
+      .find((sp: Node) => sp.type === "ImportSpecifier" && idName(sp.imported) === "init")?.local.name;
+    if (!init) return undefined;
+    for (const { d } of topConsts(program)) {
+      const call = unwrap(d.init);
+      if (d.id?.type !== "ObjectPattern" || call?.type !== "CallExpression" || call.callee.type !== "Identifier" || call.callee.name !== init) continue;
+      const key = d.id.properties.find((p: Node) => p.value?.type === "Identifier" && p.value.name === decl.local)?.key;
+      if (key && KINDS.has(idName(key))) return idName(key) as DefinerKind;
+    }
+    return undefined;
+  };
+
   const publicName = new Map<string, string>(); // a declaration → "<module>.<export>", the name the registry gives it
   const owner = new Map<string, string>(); // a file → the module it belongs to: its entry, or where its exports are declared
   for (const [mod, { entry }] of Object.entries(modules)) owner.set(entry, mod);
@@ -278,16 +321,25 @@ export function analyze(root: string, registryFile: string): Source {
   }
 
   const fns = new Map<string, SourceFn>();
+  const unreached: Unreached[] = [];
+  /** A private function → its name: the runtime's (`files.(private)`, or `files.<id>`) and, without an id, its variable name. */
+  const privateName = new Map<string, string>();
 
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
   type Found = Pick<SourceFn, "runs" | "emits" | "schedules" | "checks" | "config">;
+  /** A `const x = definer({…})` found in a module's files: exported from its entry under `names`, or unreached. */
+  type Def = { file: File; statement: Node; d: Node; call: Node; names: string[]; kind?: DefinerKind };
 
-  for (const [mod, { entry }] of Object.entries(modules)) {
+  // First every module's files and definitions, so a run of any private function resolves while following handlers.
+  const prepared = Object.entries(modules).map(([mod, { entry }]) => {
     // Its files: where its exports are declared, plus what those import that no other module owns (helpers, shared code).
+    const exported = new Map<string, string[]>(); // a declaration → its export names
+    for (const [name, d] of exportsOf(entry)) exported.set(declKey(d), [...(exported.get(declKey(d)) ?? []), name]);
     const paths = new Set([entry, ...[...exportsOf(entry).values()].map((d) => d.file)]);
     for (const path of paths)
       for (const { from } of importsOf(path).values()) if ((owner.get(from) ?? mod) === mod) paths.add(from);
     const files = new Map<string, File>();
+    const defs: Def[] = [];
     for (const path of paths) {
       /** The function a `run`/`emit`/`schedule` argument names: `stock.hold`, `hold`, or "(dynamic)". */
       const nameOf = (arg: Node | undefined): string => {
@@ -298,11 +350,30 @@ export function analyze(root: string, registryFile: string): Source {
         }
         if (arg?.type !== "Identifier") return "(dynamic)";
         const decl = declOf(path, arg.name);
-        return (decl && publicName.get(declKey(decl))) ?? `${mod}.${arg.name}`;
+        return (decl && (publicName.get(declKey(decl)) ?? privateName.get(declKey(decl)))) ?? "(dynamic)";
       };
-      files.set(path, { ...read(path), nameOf });
-    }
+      const file = { ...read(path), nameOf };
+      files.set(path, file);
 
+      for (const { statement, d } of topConsts(file.program)) {
+        const call = unwrap(d.init);
+        if (d.id?.type !== "Identifier" || call?.type !== "CallExpression") continue;
+        const key = declKey({ file: path, local: d.id.name });
+        const names = exported.get(key) ?? [];
+        // exported: matched to the registry by name, whatever made it. Unreached: only what a definer made
+        const kind = names.length || (owner.get(path) ?? mod) !== mod || call.callee.type !== "Identifier" ? undefined : definerKind(declOf(path, call.callee.name));
+        if (!names.length && !kind) continue;
+        defs.push({ file, statement, d, call, names, kind });
+        if (kind === "query" || kind === "mutation" || kind === "action") {
+          const id = call.arguments[0]?.properties?.find((p: Node) => p.key?.name === "id")?.value?.value;
+          privateName.set(key, typeof id === "string" ? `${mod}.${id}` : `${mod}.(private) ${d.id.name}`);
+        }
+      }
+    }
+    return { mod, files, defs };
+  });
+
+  for (const { mod, files, defs } of prepared) {
     // Functions declared at the top level of this module's files: helpers like findBooking(ctx, id),
     // followed (transitively) for the runs, emits, schedules and record checks they make.
     const helpers = new Map<string, { node: Node; file: File }[]>();
@@ -364,35 +435,30 @@ export function analyze(root: string, registryFile: string): Source {
       });
     };
 
-    for (const [name, { file: path, local }] of exportsOf(entry)) {
-      const file = files.get(path)!;
-      // `export const confirm = mutation(…)`, or a `const` exported elsewhere under any name
-      for (const s of file.program.body) {
-        const v = s.type === "ExportNamedDeclaration" ? s.declaration : s;
-        const decl = v?.type === "VariableDeclaration" ? v.declarations.find((d: Node) => d.id?.type === "Identifier" && d.id.name === local) : undefined;
-        const call = unwrap(decl?.init);
-        if (call?.type !== "CallExpression") continue;
-        const fn: SourceFn = { key: `${mod}.${name}`, at: file.loc(decl.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(s.start) };
+    for (const { file, statement, d, call, names, kind } of defs) {
+      const found: SourceFn = { key: "", at: file.loc(d.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(statement.start) };
+      const def = call.arguments[0];
+      const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];
+      const authorize = props.find((p) => p.key?.name === "authorize")?.value;
+      if (authorize)
+        found.authorize =
+          authorize.type === "Identifier" ? authorize.name
+          : authorize.type === "MemberExpression" && !authorize.computed && authorize.object?.type === "Identifier"
+            ? `${authorize.object.name}.${authorize.property.name}`
+            : "inline";
 
-        const def = call.arguments[0];
-        const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];
-        const authorize = props.find((p) => p.key?.name === "authorize")?.value;
-        if (authorize)
-          fn.authorize =
-            authorize.type === "Identifier" ? authorize.name
-            : authorize.type === "MemberExpression" && !authorize.computed && authorize.object?.type === "Identifier"
-              ? `${authorize.object.name}.${authorize.property.name}`
-              : "inline";
-
-        // ctx is the first parameter: `handler(ctx, input)` in a function, `handler(ctx, payload)` in a listener
-        const handlers = props.filter((p) => p.key?.name === "handler").map((p) => p.value).filter(isFunction);
-        follow(call.arguments, file, ctxIn(handlers, 0), fn, new Set());
-        // keep the most specific keys: `orders.maxItems`, not also `orders`
-        fn.config = fn.config.includes("*") ? ["*"] : fn.config.filter((k) => !fn.config.some((o) => o.startsWith(k + "."))).sort();
-        fns.set(fn.key, fn);
+      // ctx is the first parameter: `handler(ctx, input)` in a function, `handler(ctx, payload)` in a listener
+      const handlers = props.filter((p) => p.key?.name === "handler").map((p) => p.value).filter(isFunction);
+      follow(call.arguments, file, ctxIn(handlers, 0), found, new Set());
+      // keep the most specific keys: `orders.maxItems`, not also `orders`
+      found.config = found.config.includes("*") ? ["*"] : found.config.filter((k) => !found.config.some((o) => o.startsWith(k + "."))).sort();
+      for (const name of names) fns.set(`${mod}.${name}`, { ...found, key: `${mod}.${name}` });
+      if (kind) {
+        const key = privateName.get(declKey({ file: file.file, local: d.id.name })) ?? `${mod}.${d.id.name}`;
+        unreached.push({ ...found, key, module: mod, name: d.id.name, kind, takesInput: props.some((p) => p.key?.name === "input") });
       }
     }
   }
 
-  return { modules, fns };
+  return { modules, fns, unreached };
 }

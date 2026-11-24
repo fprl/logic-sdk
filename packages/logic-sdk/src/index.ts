@@ -1,4 +1,4 @@
-import { describeIssues, DomainError, errorsFor } from "./errors.ts";
+import { describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf } from "./errors.ts";
 import { inProcess, makeJobs, replaceKeyOf, runsNow } from "./jobs.ts";
 import { assertTimeZone, parseSchedule } from "./schedule.ts";
 import { BRAND, INTERNAL } from "./types.ts";
@@ -394,11 +394,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     }
   };
 
-  if (!database && functions.some((f) => f.kind === "mutation"))
-    throw new Error(
-      "[logic-sdk] Mutations need a database: createRegistry({ database: drizzleAdapter(db) }). It needs interactive " +
-        "transactions, so Cloudflare D1 and HTTP drivers can't run mutations.",
-    );
+  const noDatabase =
+    "[logic-sdk] Mutations need a database: createRegistry({ database: drizzleAdapter(db) }). It needs interactive " +
+    "transactions, so Cloudflare D1 and HTTP drivers can't run mutations.";
+  if (!database && functions.some((f) => f.kind === "mutation")) throw new Error(noDatabase);
   for (const l of listeners)
     if (!ids.has(l.event))
       throw new Error(`[logic-sdk] Listener ${l.id} listens to an event that isn't registered in any module.`);
@@ -408,7 +407,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const id = ids.get(x);
     if (!id)
       throw new Error(
-        "[logic-sdk] This function or event isn't registered. Export it from its module's index.ts, and add the module to createRegistry({ modules }).",
+        "[logic-sdk] This function or event isn't registered. Export it from its module's index.ts, and add the module to createRegistry({ modules }). " +
+          "A private function (one the index doesn't export) runs only through ctx.run, from its own module.",
       );
     return id;
   };
@@ -455,7 +455,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     scope: frame.scope,
     config: config as any, // Frozen<Cf> here; each app's ctx types it from its own Config
     now,
-    run: (fn: Fn, input?: unknown, options?: RunOptions) => invoke(fn, input, enter(frame, options), allowed),
+    run: (fn: Fn, input?: unknown, options?: RunOptions) => invoke(fn, input, enter(frame, options), allowed, moduleOf(id)),
   });
   const queryCtx = (frame: Frame, id: string): QueryCtx<any> => ({
     ...baseCtx(frame, id, ["query"]),
@@ -472,7 +472,12 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         checkAtCommit(tx, event.payload, envelope.payload, `${envelope.name} payload`, (parsed) => tx.parsed.set(envelope, parsed));
       },
       schedule: (fn, input, { at, delay, attempts = 1, replace }) => {
-        const fnId = idOf(fn);
+        const fnId = ids.get(fn);
+        if (!fnId)
+          throw new Error(
+            "[logic-sdk] ctx.schedule needs a function its module's index.ts exports: a scheduled call waits as a name, and a worker finds the code by it. " +
+              "A private function runs only through ctx.run.",
+          );
         const seconds = at ? (at.getTime() - now().getTime()) / 1000 : (delay ?? NaN);
         if (!Number.isFinite(seconds) || (!at && seconds < 0))
           throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
@@ -547,8 +552,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────
-  async function invoke(fn: Fn, rawInput: unknown, outer: Frame, allowed: Kind[]): Promise<any> {
-    const id = idOf(fn);
+  /** `from`: the module of the function running this one, so a private function (its index doesn't export it) runs as part of it. */
+  async function invoke(fn: Fn, rawInput: unknown, outer: Frame, allowed: Kind[], from?: string): Promise<any> {
+    const id = ids.get(fn) ?? (from ? `${from}.${fn.id ?? "(private)"}` : idOf(fn));
     if (!allowed.includes(fn.kind))
       throw new Error(`[logic-sdk] ${id} is a ${fn.kind}; it can't be run from here (allowed: ${allowed.join(", ")}).`);
     const depth = outer.trail.length;
@@ -567,7 +573,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       frame.abortOn?.throwIfAborted();
       if (fn.authorize) {
         // SAFETY: the registry erases each policy's scope type; the caller's scope is the app's Scope by construction
-        if (fn.authorize(frame.scope as never) !== true) throw new DomainError("forbidden", `${id}.forbidden`);
+        if (fn.authorize(frame.scope as never) !== true) throw new DomainError("forbidden", forbiddenOf(id));
       }
       // no `input`: the function takes nothing, whatever an adapter sends (AI tools send `{}`)
       return fn.input ? parseInput(fn.input, rawInput, id, depth > 0) : undefined;
@@ -600,12 +606,13 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
 
       // top-level mutation: open the transaction, commit, then deliver events.
       // A lost race (deadlock, serialization failure) re-runs it in a fresh transaction.
+      // createRegistry checks for one, but a private mutation isn't registered, so it can only be checked here
+      if (!database) throw new Error(noDatabase);
       const input = await prepare();
       let committed: { out: unknown; events: Envelope[]; jobs: Job[] };
       for (let attempt = 1; ; attempt++) {
         try {
-          // SAFETY: createRegistry refuses mutations without a database that has interactive transactions
-          committed = await database!.transaction(async (txDb) => {
+          committed = await database.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
             const tx: TxState = { db: txDb, doomed: false, reason: undefined, events: [], parsed: new Map(), calls: [], pending: [] };
             const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
@@ -617,7 +624,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           });
           break;
         } catch (e) {
-          if (attempt < transactionAttempts && database!.retryable?.(e)) { // SAFETY: as above
+          if (attempt < transactionAttempts && database.retryable?.(e)) {
             // a random pause, so transactions that just deadlocked don't retry in lockstep and collide again
             await new Promise((r) => setTimeout(r, Math.random() * 20 * attempt));
             continue;
