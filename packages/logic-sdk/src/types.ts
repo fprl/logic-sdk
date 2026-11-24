@@ -102,7 +102,10 @@ type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => vo
 export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends boolean = boolean, C extends Config = any, IS extends Schema | undefined = Schema | undefined> {
   readonly [BRAND]: K;
   readonly kind: K;
-  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  /**
+   * Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name.
+   * A private function (the index doesn't export it) is `notifications.(private)` without one.
+   */
   readonly id?: string;
   /** What callers pass, validated on every call, as you wrote it: `fn.input.pick({ name: true })` for a form. Undefined: the function takes nothing (`run(fn)`). */
   readonly input: IS;
@@ -291,7 +294,7 @@ export interface Errors {
   conflict(code: string, details?: unknown): DomainError;
   /** It doesn't exist, or isn't visible in this scope. Code defaults to `"<module>.not_found"`. */
   notFound(code?: string, details?: unknown): DomainError;
-  /** The caller is known but may not do this. Code defaults to `"<module>.<function>.forbidden"`. */
+  /** The caller is known but may not do this. Code defaults to `"<module>.<function>.forbidden"`, or `"<module>.forbidden"` in an unnamed private function. */
   deny(code?: string, details?: unknown): DomainError;
 }
 interface BaseCtx<C extends Config, S> {

@@ -1,4 +1,4 @@
-import { describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf } from "./errors.ts";
+import { describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf, PRIVATE } from "./errors.ts";
 import { inProcess, makeJobs, replaceKeyOf, runsNow } from "./jobs.ts";
 import { assertTimeZone, parseSchedule } from "./schedule.ts";
 import { BRAND, INTERNAL } from "./types.ts";
@@ -552,9 +552,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────
-  /** `from`: the module of the function running this one, so a private function (its index doesn't export it) runs as part of it. */
-  async function invoke(fn: Fn, rawInput: unknown, outer: Frame, allowed: Kind[], from?: string): Promise<any> {
-    const id = ids.get(fn) ?? (from ? `${from}.${fn.id ?? "(private)"}` : idOf(fn));
+  /** `callerModule`: set by ctx.run, so a private function (its index doesn't export it) runs as part of the module running it. */
+  async function invoke(fn: Fn, rawInput: unknown, outer: Frame, allowed: Kind[], callerModule?: string): Promise<any> {
+    // anything else that runs one finds it by name, and it has none: idOf throws, saying so
+    const id = ids.get(fn) ?? (callerModule ? `${callerModule}.${fn.id ?? PRIVATE}` : idOf(fn));
     if (!allowed.includes(fn.kind))
       throw new Error(`[logic-sdk] ${id} is a ${fn.kind}; it can't be run from here (allowed: ${allowed.join(", ")}).`);
     const depth = outer.trail.length;

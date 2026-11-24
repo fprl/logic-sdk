@@ -32,8 +32,11 @@ export const isDomainError = (e: unknown, code?: string): e is DomainError =>
 /** The module part of an id: "bookings" for "bookings.confirm". */
 export const moduleOf = (id: string) => id.slice(0, id.indexOf("."));
 
+/** How an unnamed private function (one its module's index doesn't export) is named: `files.(private)`. */
+export const PRIVATE = "(private)";
+
 /** What a call its policy refused throws: "bookings.cancel.forbidden", and "files.forbidden" for an unnamed private function. */
-export const forbiddenOf = (id: string) => `${id.endsWith(".(private)") ? moduleOf(id) : id}.forbidden`;
+export const forbiddenOf = (id: string) => `${id === `${moduleOf(id)}.${PRIVATE}` ? moduleOf(id) : id}.forbidden`;
 
 /** `ctx.errors` for one function or listener (`id` like "bookings.confirm"). */
 export const errorsFor = (id: string): Errors => {

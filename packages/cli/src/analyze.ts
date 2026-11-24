@@ -30,22 +30,23 @@ export interface SourceFn {
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), directly or through this module's helpers
   doc?: string; // the first paragraph of the JSDoc block above the export, shown by list and show
 }
+const KINDS = ["query", "mutation", "action", "listener", "cron", "event"] as const;
 /** What `init()` from "logic-sdk" defines: a definer's kind is the key it was destructured as. */
-export type DefinerKind = "query" | "mutation" | "action" | "listener" | "cron" | "event";
-const KINDS = new Set<string>(["query", "mutation", "action", "listener", "cron", "event"]);
+export type DefinerKind = (typeof KINDS)[number];
+type FnKind = "query" | "mutation" | "action";
 /**
- * A definition in a module's files that no index reaches, so the registry never sees it. A query, mutation or action
- * is private (`ctx.run` runs it as part of the module that runs it); a listener, cron or event never runs.
+ * A query, mutation or action in a module's files that its index doesn't export: `ctx.run` runs it as part of the
+ * module that runs it. `key` is the runtime's name for it (`files.(private)`, or `files.<id>`) plus its variable name.
  */
-export interface Unreached extends SourceFn {
+export interface PrivateFn extends SourceFn {
   module: string;
   name: string; // its variable name
-  kind: DefinerKind;
+  kind: FnKind;
   takesInput: boolean;
 }
-/** A definition in a file no module reaches (a forgotten `export * from "./listeners"`): it never runs. */
-export interface Stray {
-  module: string | null; // the module whose folder it's in, if any
+/** What the registry never sees, so it never runs: a listener, cron or event no index exports, or anything in a file no module reaches. */
+export interface Unregistered {
+  module: string | null; // null: in no module's folder
   name: string;
   kind: DefinerKind;
   at: Loc;
@@ -55,8 +56,8 @@ export interface Source {
   /** Each module's entry: the file the registry imports it from. Its files are whatever that entry reaches. */
   modules: Record<string, { entry: string }>;
   fns: Map<string, SourceFn>;
-  unreached: Unreached[];
-  stray: Stray[];
+  privates: PrivateFn[];
+  unregistered: Unregistered[];
 }
 
 type Node = { type: string; start: number; [key: string]: any };
@@ -316,7 +317,8 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       const call = unwrap(d.init);
       if (d.id?.type !== "ObjectPattern" || call?.type !== "CallExpression" || call.callee.type !== "Identifier" || call.callee.name !== init) continue;
       const key = d.id.properties.find((p: Node) => p.value?.type === "Identifier" && p.value.name === decl.local)?.key;
-      if (key && KINDS.has(idName(key))) return idName(key) as DefinerKind;
+      const kind = key && KINDS.find((k) => k === idName(key));
+      if (kind) return kind;
     }
     return undefined;
   };
@@ -331,15 +333,29 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     }
   }
 
+  /** A definer call's options: `{ input, authorize, handler, … }`. */
+  const propsOf = (call: Node): Node[] => (call.arguments[0]?.type === "ObjectExpression" ? call.arguments[0].properties : []);
+  /** Each top-level `const x = …(…)` in a file. */
+  const definitionsIn = (path: string): { statement: Node; d: Node; call: Node }[] =>
+    topConsts(read(path).program).flatMap(({ statement, d }) => {
+      const call = unwrap(d.init);
+      return d.id?.type === "Identifier" && call?.type === "CallExpression" ? [{ statement, d, call }] : [];
+    });
+  /** The kind of a call's definer, when it's one from `init()`. */
+  const kindOfCall = (path: string, call: Node) => (call.callee.type === "Identifier" ? definerKind(declOf(path, call.callee.name)) : undefined);
+
   const fns = new Map<string, SourceFn>();
-  const unreached: Unreached[] = [];
-  /** A private function → its name: the runtime's (`files.(private)`, or `files.<id>`) and, without an id, its variable name. */
-  const privateName = new Map<string, string>();
+  const privates: PrivateFn[] = [];
+  const unregistered: Unregistered[] = [];
+  /** A private function → its `id`, or undefined. Its name depends on the module that runs it, as at runtime. */
+  const privateIds = new Map<string, string | undefined>();
+  const privateName = (mod: string, decl: Decl) => `${mod}.${privateIds.get(declKey(decl)) ?? `(private) ${decl.local}`}`;
+  const listed = new Set<string>(); // unregistered declarations already listed: a file two modules import is in both
 
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
   type Found = Pick<SourceFn, "runs" | "emits" | "schedules" | "checks" | "config">;
-  /** A `const x = definer({…})` found in a module's files: exported from its entry under `names`, or unreached. */
-  type Def = { file: File; statement: Node; d: Node; call: Node; names: string[]; kind?: DefinerKind };
+  /** A `const x = definer({…})` in a module's files: exported from its entry under `names`, or private. */
+  type Def = { file: File; statement: Node; d: Node; call: Node; names: string[]; private?: FnKind };
 
   // First every module's files and definitions, so a run of any private function resolves while following handlers.
   const prepared = Object.entries(modules).map(([mod, { entry }]) => {
@@ -349,6 +365,9 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     const paths = new Set([entry, ...[...exportsOf(entry).values()].map((d) => d.file)]);
     for (const path of paths)
       for (const { from } of importsOf(path).values()) if ((owner.get(from) ?? mod) === mod) paths.add(from);
+    /** The function a declaration is, as this module names it: `stock.hold`, `files.(private) record`, or "(dynamic)". */
+    const named = (decl: Decl | undefined) =>
+      !decl ? "(dynamic)" : (publicName.get(declKey(decl)) ?? (privateIds.has(declKey(decl)) ? privateName(mod, decl) : "(dynamic)"));
     const files = new Map<string, File>();
     const defs: Def[] = [];
     for (const path of paths) {
@@ -356,28 +375,30 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       const nameOf = (arg: Node | undefined): string => {
         if (arg?.type === "MemberExpression" && !arg.computed && arg.object?.type === "Identifier") {
           const imp = importsOf(path).get(arg.object.name);
-          const decl = imp?.name === "*" ? exportsOf(imp.from).get(arg.property.name) : undefined;
-          return (decl && publicName.get(declKey(decl))) ?? "(dynamic)";
+          return named(imp?.name === "*" ? exportsOf(imp.from).get(arg.property.name) : undefined);
         }
-        if (arg?.type !== "Identifier") return "(dynamic)";
-        const decl = declOf(path, arg.name);
-        return (decl && (publicName.get(declKey(decl)) ?? privateName.get(declKey(decl)))) ?? "(dynamic)";
+        return arg?.type === "Identifier" ? named(declOf(path, arg.name)) : "(dynamic)";
       };
       const file = { ...read(path), nameOf };
       files.set(path, file);
 
-      for (const { statement, d } of topConsts(file.program)) {
-        const call = unwrap(d.init);
-        if (d.id?.type !== "Identifier" || call?.type !== "CallExpression") continue;
-        const key = declKey({ file: path, local: d.id.name });
-        const names = exported.get(key) ?? [];
-        // exported: matched to the registry by name, whatever made it. Unreached: only what a definer made
-        const kind = names.length || (owner.get(path) ?? mod) !== mod || call.callee.type !== "Identifier" ? undefined : definerKind(declOf(path, call.callee.name));
-        if (!names.length && !kind) continue;
-        defs.push({ file, statement, d, call, names, kind });
+      for (const { statement, d, call } of definitionsIn(path)) {
+        const decl = { file: path, local: d.id.name };
+        const names = exported.get(declKey(decl)) ?? [];
+        // exported: matched to the registry by name, whatever made it. The rest of this module's files: what a definer made
+        if (names.length) {
+          defs.push({ file, statement, d, call, names });
+          continue;
+        }
+        if ((owner.get(path) ?? mod) !== mod) continue;
+        const kind = kindOfCall(path, call);
         if (kind === "query" || kind === "mutation" || kind === "action") {
-          const id = call.arguments[0]?.properties?.find((p: Node) => p.key?.name === "id")?.value?.value;
-          privateName.set(key, typeof id === "string" ? `${mod}.${id}` : `${mod}.(private) ${d.id.name}`);
+          const id = propsOf(call).find((p) => p.key?.name === "id")?.value;
+          privateIds.set(declKey(decl), id?.type === "Literal" && typeof id.value === "string" ? id.value : undefined);
+          defs.push({ file, statement, d, call, names, private: kind });
+        } else if (kind && !listed.has(declKey(decl))) {
+          listed.add(declKey(decl));
+          unregistered.push({ module: mod, name: d.id.name, kind, at: file.loc(d.start), doc: file.docAt(statement.start) });
         }
       }
     }
@@ -446,10 +467,10 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       });
     };
 
-    for (const { file, statement, d, call, names, kind } of defs) {
-      const found: SourceFn = { key: "", at: file.loc(d.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(statement.start) };
-      const def = call.arguments[0];
-      const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];
+    for (const def of defs) {
+      const { file, statement, d, call } = def;
+      const found: Omit<SourceFn, "key"> = { at: file.loc(d.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(statement.start) };
+      const props = propsOf(call);
       const authorize = props.find((p) => p.key?.name === "authorize")?.value;
       if (authorize)
         found.authorize =
@@ -463,41 +484,45 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       follow(call.arguments, file, ctxIn(handlers, 0), found, new Set());
       // keep the most specific keys: `orders.maxItems`, not also `orders`
       found.config = found.config.includes("*") ? ["*"] : found.config.filter((k) => !found.config.some((o) => o.startsWith(k + "."))).sort();
-      for (const name of names) fns.set(`${mod}.${name}`, { ...found, key: `${mod}.${name}` });
-      if (kind) {
-        const key = privateName.get(declKey({ file: file.file, local: d.id.name })) ?? `${mod}.${d.id.name}`;
-        unreached.push({ ...found, key, module: mod, name: d.id.name, kind, takesInput: props.some((p) => p.key?.name === "input") });
-      }
+      for (const name of def.names) fns.set(`${mod}.${name}`, { ...found, key: `${mod}.${name}` });
+      if (def.private)
+        privates.push({
+          ...found,
+          key: privateName(mod, { file: file.file, local: d.id.name }),
+          module: mod,
+          name: d.id.name,
+          kind: def.private,
+          takesInput: props.some((p) => p.key?.name === "input"),
+        });
     }
   }
 
   // Files no module reaches, in the registry's folder and each module's: a forgotten `export * from "./listeners"`.
-  // Like Trigger.dev's `dirs`, without tests: what they define is never registered on purpose.
+  // Like Trigger.dev's `dirs`, without tests: what they define is never registered on purpose. A symlinked file is
+  // read where it really lives, and with a TypeScript registry, `.js` files are build output.
   const reached = new Set(prepared.flatMap((m) => [...m.files.keys()]));
   const folderOf = (entry: string) => (/^index\.[^.]+$/.test(basename(entry)) ? dirname(entry) : entry.replace(/\.[^./]+$/, ""));
-  const folders = Object.entries(modules).map(([mod, { entry }]) => ({ mod, folder: folderOf(entry) + sep }));
+  // nearest first: a module nested in another's folder takes its own files
+  const folders = Object.entries(modules)
+    .map(([mod, { entry }]) => ({ mod, folder: folderOf(entry) + sep }))
+    .sort((a, b) => b.folder.length - a.folder.length);
+  const skipped = /\.[mc]?tsx?$/.test(registryFile) ? /\.(test|spec)\.|\.d\.[mc]?ts$|\.[mc]?jsx?$/ : /\.(test|spec)\.|\.d\.[mc]?ts$/;
   const roots = [dirname(registryFile), ...Object.values(modules).map((m) => dirname(m.entry))]
     .filter((dir, i, all) => all.indexOf(dir) === i && !all.some((other) => dir.startsWith(other + sep)));
-  const stray: Stray[] = [];
   const scan = (dir: string): void => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, e.name);
-      if (e.isDirectory()) {
-        if (e.name !== "node_modules" && !e.name.startsWith(".")) scan(path);
-        continue;
-      }
-      if (!SOURCE.test(e.name) || /\.(test|spec)\.|\.d\.[mc]?ts$/.test(e.name) || reached.has(path)) continue;
+      if (e.isDirectory() && e.name !== "node_modules" && !e.name.startsWith(".")) scan(path);
+      if (!e.isFile() || !SOURCE.test(e.name) || skipped.test(e.name) || reached.has(path)) continue;
       const file = read(path);
-      for (const { statement, d } of topConsts(file.program)) {
-        const call = unwrap(d.init);
-        if (d.id?.type !== "Identifier" || call?.type !== "CallExpression" || call.callee.type !== "Identifier") continue;
-        const kind = definerKind(declOf(path, call.callee.name));
+      for (const { statement, d, call } of definitionsIn(path)) {
+        const kind = kindOfCall(path, call);
         if (kind)
-          stray.push({ module: folders.find((f) => path.startsWith(f.folder))?.mod ?? null, name: d.id.name, kind, at: file.loc(d.start), doc: file.docAt(statement.start) });
+          unregistered.push({ module: folders.find((f) => path.startsWith(f.folder))?.mod ?? null, name: d.id.name, kind, at: file.loc(d.start), doc: file.docAt(statement.start) });
       }
     }
   };
   for (const dir of roots) scan(dir);
 
-  return { modules, fns, unreached, stray };
+  return { modules, fns, privates, unregistered };
 }

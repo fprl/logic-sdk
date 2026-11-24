@@ -3,6 +3,7 @@ import { mutation } from "../init";
 import { hold } from "../stock/mutations";
 import { purge } from "./actions";
 import { purgeLater } from "./later";
+import { log } from "../shared/audit";
 
 /** Remove a file's record */
 export const remove = mutation({
@@ -17,6 +18,7 @@ export const remove = mutation({
 export const clear = mutation({
   input: z.object({}),
   async handler(ctx) {
+    await ctx.run(log);
     purgeLater(ctx, "all");
   },
 });

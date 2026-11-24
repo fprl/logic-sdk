@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { action, mutation } from "../init";
-import { record } from "./data";
+import * as data from "./data";
 
 /** Delete what's stored */
 const purge = action({
@@ -11,7 +11,7 @@ const purge = action({
 /** Store a file: the only way to record one */
 export const upload = action({
   handler: async (ctx) => {
-    await ctx.run(record);
+    await ctx.run(data.record); // through a namespace import
     await ctx.run(tidy);
   },
 });

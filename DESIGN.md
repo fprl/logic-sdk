@@ -594,7 +594,7 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 - **The reference stacks don't ship such rules.** Convex enforces its rules in its runtime (`fetch` only in actions, [runtimes](https://docs.convex.dev/functions/runtimes)) and ships its lint rules as a separate ESLint plugin ([docs](https://docs.convex.dev/eslint)). Rails' first-party lint config is style ([rubocop-rails-omakase](https://github.com/rails/rubocop-rails-omakase)). Laravel's "`env()` only in config files" is advice in the docs that nothing checks ([helpers](https://github.com/laravel/docs/blob/12.x/helpers.md)). Elixir's `mix xref` reports dependency graphs and cycles and enforces nothing ([docs](https://hexdocs.pm/mix/Mix.Tasks.Xref.html)); Credo and `boundary` are community packages ([Credo](https://github.com/rrrene/credo), [boundary](https://github.com/sasa1977/boundary)).
 - **What would change it:** a hazard the types and the runtime can't hold, which a static rule catches reliably rather than by name.
 
-### Proposed (not built, 2026-11-24): private means not registered
+### Private means not registered (2026-11-24)
 
 A query, mutation or action that the module's index doesn't reach isn't registered, and that makes it private. `ctx.run` runs it as part of the calling module. Everything that finds code by name refuses it. The case: `files.upload` is an action that checks a file's first bytes in storage, and then it needs a write. Actions have no `db`, so the write is a mutation, and a registered mutation can be called from any module, route or agent, which skips the check. Before logic-sdk, the owner's app did both in one function (`createFile`). The library made the split, so the library closes it.
 
@@ -617,7 +617,7 @@ export const upload = action({ async handler(ctx, input) { /* check the bytes */
 | | registered | not registered |
 |---|---|---|
 | `ctx.run` | runs as its own module | runs as the caller's module |
-| `ctx.schedule`, a cron's `run`, adapters, `registry.as().run`, `t.run` | yes | refused: "a stored job needs a name, export it" |
+| `ctx.schedule`, a cron's `run`, adapters, `registry.as().run`, `t.run` | yes | refused: they find code by name, and a private one has none |
 
 - **Seen before running.** Nothing outside the module's files can reference `record`: it isn't on `files.*`. A deep import (`../files/data.ts`) is the app's linter's job. The owner's app already fails it with dependency-cruiser. If the import gets through anyway, `record` runs as the importing module, and its errors carry that module's namespace. Rejected: pinning each private to the first module that runs it, so a deep import throws. That's runtime machinery for what static analysis already catches.
 - **Names.**
