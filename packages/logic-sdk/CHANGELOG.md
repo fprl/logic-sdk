@@ -1,5 +1,12 @@
 # logic-sdk
 
+## 0.6.1
+
+### Patch Changes
+
+- 3ebed81: `fn.input` is the schema as you wrote it, so a form can derive from the function it calls: `properties.update.input.pick({ name: true })`, with no schema exported for it. It's `undefined` when the function takes no input. `Fn` gets a sixth type parameter for it, defaulting to `Schema | undefined`, and `input` is no longer optional on the type.
+- @logic-sdk/cli@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes

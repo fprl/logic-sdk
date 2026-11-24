@@ -1,6 +1,6 @@
 {
   "name": "logic-sdk",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Queries, mutations, actions and events for TypeScript apps. Transactions, after-commit events and scopes, on any runtime.",
   "keywords": [
     "actions",
