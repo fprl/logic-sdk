@@ -1,7 +1,7 @@
-// Reads the app's source with a real parser (oxc): which functions run which, what they emit, the config keys and
+// Reads the app's source with a real parser (oxc): which functions run, emit and schedule which, the config keys and
 // record checks they use. No regex, and no code is executed here.
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { relative, sep } from "node:path";
 import { parseSync } from "oxc-parser";
 import { ResolverFactory, type NapiResolveOptions } from "oxc-resolver";
 
@@ -15,20 +15,24 @@ export interface Edge {
   at: Loc;
   scope?: string[]; // scope keys this run changes: ctx.run(fn, input, { scope: { actor } }) → ["actor"]
 }
-/** An `export const name = …(…)` in a module file. Matched against the registry by module and export, so definer names don't matter. */
+/** What a handler's ctx calls: `ctx.run`, `ctx.emit` and `ctx.schedule`, or the same names destructured from ctx. */
+const CALLS = ["run", "emit", "schedule"] as const;
+type Call = (typeof CALLS)[number];
+/** A `const name = …(…)` a module exports, wherever it's declared. Matched against the registry by module and export, so definer names don't matter. */
 export interface SourceFn {
   key: string; // `<module>.<export>`: the id can differ
   at: Loc;
   authorize?: string; // the policy as written (`authorize: member` → "member"), "inline", or undefined
   runs: Edge[];
   emits: Edge[];
+  schedules: Edge[];
   checks: string[]; // can*(...) record checks it calls, directly or through this module's helpers
   config: string[]; // ctx.config keys it reads ("orders.maxItems"), directly or through this module's helpers
   doc?: string; // the first paragraph of the JSDoc block above the export, shown by list and show
 }
 export interface Source {
-  /** `folder: false`: the module is a single file (fine for small modules). */
-  modules: Record<string, { dir: string; index: string; folder: boolean }>;
+  /** Each module's entry: the file the registry imports it from. Its files are whatever that entry reaches. */
+  modules: Record<string, { entry: string }>;
   fns: Map<string, SourceFn>;
 }
 
@@ -42,6 +46,14 @@ const CAN = /^can[A-Z]/;
 const calleeName = (call: Node): string | undefined =>
   call.callee?.type === "Identifier" ? call.callee.name : call.callee?.computed ? undefined : call.callee?.property?.name;
 
+/** An identifier or a string name: `export { a as "b" }`. */
+const idName = (n: Node): string => n.name ?? n.value;
+/** The names a declaration binds: `export const a = …, b = …`, `export function c() {}`. Types bind none we need. */
+const declaredNames = (d: Node | null | undefined): string[] =>
+  d?.type === "VariableDeclaration" ? d.declarations.flatMap((v: Node) => (v.id?.type === "Identifier" ? [v.id.name] : []))
+  : (d?.type === "FunctionDeclaration" || d?.type === "ClassDeclaration") && d.id ? [d.id.name]
+  : [];
+
 function walk(node: unknown, visit: (n: Node) => void): void {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node)) return node.forEach((n) => walk(n, visit));
@@ -50,25 +62,17 @@ function walk(node: unknown, visit: (n: Node) => void): void {
   for (const key in n) if (key !== "parent") walk(n[key], visit);
 }
 
-const SKIP_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage", "__tests__", "test", "tests"]);
-/** Source files under `dir`. Skips dependencies, build output, dot folders (.next, .git) and tests. */
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) return SKIP_DIRS.has(name) || name.startsWith(".") ? [] : sourceFiles(path);
-    return /\.([mc]?ts|tsx|[mc]?js|jsx)$/.test(name) && !/\.(test|spec|d)\.[mc]?[jt]sx?$/.test(name) ? [path] : [];
-  });
-}
+const SOURCE = /\.([mc]?ts|tsx|[mc]?js|jsx)$/;
 
 export class ParseError extends Error {}
 
 /**
  * Where ctx is in `fns`: the parameter at `param`, or any parameter named ctx (helpers: `findBooking(ctx, id)`).
- * `run`/`emit` count only on it: `ctx.run(…)`, or destructured from it. Never `db.run(…)`.
+ * `run`/`emit`/`schedule` count only on it: `ctx.run(…)`, or destructured from it. Never `db.run(…)`.
  */
 const ctxIn = (fns: Node[], param: number | "any") => {
   const names = new Set(["ctx"]);
-  const direct = new Map<string, "run" | "emit">(); // local name → what it is
+  const direct = new Map<string, Call>(); // local name → what it is
   const configNames = new Map<string, string>(); // local name → the config path it holds ("" = all of config)
   const configKeys: string[] = []; // keys read by destructuring: `{ config: { orders } }`, `const { maxItems } = ctx.config.orders`
   const keyPath = (a: string, b: string) => (a ? `${a}.${b}` : b);
@@ -95,7 +99,7 @@ const ctxIn = (fns: Node[], param: number | "any") => {
       for (const prop of p.properties) {
         const key = prop.key?.name;
         const value = prop.value?.type === "AssignmentPattern" ? prop.value.left : prop.value;
-        if ((key === "run" || key === "emit") && value?.type === "Identifier") direct.set(value.name, key);
+        if (CALLS.includes(key) && value?.type === "Identifier") direct.set(value.name, key);
         if (key === "config" && value?.type === "Identifier") configNames.set(value.name, "");
         if (key === "config" && value?.type === "ObjectPattern") fromConfigPattern(value, "");
       }
@@ -105,10 +109,10 @@ const ctxIn = (fns: Node[], param: number | "any") => {
     const o = unwrap(n);
     return o?.type === "Identifier" && names.has(o.name);
   };
-  const kindOf = (call: Node): "run" | "emit" | undefined => {
+  const kindOf = (call: Node): Call | undefined => {
     if (call.callee.type === "Identifier") return direct.get(call.callee.name);
     const prop = call.callee.type === "MemberExpression" && !call.callee.computed ? call.callee.property?.name : undefined;
-    return (prop === "run" || prop === "emit") && onCtx(call.callee.object) ? prop : undefined;
+    return CALLS.includes(prop) && onCtx(call.callee.object) ? prop : undefined;
   };
   /**
    * The config path an expression holds: `ctx.config.orders.maxItems` or `config.orders.maxItems` → "orders.maxItems",
@@ -188,17 +192,15 @@ export function analyze(root: string, registryFile: string): Source {
   const namespaces: Record<string, string> = {};
   for (const s of reg.program.body)
     if (s.type === "ImportDeclaration" && s.specifiers[0]?.type === "ImportNamespaceSpecifier") {
-      const index = resolve(registryFile, s.source.value);
-      if (index) namespaces[s.specifiers[0].local.name] = index;
+      const entry = resolve(registryFile, s.source.value);
+      if (entry) namespaces[s.specifiers[0].local.name] = entry;
     }
   const modules: Source["modules"] = {};
   walk(reg.program, (n) => {
     if (n.type !== "Property" || n.key?.name !== "modules" || n.value?.type !== "ObjectExpression") return;
     for (const p of n.value.properties) {
-      const index = p.value?.type === "Identifier" ? namespaces[p.value.name] : undefined;
-      if (!p.key?.name || !index) continue;
-      const folder = /^index\.[mc]?tsx?$/.test(basename(index));
-      modules[p.key.name] = { index, folder, dir: folder ? dirname(index) : index };
+      const entry = p.value?.type === "Identifier" ? namespaces[p.value.name] : undefined;
+      if (p.key?.name && entry) modules[p.key.name] = { entry };
     }
   });
   if (!Object.keys(modules).length)
@@ -206,45 +208,105 @@ export function analyze(root: string, registryFile: string): Source {
       `Couldn't find the modules in ${relative(root, registryFile)}. Expected createRegistry({ modules: { bookings, ... } }) with each module imported as \`import * as bookings from "./bookings"\`.`,
     );
 
-  const moduleOf = (file: string) => {
-    const found = Object.entries(modules).find(([, m]) => file === m.dir || (m.folder && file.startsWith(m.dir + sep)));
-    return found && { name: found[0], ...found[1] };
+  // A module is what its entry exports, followed through re-exports and imports to where each name is declared,
+  // the way the registry sees it. So any layout works: one file, a folder, `orders.ts` beside `orders/`, renames.
+  /** Where an export is declared: the file, and its name there. */
+  type Decl = { file: string; local: string };
+  const declKey = (d: Decl) => `${d.file}#${d.local}`;
+  /** An import that points into the app (not a dependency or a .d.ts), as a file we can parse. */
+  const appFile = (fromFile: string, spec: string) => {
+    const f = resolve(fromFile, spec);
+    return f && SOURCE.test(f) && !/\.d\.[mc]?ts$/.test(f) && !f.split(sep).includes("node_modules") ? f : undefined;
   };
+  const importCache = new Map<string, Map<string, { from: string; name: string }>>();
+  /** What `file` imports from the app, by local name: the file, and the export it names ("*" for a namespace). */
+  const importsOf = (file: string) => {
+    let out = importCache.get(file);
+    if (out) return out;
+    importCache.set(file, (out = new Map()));
+    for (const s of read(file).program.body) {
+      if (s.type !== "ImportDeclaration" || s.importKind === "type") continue;
+      const from = appFile(file, s.source.value);
+      if (from)
+        for (const sp of s.specifiers)
+          out.set(sp.local.name, {
+            from,
+            name: sp.type === "ImportNamespaceSpecifier" ? "*" : sp.type === "ImportDefaultSpecifier" ? "default" : idName(sp.imported),
+          });
+    }
+    return out;
+  };
+  const exportCache = new Map<string, Map<string, Decl>>();
+  /** `name` as `file` sees it: declared there, or imported from another file. */
+  const declOf = (file: string, name: string): Decl | undefined => {
+    const imp = importsOf(file).get(name);
+    return !imp ? { file, local: name } : imp.name === "*" ? undefined : exportsOf(imp.from).get(imp.name);
+  };
+  /** Every name `file` exports, traced to where it's declared. */
+  const exportsOf = (file: string): Map<string, Decl> => {
+    let out = exportCache.get(file);
+    if (out) return out;
+    exportCache.set(file, (out = new Map())); // set before reading: a cycle of re-exports stops here
+    for (const s of read(file).program.body) {
+      if (s.exportKind === "type") continue;
+      if (s.type === "ExportNamedDeclaration") {
+        const from = s.source ? appFile(file, s.source.value) : undefined;
+        if (s.source && !from) continue;
+        for (const name of declaredNames(s.declaration)) out.set(name, { file, local: name });
+        for (const sp of s.specifiers) {
+          if (sp.exportKind === "type") continue;
+          const decl = from ? exportsOf(from).get(idName(sp.local)) : declOf(file, idName(sp.local));
+          if (decl) out.set(idName(sp.exported), decl);
+        }
+      }
+      if (s.type === "ExportAllDeclaration" && !s.exported) {
+        const from = appFile(file, s.source.value);
+        if (from) for (const [name, decl] of exportsOf(from)) if (name !== "default" && !out.has(name)) out.set(name, decl);
+      }
+    }
+    return out;
+  };
+
+  const publicName = new Map<string, string>(); // a declaration → "<module>.<export>", the name the registry gives it
+  const owner = new Map<string, string>(); // a file → the module it belongs to: its entry, or where its exports are declared
+  for (const [mod, { entry }] of Object.entries(modules)) owner.set(entry, mod);
+  for (const [mod, { entry }] of Object.entries(modules)) {
+    for (const [name, d] of exportsOf(entry)) {
+      if (!publicName.has(declKey(d))) publicName.set(declKey(d), `${mod}.${name}`);
+      if (!owner.has(d.file)) owner.set(d.file, mod);
+    }
+  }
 
   const fns = new Map<string, SourceFn>();
 
-  /** Where each name imported from another module points: `import * as stock` → stock, `import { hold }` → stock.hold. */
-  const moduleImports = (file: string, program: Node) => {
-    const local: Record<string, { mod: string; ns: boolean }> = {};
-    for (const s of program.body) {
-      if (s.type !== "ImportDeclaration") continue;
-      const resolved = resolve(file, s.source.value);
-      const target = resolved ? moduleOf(resolved) : undefined;
-      if (target) for (const sp of s.specifiers) local[sp.local.name] = { mod: target.name, ns: sp.type === "ImportNamespaceSpecifier" };
-    }
-    return local;
-  };
-
   type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
-  type Found = Pick<SourceFn, "runs" | "emits" | "checks" | "config">;
+  type Found = Pick<SourceFn, "runs" | "emits" | "schedules" | "checks" | "config">;
 
-  for (const [mod, { dir, folder, index }] of Object.entries(modules)) {
-    const files: File[] = (folder ? sourceFiles(dir) : [index]).map((f) => {
-      const file = read(f);
-      const local = moduleImports(f, file.program);
+  for (const [mod, { entry }] of Object.entries(modules)) {
+    // Its files: where its exports are declared, plus what those import that no other module owns (helpers, shared code).
+    const paths = new Set([entry, ...[...exportsOf(entry).values()].map((d) => d.file)]);
+    for (const path of paths)
+      for (const { from } of importsOf(path).values()) if ((owner.get(from) ?? mod) === mod) paths.add(from);
+    const files = new Map<string, File>();
+    for (const path of paths) {
+      /** The function a `run`/`emit`/`schedule` argument names: `stock.hold`, `hold`, or "(dynamic)". */
       const nameOf = (arg: Node | undefined): string => {
-        const ns = arg?.type === "MemberExpression" && arg.object?.type === "Identifier" ? local[arg.object.name] : undefined;
-        if (ns?.ns) return `${ns.mod}.${arg?.property.name}`;
-        if (arg?.type === "Identifier") return `${local[arg.name]?.mod ?? mod}.${arg.name}`;
-        return "(dynamic)";
+        if (arg?.type === "MemberExpression" && !arg.computed && arg.object?.type === "Identifier") {
+          const imp = importsOf(path).get(arg.object.name);
+          const decl = imp?.name === "*" ? exportsOf(imp.from).get(arg.property.name) : undefined;
+          return (decl && publicName.get(declKey(decl))) ?? "(dynamic)";
+        }
+        if (arg?.type !== "Identifier") return "(dynamic)";
+        const decl = declOf(path, arg.name);
+        return (decl && publicName.get(declKey(decl))) ?? `${mod}.${arg.name}`;
       };
-      return { ...file, nameOf };
-    });
+      files.set(path, { ...read(path), nameOf });
+    }
 
     // Functions declared at the top level of this module's files: helpers like findBooking(ctx, id),
-    // followed (transitively) for the runs, emits and record checks they make.
+    // followed (transitively) for the runs, emits, schedules and record checks they make.
     const helpers = new Map<string, { node: Node; file: File }[]>();
-    for (const file of files)
+    for (const file of files.values())
       for (const top of file.program.body) {
         const s = top.type === "ExportNamedDeclaration" || top.type === "ExportDefaultDeclaration" ? top.declaration : top;
         const add = (name: string, node: Node) => helpers.set(name, [...(helpers.get(name) ?? []), { node, file }]);
@@ -290,6 +352,7 @@ export function analyze(root: string, registryFile: string): Source {
         const kind = ctx.kindOf(n);
         if (kind === "run") found.runs.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start), ...scopeOf(n.arguments[2]) });
         else if (kind === "emit") found.emits.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
+        else if (kind === "schedule") found.schedules.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
         else if (name && CAN.test(name)) {
           if (!found.checks.includes(name)) found.checks.push(name);
         } else if (name && n.callee.type === "Identifier")
@@ -301,14 +364,15 @@ export function analyze(root: string, registryFile: string): Source {
       });
     };
 
-    for (const file of files) {
-      const { program, loc, docAt } = file;
-
-      for (const s of program.body) {
-        const decl = s.type === "ExportNamedDeclaration" ? s.declaration?.declarations?.[0] : undefined;
+    for (const [name, { file: path, local }] of exportsOf(entry)) {
+      const file = files.get(path)!;
+      // `export const confirm = mutation(…)`, or a `const` exported elsewhere under any name
+      for (const s of file.program.body) {
+        const v = s.type === "ExportNamedDeclaration" ? s.declaration : s;
+        const decl = v?.type === "VariableDeclaration" ? v.declarations.find((d: Node) => d.id?.type === "Identifier" && d.id.name === local) : undefined;
         const call = unwrap(decl?.init);
-        if (call?.type !== "CallExpression" || decl.id?.type !== "Identifier") continue;
-        const fn: SourceFn = { key: `${mod}.${decl.id.name}`, at: loc(decl.start), runs: [], emits: [], checks: [], config: [], doc: docAt(s.start) };
+        if (call?.type !== "CallExpression") continue;
+        const fn: SourceFn = { key: `${mod}.${name}`, at: file.loc(decl.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(s.start) };
 
         const def = call.arguments[0];
         const props: Node[] = def?.type === "ObjectExpression" ? def.properties : [];

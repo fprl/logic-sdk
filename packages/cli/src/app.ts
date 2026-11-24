@@ -36,7 +36,7 @@ const policy = (f: { authorize: string | null }) => f.authorize ?? dim("none");
 const runLabel = (e: { to: string; scope?: string[] }) => (e.scope ? `${e.to} (scope: ${e.scope.join(", ")})` : e.to);
 const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.flatMap((e) => (e.scope ? [{ run: e.to, keys: e.scope }] : []));
 const plainRuns = <T extends FnInfo | ListenerInfo>(x: T) => ({ ...x, runs: x.runs.map((e) => e.to), scopeChanges: scopeChanges(x.runs) });
-const plainFn = (f: FnInfo) => ({ ...plainRuns(f), emits: f.emits.map((e) => e.to) });
+const plainFn = (f: FnInfo) => ({ ...plainRuns(f), emits: f.emits.map((e) => e.to), schedules: f.schedules.map((e) => e.to) });
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
@@ -94,6 +94,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));
       if (fn.runs.length) row("runs", fn.runs.map(runLabel).join(", "));
       for (const e of fn.emits) row("emits", `${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
+      if (fn.schedules.length) row("schedules", fn.schedules.map((e) => e.to).join(", "));
       row("called by", fn.calledBy.join(", ") || dim("nothing in this app (an entry point)"));
       if (fn.meta) row("meta", JSON.stringify(fn.meta));
     } else if (listener) {
@@ -116,7 +117,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
 
 // ── graph ────────────────────────────────────────────────────────────────────
 const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json" }, [], Context>({
-  docs: { brief: "Who runs whom, and who reacts to which event" },
+  docs: { brief: "Who runs and schedules whom, and who reacts to which event" },
   parameters: {
     flags: {
       module: { kind: "parsed", parse: String, brief: "Only this module and what it touches", optional: true },
@@ -132,6 +133,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         ...l.runs.map((e) => ({ from: l.id, to: e.to, type: "runs" as const })),
       ]),
       ...p.functions.flatMap((f) => f.emits.map((e) => ({ from: f.id, to: e.to, type: "emits" as const }))),
+      ...p.functions.flatMap((f) => f.schedules.map((e) => ({ from: f.id, to: e.to, type: "schedules" as const }))),
       ...p.crons.map((c) => ({ from: c.id, to: c.run, type: "runs" as const })),
     ];
     const touches = (id: string) => !flags.module || id.startsWith(flags.module + ".");
@@ -154,6 +156,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         lines.push("  end");
       }
       for (const e of shown.filter((e) => e.type === "runs")) lines.push(`  ${id(e.from)} --> ${id(e.to)}`);
+      for (const e of shown.filter((e) => e.type === "schedules")) lines.push(`  ${id(e.from)} -->|schedules| ${id(e.to)}`);
       for (const f of p.functions)
         for (const ev of f.emits)
           for (const l of p.listeners.filter((l) => l.event === ev.to))
@@ -184,6 +187,7 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
         if ("schedule" in f) details.push(`${dim("at")} ${f.schedule} ${dim(f.timezone)}`, `${dim("runs")} ${f.run}`);
         else if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
         if ("emits" in f) for (const e of f.emits) details.push(`${dim("emits")} ${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
+        if ("schedules" in f && f.schedules.length) details.push(`${dim("schedules")} ${f.schedules.map((e) => e.to).join(", ")}`);
         lines.push(`${branch}${head}${details.length ? "  " + details[0] : ""}`.trimEnd());
         for (const d of details.slice(1)) lines.push(`${rest}${" ".repeat(width + kindWidth + 4)}${d}`);
       });

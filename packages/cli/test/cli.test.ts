@@ -92,6 +92,21 @@ test("a module can be a single file, definers can have any name, and explicit id
   expect(cli(fixture("files"), "show", "orders.email").out).toContain("only events its condition lets through");
 });
 
+test("any layout: each module is what its entry exports, followed through re-exports and imports, renames included", () => {
+  const app = fixture("layouts"); // files.ts beside files/, `export { purge as purgeStored }`, an import into stock's own file
+  expect(cli(app, "show", "files.remove", "--json").json()).toMatchObject({
+    at: { file: "src/files/mutations.ts" },
+    runs: ["stock.reserve"],
+    schedules: ["files.purgeStored"],
+  });
+  expect(cli(app, "show", "files.clear", "--json").json()).toMatchObject({ schedules: ["files.purgeStored"] }); // through a helper's file
+  expect(cli(app, "show", "files.purgeStored", "--json").json()).toMatchObject({
+    description: "Delete what's stored",
+    calledBy: ["files.clear", "files.remove"],
+  });
+  expect(cli(app, "graph", "--module", "files").out).toContain("schedules files.purgeStored");
+});
+
 test("an app that throws while loading gets a diagnostic with the location, not a stack trace", () => {
   const r = cli(fixture("crash"), "list");
   expect(r.code).toBe(1);
