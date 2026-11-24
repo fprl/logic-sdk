@@ -113,15 +113,13 @@ Inside a module, you can call your own functions two ways. They aren't the same:
 A function its module's index doesn't export is private: only that module's own code can reach it, and `ctx.run` runs it as part of the module that runs it. You need one when an action has to write. An action has no `db`, so the write is a mutation, and exported, any module, route or agent could call it directly and skip what the action checks first.
 
 ```ts
-// files/data.ts: exported from the file, not from files/index.ts
-export const record = mutation({
+// files/actions.ts
+/** Record a stored file */
+const record = mutation({            // no export: nothing outside this file can reach it
   input: fileInsertSchema.pick({ key: true, contentType: true, byteSize: true }),
   authorize: member,
   async handler(ctx, input) { /* insert */ },
 });
-
-// files/actions.ts
-import { record } from "./data.ts";
 
 /** Record an upload once its first bytes show the type the browser claimed */
 export const upload = action({
@@ -138,6 +136,8 @@ export const upload = action({
 |---|---|---|
 | `ctx.run` | Runs as its own module | Runs as the module that runs it: `files.(private)` in `wrap`, `files.<id>` if it sets `id` |
 | `ctx.schedule`, a cron's `run`, `registry.as(scope).run`, adapters, tests' `t.run` | Yes | Refused: they find code by name, and a private one has none |
+
+When two files of the module need the same private function, put it in `data.ts` and import it from there: the index never re-exports `data.ts`. Not in `mutations.ts`: exporting it from there for the other file would make the index's `export * from "./mutations"` publish it.
 
 Test a private function through the exported one that runs it, as with any unexported code. Another module importing `files/data.ts` directly would run it as its own: keep imports to each module's index with your linter (`logic-sdk graph` shows the edge). A listener, cron or event the index doesn't export never runs.
 
