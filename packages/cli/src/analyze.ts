@@ -1,7 +1,7 @@
 // Reads the app's source with a real parser (oxc): which functions run, emit and schedule which, the config keys and
 // record checks they use. No regex, and no code is executed here.
-import { readFileSync } from "node:fs";
-import { relative, sep } from "node:path";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { parseSync } from "oxc-parser";
 import { ResolverFactory, type NapiResolveOptions } from "oxc-resolver";
 
@@ -43,11 +43,20 @@ export interface Unreached extends SourceFn {
   kind: DefinerKind;
   takesInput: boolean;
 }
+/** A definition in a file no module reaches (a forgotten `export * from "./listeners"`): it never runs. */
+export interface Stray {
+  module: string | null; // the module whose folder it's in, if any
+  name: string;
+  kind: DefinerKind;
+  at: Loc;
+  doc?: string;
+}
 export interface Source {
   /** Each module's entry: the file the registry imports it from. Its files are whatever that entry reaches. */
   modules: Record<string, { entry: string }>;
   fns: Map<string, SourceFn>;
   unreached: Unreached[];
+  stray: Stray[];
 }
 
 type Node = { type: string; start: number; [key: string]: any };
@@ -169,15 +178,17 @@ const ctxIn = (fns: Node[], param: number | "any") => {
   return { kindOf, configPath, configKeys };
 };
 
-export function analyze(root: string, registryFile: string): Source {
+export function analyze(projectRoot: string, registryPath: string): Source {
+  // Real paths, as Node and TypeScript resolve: a workspace package linked into node_modules is its own source
+  // (`packages/logic/src/…`), and a real dependency stays under node_modules, which appFile skips.
+  const root = realpathSync(projectRoot);
+  const registryFile = realpathSync(registryPath);
   // tsconfig `paths` (found from each file, like tsc) and package.json `imports` (#alias) resolve like any import.
-  // Without symlinks, so paths stay comparable with the folders we list.
   const options: NapiResolveOptions = {
     extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs"],
     extensionAlias: { ".js": [".ts", ".tsx", ".js"], ".mjs": [".mts", ".mjs"] },
     conditionNames: ["import", "module", "node", "default"],
     mainFiles: ["index"],
-    symlinks: false,
   };
   const withTsconfig = new ResolverFactory({ ...options, tsconfig: "auto" });
   const plain = withTsconfig.cloneWithOptions(options); // when a tsconfig can't be read, still resolve the rest
@@ -460,5 +471,33 @@ export function analyze(root: string, registryFile: string): Source {
     }
   }
 
-  return { modules, fns, unreached };
+  // Files no module reaches, in the registry's folder and each module's: a forgotten `export * from "./listeners"`.
+  // Like Trigger.dev's `dirs`, without tests: what they define is never registered on purpose.
+  const reached = new Set(prepared.flatMap((m) => [...m.files.keys()]));
+  const folderOf = (entry: string) => (/^index\.[^.]+$/.test(basename(entry)) ? dirname(entry) : entry.replace(/\.[^./]+$/, ""));
+  const folders = Object.entries(modules).map(([mod, { entry }]) => ({ mod, folder: folderOf(entry) + sep }));
+  const roots = [dirname(registryFile), ...Object.values(modules).map((m) => dirname(m.entry))]
+    .filter((dir, i, all) => all.indexOf(dir) === i && !all.some((other) => dir.startsWith(other + sep)));
+  const stray: Stray[] = [];
+  const scan = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== "node_modules" && !e.name.startsWith(".")) scan(path);
+        continue;
+      }
+      if (!SOURCE.test(e.name) || /\.(test|spec)\.|\.d\.[mc]?ts$/.test(e.name) || reached.has(path)) continue;
+      const file = read(path);
+      for (const { statement, d } of topConsts(file.program)) {
+        const call = unwrap(d.init);
+        if (d.id?.type !== "Identifier" || call?.type !== "CallExpression" || call.callee.type !== "Identifier") continue;
+        const kind = definerKind(declOf(path, call.callee.name));
+        if (kind)
+          stray.push({ module: folders.find((f) => path.startsWith(f.folder))?.mod ?? null, name: d.id.name, kind, at: file.loc(d.start), doc: file.docAt(statement.start) });
+      }
+    }
+  };
+  for (const dir of roots) scan(dir);
+
+  return { modules, fns, unreached, stray };
 }

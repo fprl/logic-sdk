@@ -1,0 +1,1 @@
+{ "name": "@acme/logic", "private": true, "type": "module", "exports": { "./*": "./src/*/index.ts" } }

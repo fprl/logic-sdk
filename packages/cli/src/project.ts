@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 import type * as Core from "logic-sdk";
-import { analyze, type Edge, type Loc } from "./analyze.ts";
+import { analyze, type DefinerKind, type Edge, type Loc } from "./analyze.ts";
 
 export interface FnInfo {
   /** The registry's id. A private function has none: `files.(private) record`, its name in traces plus its variable name, or `files.<id>` when it sets `id`. */
@@ -60,11 +60,14 @@ export interface EventInfo {
   listeners: string[];
 }
 export type JsonSchema = Record<string, any>;
-/** A listener, cron or event no module's index exports: the registry never sees it, so it never runs. */
+/**
+ * What the registry never sees, so it never runs: a listener, cron or event no module's index exports, or anything
+ * defined in a file no module reaches.
+ */
 export interface UnregisteredInfo {
-  module: string;
+  module: string | null; // null: in no module's folder
   name: string;
-  kind: "listener" | "cron" | "event";
+  kind: DefinerKind;
   description: string | null;
   at: Loc;
 }
@@ -197,9 +200,10 @@ export async function loadProject(root: string): Promise<Project> {
         config: u.config,
         calledBy: [],
       });
-  const unregistered = source.unreached.flatMap((u) =>
-    u.kind === "listener" || u.kind === "cron" || u.kind === "event" ? [{ module: u.module, name: u.name, kind: u.kind, description: u.doc ?? null, at: u.at }] : [],
-  );
+  const unregistered: UnregisteredInfo[] = [
+    ...source.unreached.filter((u) => u.kind === "listener" || u.kind === "cron" || u.kind === "event"),
+    ...source.stray,
+  ].map((u) => ({ module: u.module, name: u.name, kind: u.kind, description: u.doc ?? null, at: u.at }));
   const listeners: ListenerInfo[] = described.listeners.map((l) => ({
     id: l.id,
     module: l.module,

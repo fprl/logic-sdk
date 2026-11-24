@@ -63,7 +63,7 @@ const list = buildCommand({
     out(this, dim(`\n${rows.length} of ${p.functions.length + p.listeners.length + p.crons.length} · logic-sdk show <name> for details`));
     if (unregistered.length)
       out(this, `\n${paint("yellow", "Not registered", this.process.stdout)}: no index exports ${unregistered.length === 1 ? "it, so it never runs" : "them, so they never run"}\n` +
-        table(["NAME", "KIND", "WHERE"], unregistered.map((u) => [bold(`${u.module}.${u.name}`), kind(u.kind), where(u.at)])));
+        table(["NAME", "KIND", "WHERE"], unregistered.map((u) => [bold(u.module ? `${u.module}.${u.name}` : u.name), kind(u.kind), where(u.at)])));
   }),
 });
 
