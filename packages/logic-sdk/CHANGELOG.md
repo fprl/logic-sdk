@@ -1,5 +1,14 @@
 # logic-sdk
 
+## 0.6.2
+
+### Patch Changes
+
+- 5a12738: A function its module's index doesn't export is private: `ctx.run` runs it as part of the module that runs it (`files.(private)` in `wrap`, or `files.<id>` when it sets `id`), so an action can write through a mutation nothing outside the module can call. Anything that finds code by name refuses it: `ctx.schedule`, crons, `registry.as(scope).run`, adapters and tests. The bookings example's `checkout` runs `amountDue` and `confirmPaid` this way.
+- Updated dependencies [5a12738]
+- Updated dependencies [a38d9fc]
+  - @logic-sdk/cli@0.6.2
+
 ## 0.6.1
 
 ### Patch Changes
