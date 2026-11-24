@@ -1,5 +1,13 @@
 # logic-sdk
 
+## 0.6.3
+
+### Patch Changes
+
+- 9cb2bff: The skill says where a private function goes: unexported in the file that runs it, or in `data.ts` when two files share it, never exported from `mutations.ts`, where `export *` would publish it.
+- Updated dependencies [9cb2bff]
+  - @logic-sdk/cli@0.6.3
+
 ## 0.6.2
 
 ### Patch Changes

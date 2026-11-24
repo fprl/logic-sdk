@@ -1,5 +1,13 @@
 # @logic-sdk/cli
 
+## 0.6.3
+
+### Patch Changes
+
+- 9cb2bff: `show` says when a function declares an `input` or `output` that JSON Schema can't express (a `Date`, a transform), instead of "not declared" or "unknown". `--json` adds `declaresOutput`.
+- Updated dependencies [9cb2bff]
+  - logic-sdk@0.6.3
+
 ## 0.6.2
 
 ### Patch Changes
