@@ -1,5 +1,19 @@
 # @logic-sdk/cli
 
+## 0.6.0
+
+### Minor Changes
+
+- e7964b8: Reads a cron's function from the registry the new way (`cron({ run: () => fn })`), so it needs logic-sdk 0.6.
+- e453d76: `logic-sdk check` is removed, with its rules. What the library promises holds through its types and runtime: a query can't write, a mutation has no services, an action has no transaction, and `ctx.run` stops at 64 nested calls. Import boundaries, cycles, env and clock reads are your linter's call. `list`, `show` and `graph` are unchanged.
+
+### Patch Changes
+
+- Updated dependencies [e7964b8]
+- Updated dependencies [9946bd4]
+- Updated dependencies [e453d76]
+  - logic-sdk@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
