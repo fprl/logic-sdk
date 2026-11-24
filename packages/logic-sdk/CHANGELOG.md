@@ -1,5 +1,19 @@
 # logic-sdk
 
+## 0.6.0
+
+### Minor Changes
+
+- e7964b8: `cron({ run })` takes a thunk, like a listener's `event`: `cron({ schedule, run: () => reports.sendWeekly, scope })`. It's read when the registry is built, so no definer reads an import while files load, and import cycles between a module's files are harmless at runtime. Breaking: `run: fn` becomes `run: () => fn`.
+
+### Patch Changes
+
+- 9946bd4: `ctx.run` nests at most 64 calls deep. Past that it throws a plain error with the last calls of the path (`… → a.ping → b.pong → a.ping`), instead of a function that runs itself, directly or through other modules, running until memory runs out. Recurse in a helper that takes `ctx`, or make each step an event or `ctx.schedule`.
+- e453d76: The agent skill and the README no longer mention `logic-sdk check`: done means `tsc` and the tests pass.
+- Updated dependencies [e7964b8]
+- Updated dependencies [e453d76]
+  - @logic-sdk/cli@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
