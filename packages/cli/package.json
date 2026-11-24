@@ -49,6 +49,6 @@
     "@types/node": "^26.6.6"
   },
   "peerDependencies": {
-    "logic-sdk": ">=0.6.0 <0.7.0"
+    "logic-sdk": ">=0.6.1 <0.7.0"
   }
 }
