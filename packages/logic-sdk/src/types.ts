@@ -99,13 +99,13 @@ export const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
 type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
 
 /** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
-export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends boolean = boolean, C extends Config = any> {
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends boolean = boolean, C extends Config = any, IS extends Schema | undefined = Schema | undefined> {
   readonly [BRAND]: K;
   readonly kind: K;
   /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
   readonly id?: string;
-  /** What callers pass, validated on every call. Left out: the function takes nothing (`run(fn)`). */
-  readonly input?: Schema;
+  /** What callers pass, validated on every call, as you wrote it: `fn.input.pick({ name: true })` for a form. Undefined: the function takes nothing (`run(fn)`). */
+  readonly input: IS;
   /** What callers get back, checked before it leaves. */
   readonly output?: Schema;
   /** Your own data about the function. Checked against `meta` in `init` where you set it, typed in `wrap`; loose here, for adapters. */
@@ -395,7 +395,7 @@ export type Constructor<C extends Config, K extends Kind> = <
   A extends boolean = never,
 >(
   def: Def<C, K, IS, OS, R, P, A>,
-) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [A] extends [never] ? false : true, C>;
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [A] extends [never] ? false : true, C, NoInput extends IS ? undefined : IS>;
 
 type OtherInit = SetupError<"Defined with another init(), so it would run with this registry's scope, not its own. Define it with the init() this createRegistry came from">;
 /** `createRegistry`'s modules: a function, listener or cron defined with another `init` is an error, since it would run with this one's scope. Events have no `init`. */
