@@ -1,5 +1,14 @@
 # @logic-sdk/cli
 
+## 0.6.2
+
+### Patch Changes
+
+- 5a12738: `list`, `show` and `graph` show private functions (ones their module's index doesn't export) as the runtime names them, `files.(private) record` or `files.<id>`, with their own edges. `list` also shows listeners, crons and events no index exports, which never run. What no index reaches is found by its definer from `init()`, aliases included, and a run the CLI can't resolve shows as `(dynamic)` instead of a guessed name.
+- a38d9fc: The CLI reads modules in workspace packages: paths are real paths, as Node and TypeScript resolve them, so a module linked into `node_modules` is no longer skipped as a dependency. `list` also reports what's defined in files no module imports (a forgotten `export * from "./listeners"`), from every file in the registry's folder and each module's, tests aside.
+- Updated dependencies [5a12738]
+  - logic-sdk@0.6.2
+
 ## 0.6.1
 
 ### Patch Changes
