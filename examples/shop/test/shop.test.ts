@@ -112,13 +112,13 @@ test("weekday mornings, staff get a digest of what's waiting to ship", async () 
   await t.as(ana).run(orders.place, mug());
   mailer.sent.length = 0;
 
-  expect(await t.jobs.tick("2026-12-01T07:00:00Z")).toEqual(["orders.morningDigest"]); // a Tuesday, 8:00 in Madrid
+  expect(await t.jobs.tick("2026-12-01T07:00:00Z")).toEqual(["orders.sendDigest"]); // a Tuesday, 8:00 in Madrid
   expect(mailer.sent).toEqual([{ to: "staff", subject: "1 orders to ship", text: "https://shop.test/orders" }]);
   expect(await t.jobs.tick("2026-12-05T07:00:00Z")).toEqual([]); // Saturday
 });
 
 test("the system can do only what a policy grants it: the digest, not placing orders", async () => {
-  const digest = t.as(asSystem("orders.morningDigest"));
+  const digest = t.as(asSystem("orders.sendDigest"));
   expect(await digest.run(orders.toShip)).toBe(0);
   expect((await digest.run(orders.place, mug()).catch((e) => e)).kind).toBe("forbidden");
 });

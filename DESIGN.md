@@ -241,13 +241,13 @@ jobs: { adapter: pgBoss(boss), scope }                          // transactional
 /** Expire carts nobody touched for a day */
 export const expireCarts = cron({
   schedule: "*/15 * * * *",
-  run: () => expireStale,    // a function, run with its policy, validation and tracing
-  scope: system,             // required: a cron has no caller, so it says who it runs as
+  scope: system,                                  // required: a cron has no caller, so it says who it runs as
+  handler: (ctx) => ctx.run(expireStale),         // a listener for the clock: each ctx.run checks its policy
 });
 ```
 
 - **One unit per export,** exported through the module's `index.ts` and found by `createRegistry({ modules })` like listeners, so a new cron can't be forgotten. No central file and no `define` prefix: it reads like `query`, `event` and `listener`.
-- **`run` is an existing function, `scope` is required.** Convex (`crons.cron(name, expr, internal.fn, args)`), Laravel's `Schedule::job`, Solid Queue's `class` + `args` and Oban's worker all point at an existing unit, so it keeps its policy, validation and tracing and is tested on its own. `input` is typed by the function and checked as JSON at `createRegistry`. Convex doesn't pass auth to scheduled functions either; a required scope says who acts.
+- **A handler, like a listener's, and `scope` is required** (since 0.7.1; it was `run: () => fn`, see "Crons have a handler" below). Every `ctx.run` in it checks that function's policy against the cron's scope, as in a listener, so the work keeps its policy, validation and tracing. Convex doesn't pass auth to scheduled functions either; a required scope says who acts. _Superseded reasoning, kept for the record:_ **`run` is an existing function, `scope` is required.** Convex (`crons.cron(name, expr, internal.fn, args)`), Laravel's `Schedule::job`, Solid Queue's `class` + `args` and Oban's worker all point at an existing unit, so it keeps its policy, validation and tracing and is tested on its own. `input` is typed by the function and checked as JSON at `createRegistry`. Convex doesn't pass auth to scheduled functions either; a required scope says who acts.
 - **One entry point, `registry.jobs.tick(at)`:** it runs every cron due in `at`'s minute, as a job with the id `<cron id>@<minute>` through the `jobs` adapter. The platform only says when to tick, so one trigger per cron and one `* * * * *` trigger both work: Node uses a timer, Cloudflare `handleScheduled(registry, controller)`, Vercel a Schedules route (Cron Jobs are legacy there, verified), pg-boss the tick in `work()` (see "pg-boss (step 4)"). Laravel's official setup is the every-minute one (`* * * * * php artisan schedule:run`). The first sketch here mapped `controller.cron` to crons and had a route per cron on Vercel; that ties correctness to strings matching "character-for-character" (Cloudflare's docs) and to config drift.
 - **Once per minute across servers, with the jobs table:** `logic_cron_runs`, one row per `<cron id>@<minute>`, written in the tick's transaction `on conflict do nothing`, pruned after a day. Solid Queue's recurring executions (unique on task key and run time) do the same; Laravel's `onOneServer()` takes a cache lock per task and minute; Oban elects a leader. The jobs table's own rows can't do it: they're deleted once done. `inProcess()` runs a tick wherever it's ticked, like Laravel without `onOneServer()`.
 - **Five fields, our own matcher, croner as the test oracle.** It only answers "is this minute due in this time zone", about 80 lines on `Intl`, so the core keeps one dependency. Tests compare it with croner minute by minute over a week, a month end and a leap day. No seconds (Oban: "one-minute resolution at minimum"; Cloudflare and Vercel are minute-only), no `@daily` aliases (one way to write it), no `L`/`W`/`#`, and `5/15` is refused: crons disagree on it, and croner refuses it too.
@@ -582,7 +582,7 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 - **Recursion is caught at runtime.** Nothing limited `ctx.run` depth: a query ping-pong across two modules reached 20,000 levels in 30 ms with the heap growing, and inside a mutation it would hold the transaction open until memory ran out. Now a call nested past 64 throws a plain error with the last calls of its path (`… → a.ping → b.pong → a.ping`): a bug, so a 500 at the edge and `onError` in a job, and a nested mutation in the path dooms the transaction (a top-level mutation that catches it still commits, as with any error it catches). A fixed constant, not an option: 64 nested calls is far past any real composition; an option comes when someone hits it. The frame keeps the trail of call ids, and a call's depth is its length. The error shows up in the first test that hits it, with the exact path.
 - **What would change it:** real apps needing more than 64 nested calls (then an option).
 
-### `cron({ run })` is a thunk, like a listener's `event`
+### `cron({ run })` is a thunk, like a listener's `event` *(superseded: crons have a handler, so no definer reads an import while files load)*
 
 `cron({ schedule, run: () => reports.sendWeekly, scope })`. It was `run: reports.sendWeekly`, the one definer that read another file's export while files load. Inside a cycle of imports (a module's `crons.ts` and `mutations.ts`, or two modules' indexes), that read can hit an export not yet initialized and throw. With it lazy, resolved when the registry is built as listeners' `event` already is, no definer reads an import at load time: handlers read theirs when they run. So cycles between a module's files are harmless at runtime, as they are in Rails and Laravel (autoloading on first use) and Phoenix (modules resolved by name when called). A linter's `import/no-cycle` may still flag them; that's the app's choice. The thunk takes no argument: it runs at `createRegistry`, before any call, so there's no `ctx` to give it, and one that took `ctx` would be a handler, which a cron deliberately doesn't have (it runs an existing function, with its policy). **What would change it:** nothing short of string ids (`run: "reports.sendWeekly"`), which would cost the one-way type flow.
 
@@ -595,6 +595,34 @@ From Fable's review, each with what the mature stacks already learned. **Landed 
 - **The two that guarded real hazards leaked.** A network call in a mutation repeats when a deadlock retries the transaction, and a second database client writes outside it. No type sees either, but the rules only caught a bare `fetch(` and `drizzle()`: a Stripe client, axios or `new Pool()` passed, so a clean run proved little.
 - **The reference stacks don't ship such rules.** Convex enforces its rules in its runtime (`fetch` only in actions, [runtimes](https://docs.convex.dev/functions/runtimes)) and ships its lint rules as a separate ESLint plugin ([docs](https://docs.convex.dev/eslint)). Rails' first-party lint config is style ([rubocop-rails-omakase](https://github.com/rails/rubocop-rails-omakase)). Laravel's "`env()` only in config files" is advice in the docs that nothing checks ([helpers](https://github.com/laravel/docs/blob/12.x/helpers.md)). Elixir's `mix xref` reports dependency graphs and cycles and enforces nothing ([docs](https://hexdocs.pm/mix/Mix.Tasks.Xref.html)); Credo and `boundary` are community packages ([Credo](https://github.com/rrrene/credo), [boundary](https://github.com/sasa1977/boundary)).
 - **What would change it:** a hazard the types and the runtime can't hold, which a static rule catches reliably rather than by name.
+
+### Crons have a handler (2026-11-25)
+
+```ts
+/** Every minute, open the waiting tasks whose time came */
+export const wakeDue = cron({
+  schedule: "* * * * *",
+  scope: { kind: "system", job: "tasks.wakeDue", organization: null },
+  async handler(ctx) {
+    for (const t of await ctx.run(listDue))
+      await ctx.run(wake, { taskId: t.id }, { scope: { ...ctx.scope, organization: t.organization } }).catch(report);
+  },
+});
+```
+
+The app hit this porting its tasks: an action `wakeDue` run by a per-minute cron. The cron couldn't also be `wakeDue` (one id namespace per module, and `export *` silently drops two exports of one name: tsc's TS2308 is the only warning), so it became `wakeDueEveryMinute`, and the action stayed exported only so the cron could point at it.
+
+- **The pointer was the problem, not the export.** One export per cron keeps what a module owns and finds crons like listeners, and `logic-sdk list` already shows every schedule in one view. A handler names the cron after its work, as a listener is, and the work can stay private: the handler `ctx.run`s its module's private functions with the cron id in the trail.
+- **Policy, validation and tracing stay.** They were the reason for `run` (above): each `ctx.run` in the handler checks that function's policy against the cron's scope, as in listeners. `wrap` now sees the run itself (`kind: "cron"`, `meta`), which before looked like any `registry.as(scope).run`.
+- **`ctx.cron.scheduledAt`:** the minute the run is for, even when it runs late or on a retry. A function behind `run` got only a fixed `input`, so a late digest couldn't tell which day it covered.
+- **`ctx.scope` is the declared scope** (`<const Sc>`), so a handler reads `ctx.scope.organization` as `null` without narrowing.
+- **Costs:** a cron isn't callable with `registry.as(scope).run` or stubbable with `t.stub`, so `t.jobs.perform(cron, { at? })` runs one (as its own scope, for a minute, due or not). A retry reruns the whole handler, so handlers are idempotent like listeners, and all-or-nothing work goes in one `ctx.run(mutation)`. The CLI reads what a cron runs from its handler's source, as for listeners. pg-boss tunes a cron's queue from `meta.pgBoss` like a listener's; `work(..., { crons })` is gone.
+- **Naming:** a cron that owns its work takes the work's name (`sendDigest`); one that runs shared work is named for when it runs (`nightly`).
+- **Keep the word `cron`.** "Schedule" already means one-off three times here (`ctx.schedule`, `t.jobs.scheduled`, the CLI's `schedules` edge) and is a cron's expression field, against rule 1 of the naming rules. Convex splits the words too ("Scheduled Functions" vs "Cron Jobs", [docs](https://github.com/get-convex/convex-backend/tree/main/npm-packages/docs/docs/scheduling)). Vercel unifies recurring and one-time runs as Schedules ("Run code on a recurring cron schedule or once at a specific time", [schedules](https://vercel.com/docs/schedules)), but its code-declared schedules can't run once: "One-time schedules are only available as dynamic schedules" ([configuration](https://vercel.com/docs/schedules/configuration)), the same split as `cron` and `ctx.schedule`.
+- **Rejected: one app-level map** (`createRegistry({ schedules: { wakeDue: {...} } })`). Every reference stack with a scheduler declares schedules centrally, but for its platform: Vercel's static schedules "live in your project configuration… Vercel applies them when you deploy" ([schedules.md:90](https://vercel.com/docs/schedules)); Solid Queue's are "managed by the scheduler process… in their own configuration file" ([README](https://github.com/rails/solid_queue/blob/main/README.md)); Oban "only loads the crontab statically, at boot time" ([cron.ex:10](https://github.com/oban-bg/oban/blob/main/lib/oban/cron.ex)); Convex states no reason. Laravel's reason ("your task schedule is no longer in source control and you must SSH into your server", [scheduling.md:24](https://github.com/laravel/docs/blob/12.x/scheduling.md)) any in-code way meets. Our adapters only call `registry.jobs.tick(at)`, so none needs a list. A map would also take crons out of their modules and the CLI's module loading.
+- **Rejected: a map per module** (names only, which a handler gets without a new shape), **a separate id namespace for crons** (the export still needs another name, and `show`, `graph` and pg-boss queues collide), and **`cron` as a field of a function** (grows every definer, one schedule per function).
+- **Checked** with a blind Fable review (code and question only, no options), which proposed the handler, then a second review with our reasons, which agreed and added `ctx.cron.scheduledAt`, the `wrap` call and `t.jobs.perform(cron)`.
+- **What would change it:** apps that often need the same work both on demand and on a schedule. Then the handler is one `ctx.run(fn)` line each time, and a pointer form (or crons in their own id namespace) could come back.
 
 ### Private means not registered (2026-11-24)
 
@@ -619,7 +647,7 @@ export const upload = action({ async handler(ctx, input) { /* check the bytes */
 | | registered | not registered |
 |---|---|---|
 | `ctx.run` | runs as its own module | runs as the caller's module |
-| `ctx.schedule`, a cron's `run`, adapters, `registry.as().run`, `t.run` | yes | refused: they find code by name, and a private one has none |
+| `ctx.schedule`, adapters, `registry.as().run`, `t.run` | yes | refused: they find code by name, and a private one has none |
 
 - **Seen before running.** Nothing outside the module's files can reference `record`: it isn't on `files.*`. A deep import (`../files/data.ts`) is the app's linter's job. The owner's app already fails it with dependency-cruiser. If the import gets through anyway, `record` runs as the importing module, and its errors carry that module's namespace. Rejected: pinning each private to the first module that runs it, so a deep import throws. That's runtime machinery for what static analysis already catches.
 - **Names.**

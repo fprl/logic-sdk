@@ -52,13 +52,12 @@ export const sendReceipt = listener({
 
 await work(registry, boss, {
   calls: { worker: { localConcurrency: 10 } },   // the scheduled calls' queue: one at a time by default
-  crons: { queue: { expireInSeconds: 3600 } },   // every cron's queue (crons have no meta)
 });
 ```
 
 - **`queue`** is pg-boss's queue options (`expireInSeconds`, `retryDelay`, `retryDelayMax`, `deleteAfterSeconds`, `deadLetter`…), applied by `work()` each time it starts. pg-boss copies them onto each job when it's inserted, so a change applies to jobs queued after it. Removing one doesn't reset it: set it back. `partition` only applies when the queue is created, and a `deadLetter` queue must exist first (`boss.createQueue`).
 - **`worker`** is pg-boss's `work()` options (`localConcurrency`, `batchSize`, `pollingIntervalSeconds`…), for that listener's workers in each process.
-- **Not in `meta`:** retries (a listener's `attempts` decide them, with pg-boss's exponential backoff always on) and the queue `policy`. Crons have no `meta`: tune their queues with `work(..., { crons })`.
+- **Not in `meta`:** retries (a listener's `attempts` decide them, with pg-boss's exponential backoff always on) and the queue `policy`. A cron takes the same `meta.pgBoss` as a listener, for its own queue.
 - **Set `expireInSeconds` above your slowest listener** (pg-boss's default is 15 minutes). A job still running then counts as crashed, and pg-boss runs it again. The calls queue is shared, so set it for your slowest scheduled call, or use `heartbeatSeconds`.
 
 ## What differs from databaseQueue

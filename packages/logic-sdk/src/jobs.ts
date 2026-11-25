@@ -16,6 +16,7 @@ import type {
   JobsAdapter,
   JobScope,
   Jobs,
+  CronRun,
   ListenerEvent,
   RegisteredCron,
   RegisteredFn,
@@ -70,8 +71,8 @@ export interface JobsDeps {
   report(error: unknown, info: FailureInfo): void;
   /** Run a function as `scope`, like `registry.as(scope).run`. `eventDepth`: the chain's hops so far (a scheduled call's `depth`). */
   runAs(fn: Fn, input: unknown, scope: object, eventDepth: number, queued: Job[] | undefined): Promise<unknown>;
-  /** The ctx a listener's handler gets, as `scope`, in an event chain `eventDepth` deep. */
-  listenerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined): ActionCtx<any>;
+  /** The ctx a listener's or cron's handler gets, as `scope`, in an event chain `eventDepth` deep. */
+  handlerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined): ActionCtx<any>;
 }
 
 /**
@@ -79,7 +80,7 @@ export interface JobsDeps {
  * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, maxEventDepth, now, wrap, report, runAs, listenerCtx } = deps;
+  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, maxEventDepth, now, wrap, report, runAs, handlerCtx } = deps;
   const keepFailed = jobsAdapter.fail?.bind(jobsAdapter);
   const enqueue = jobsAdapter.enqueue?.bind(jobsAdapter);
 
@@ -206,7 +207,12 @@ export function makeJobs(deps: JobsDeps) {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
       return attemptOnce(async () => {
-        await runAs(c.run, c.cron.input, c.cron.scope, 0, queued);
+        // its scope comes from the code each time, never stored, so jobs.scope store and load don't apply
+        const { scope, meta, handler } = c.cron;
+        const run: CronRun = { id: c.id, scheduledAt: job.scheduledAt, attempt };
+        await wrap({ id: c.id, kind: "cron", meta, input: undefined, scope, depth: 0 }, () =>
+          handler({ ...handlerCtx(scope, 0, c.id, queued), cron: run } as never), // SAFETY: as for listeners: the ctx was built for a cron
+        );
         return "done";
       });
     }
@@ -235,7 +241,7 @@ export function makeJobs(deps: JobsDeps) {
         if (r.issues) throw new StalePayload(`[logic-sdk] ${envelope.name} payload no longer matches its schema: ${JSON.stringify(describeIssues(r.issues))}`);
         const payload = r.value;
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
-        return l.listener.handler({ ...listenerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
+        return l.listener.handler({ ...handlerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, payload); // SAFETY: as in index.ts's invoke: the ctx was built for a listener
       });
       return "done";
     });
@@ -259,13 +265,16 @@ export function makeJobs(deps: JobsDeps) {
     }
   }
 
-  /** The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once. */
-  function due(at: Date): CronJob[] {
+  /**
+   * The runs due in `at`'s minute: one job per cron, with an id per minute, so a tick that's delivered twice runs once.
+   * With `only`, that cron's run for the minute, due or not (`t.jobs.perform`).
+   */
+  function due(at: Date, only?: string): CronJob[] {
     if (Number.isNaN(at.getTime())) throw new Error(`[logic-sdk] tick needs a valid date (got ${String(at)}).`);
     const minute = new Date(Math.floor(at.getTime() / 60_000) * 60_000);
     const stamp = minute.toISOString().slice(0, 16).replaceAll(/[-:]/g, "") + "Z"; // 20261123T0900Z: no `:`, which BullMQ rejects
     return scheduled
-      .filter((c) => isDue(c.schedule, minute, c.cron.timezone))
+      .filter((c) => (only === undefined ? isDue(c.schedule, minute, c.cron.timezone) : c.id === only))
       .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1 }));
   }
 

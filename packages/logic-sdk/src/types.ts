@@ -215,18 +215,27 @@ export interface CallJob {
  */
 export type Job = Delivery | CronJob | CallJob;
 
-/** A function to run on a schedule, as `scope`. Export it from a module, like listeners. */
+/** Work on a schedule, as `scope`: a handler, like a listener's, run when the clock says. Export it from a module. */
 export interface Cron<C extends Config = any> extends FromInit<C> {
   readonly [BRAND]: "cron";
   readonly kind: "cron";
   readonly id?: string;
   readonly schedule: string;
   readonly timezone?: string;
-  /** The function it runs, read when the registry is built, like a listener's `event`. */
-  readonly run: () => Fn;
-  readonly input?: unknown;
   readonly scope: object;
   readonly attempts?: number;
+  readonly meta?: Readonly<Record<string, unknown>>;
+  readonly handler: (ctx: never) => Promise<unknown>;
+}
+
+/** The run a cron's handler is doing. No scope here: `ctx.scope` is the one it runs as. */
+export interface CronRun {
+  /** The cron's id: `tasks.wakeDue`. */
+  id: string;
+  /** The minute this run is for (ISO), even when it runs late or again: which day a digest covers. */
+  scheduledAt: string;
+  /** 1 on the first try. */
+  attempt: number;
 }
 
 /**
@@ -346,6 +355,10 @@ export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, 
 }
 export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C> {
   event: ListenerEvent<O>;
+}
+/** A cron's handler's ctx: an action's, as the cron's own scope, plus the run. */
+export interface CronCtx<C extends Config, S = ScopeOf<C>> extends ActionCtx<C, S> {
+  cron: CronRun;
 }
 
 /**
@@ -478,7 +491,11 @@ export interface JobsAdapter {
    */
   replaces?: true;
   /** At `createRegistry`: refuse a setup this adapter can't honour (a database it doesn't share). */
-  check?(setup: { listeners: readonly RegisteredListener[]; database: DatabaseAdapter<unknown, unknown> | undefined }): void;
+  check?(setup: {
+    listeners: readonly RegisteredListener[];
+    crons: readonly RegisteredCron[];
+    database: DatabaseAdapter<unknown, unknown> | undefined;
+  }): void;
   /** Inside the transaction, before commit. In-process: nothing. `databaseQueue` and `outbox`: insert one row per job with `tx`. */
   enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
@@ -555,8 +572,8 @@ export type JobsOptions<S = object, T = any> = {
 
 export interface Call<M = unknown> {
   id: string;
-  kind: Kind | "listener";
-  /** The function's or listener's `meta` (undefined when it has none). */
+  kind: Kind | "listener" | "cron";
+  /** The function's, listener's or cron's `meta` (undefined when it has none). */
   meta: M | undefined;
   /** Raw input as received (before validation). */
   input: unknown;
@@ -628,7 +645,6 @@ export interface RegisteredListener extends Registered {
 }
 export interface RegisteredCron extends Registered {
   cron: Cron;
-  run: Fn;
 }
 
 /** `registry.jobs`: what you call from a queue consumer, a cron, or a script. */
@@ -680,8 +696,8 @@ export interface Registry<S extends object = object, Mods extends Record<string,
     derive(more: Overrides): Registry<S, Mods, Cf>;
     /** An event as `emit` would make it, for `t.jobs.perform`. */
     envelope(event: EventDef, payload: unknown, scope: S): Envelope;
-    /** The cron runs due in a minute, for `t.jobs.tick`. */
-    due(at: Date): CronJob[];
+    /** The cron runs due in a minute, for `t.jobs.tick`; with `only`, that cron's run, due or not (`t.jobs.perform`). */
+    due(at: Date, only?: string): CronJob[];
   };
 }
 

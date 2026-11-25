@@ -230,13 +230,16 @@ test("show: config keys a function reads, through this module's helpers too", ()
   expect(cli(configApp, "show", "orders.whole").out).toContain("all of it (passed on whole)");
 });
 
-test("crons: list shows the schedule and what it runs; show too; the function lists the cron as its caller", () => {
+test("crons: list shows the schedule; show what its handler runs; the function lists the cron as its caller", () => {
   const shop = fileURLToPath(new URL("../../../examples/shop", import.meta.url));
   expect(cli(shop, "list", "--kind", "cron", "--json").json()).toEqual([
-    expect.objectContaining({ id: "orders.morningDigest", kind: "cron", schedule: "0 8 * * 1-5", timezone: "Europe/Madrid", run: "orders.sendDigest" }),
+    expect.objectContaining({ id: "orders.sendDigest", kind: "cron", schedule: "0 8 * * 1-5", timezone: "Europe/Madrid" }),
   ]);
-  expect(cli(shop, "show", "orders.morningDigest").out).toContain("0 8 * * 1-5");
-  expect(cli(shop, "show", "orders.sendDigest", "--json").json().calledBy).toEqual(["orders.morningDigest"]);
-  expect(cli(shop, "graph").out).toMatch(/morningDigest\s+cron\s+at 0 8 \* \* 1-5/);
-  expect(cli(shop, "graph", "--format", "json").json().edges).toContainEqual({ from: "orders.morningDigest", to: "orders.sendDigest", type: "runs" });
+  const shown = cli(shop, "show", "orders.sendDigest").out;
+  expect(shown).toContain("0 8 * * 1-5");
+  expect(shown).toMatch(/runs\s+orders\.toShip/);
+  expect(cli(shop, "show", "orders.sendDigest", "--json").json().runs).toEqual(["orders.toShip"]);
+  expect(cli(shop, "show", "orders.toShip", "--json").json().calledBy).toContain("orders.sendDigest");
+  expect(cli(shop, "graph").out).toMatch(/sendDigest\s+cron\s+at 0 8 \* \* 1-5/);
+  expect(cli(shop, "graph", "--format", "json").json().edges).toContainEqual({ from: "orders.sendDigest", to: "orders.toShip", type: "runs" });
 });

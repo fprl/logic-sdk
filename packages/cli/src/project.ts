@@ -47,10 +47,10 @@ export interface CronInfo {
   name: string;
   schedule: string;
   timezone: string;
-  /** The function it runs. */
-  run: string;
   description: string | null;
   at: Loc | null;
+  /** What its handler runs, read from the source like a listener's. */
+  runs: Edge[];
 }
 export interface EventInfo {
   id: string;
@@ -214,24 +214,24 @@ export async function loadProject(root: string): Promise<Project> {
     runs: real(src(l)?.runs ?? []),
   }));
 
-  const byId = new Map(functions.map((f) => [f.id, f]));
-  for (const caller of [...functions, ...listeners])
-    for (const edge of [...caller.runs, ...("schedules" in caller ? caller.schedules : [])]) {
-      const callee = byId.get(edge.to);
-      if (callee && !callee.calledBy.includes(caller.id)) callee.calledBy.push(caller.id);
-    }
-
   const crons: CronInfo[] = described.crons.map((c) => ({
     id: c.id,
     module: c.module,
     name: c.name,
     schedule: c.cron.schedule,
     timezone: c.cron.timezone ?? "UTC",
-    run: described.ids.get(c.run) ?? "(unknown)",
     description: src(c)?.doc ?? null,
     at: src(c)?.at ?? null,
+    runs: real(src(c)?.runs ?? []),
   }));
-  for (const c of crons) byId.get(c.run)?.calledBy.push(c.id);
+
+  const byId = new Map(functions.map((f) => [f.id, f]));
+  for (const caller of [...functions, ...listeners, ...crons])
+    for (const edge of [...caller.runs, ...("schedules" in caller ? caller.schedules : [])]) {
+      const callee = byId.get(edge.to);
+      if (callee && !callee.calledBy.includes(caller.id)) callee.calledBy.push(caller.id);
+    }
+
 
   const events: EventInfo[] = described.events.map((e) => ({
     id: e.id,

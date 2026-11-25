@@ -11,13 +11,13 @@ import type {
   ConfigOf,
   Constructor,
   Cron,
+  CronCtx,
   DatabaseAdapter,
   DbOf,
   Envelope,
   EventDef,
   FailureInfo,
   Fn,
-  FnIn,
   Frozen,
   In,
   Job,
@@ -51,6 +51,8 @@ export type {
   Config,
   Constructor,
   Cron,
+  CronCtx,
+  CronRun,
   CronJob,
   DatabaseAdapter,
   DeepPartial,
@@ -157,16 +159,18 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
     }): EventDef<In<S>, Out<S>> =>
       Object.freeze({ [BRAND]: "event" as const, kind: "event" as const, ...def }),
     /**
-     * Run a function on a schedule, as `scope` (a cron has no caller). Export it from a module, like listeners, and call
-     * `registry.jobs.tick()` every minute (or from your platform's cron trigger):
-     * `cron({ schedule: "0 9 * * 1", run: () => reports.sendWeekly, scope: system })`.
+     * Work on a schedule, as `scope` (a cron has no caller): a handler, like a listener's, run when the clock says. Export
+     * it from a module and call `registry.jobs.tick()` every minute (or from your platform's cron trigger). Must be
+     * idempotent: a retry runs the whole handler again.
+     * `cron({ schedule: "0 9 * * MON", scope: asSystem("reports.weekly"), async handler(ctx) { await ctx.run(send) } })`.
      */
-    cron: <F extends Fn>(def: CronDef<ScopeOf<C>, F>): Cron<C> => {
-      const { id, schedule, timezone, run, input, scope, attempts } = def;
+    cron: <const Sc extends ScopeOf<C>>(def: CronDef<C, Sc>): Cron<C> => {
+      const { id, schedule, timezone, scope, attempts, meta, handler } = def;
       parseSchedule(schedule);
       if (timezone !== undefined) assertTimeZone(timezone);
       checkAttempts("cron", attempts);
-      return Object.freeze({ [BRAND]: "cron" as const, kind: "cron" as const, id, schedule, timezone, run, input, scope, attempts });
+      // meta is checked against ListenerMetaOf<C> above and stored loose, like a listener's, for wrap and adapters
+      return Object.freeze({ [BRAND]: "cron" as const, kind: "cron" as const, id, schedule, timezone, scope, attempts, meta: meta as Cron["meta"], handler });
     },
     /**
      * React to an event after commit, like an action. Must be idempotent.
@@ -207,24 +211,25 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
   };
 }
 
-/** `cron({...})`: `input` is required exactly when the function needs one. */
-type CronDef<S, F extends Fn> = {
-  /** Stable id, local to its module, like every definer's. Defaults to the export name. */
+/** `cron({...})`: its handler's `ctx.scope` is the scope it declares, so a policy-free read of it is typed. */
+type CronDef<C extends Config, Sc> = {
+  /**
+   * Stable id, local to its module, like every definer's. Defaults to the export name. Jobs and pg-boss's queue store it,
+   * so set it before you rename the export.
+   */
   id?: string;
-  /** Five fields: minute hour day-of-month month day-of-week. `"*\/15 * * * *"`, `"0 9 * * 1"`. */
+  /** Five fields: minute hour day-of-month month day-of-week. `"*\/15 * * * *"`, `"0 9 * * MON"`. */
   schedule: string;
   /** IANA name, like `"Europe/Madrid"`. Default UTC. Matched on the wall clock, like Laravel: mind DST at 1 to 3 am. */
   timezone?: string;
-  /**
-   * Any query, mutation or action, behind a function: `run: () => reports.sendWeekly`. It runs with its policy, validation
-   * and tracing. Read when the registry is built, like a listener's `event`, so no definer reads an import while files load.
-   */
-  run: () => F;
-  /** Who it runs as: a cron has no caller. */
-  scope: S;
-  /** Tries in total, like a listener's. Default 1. */
+  /** Who it runs as: a cron has no caller. Every function the handler runs checks its policy against it. */
+  scope: Sc;
+  /** Tries in total, like a listener's. Default 1: a retry runs the whole handler again. */
   attempts?: number;
-} & (undefined extends FnIn<F> ? { input?: FnIn<F> } : { input: FnIn<F> });
+  meta?: ListenerMetaOf<C>;
+  /** The work, like a listener's handler: an action's ctx, plus `ctx.cron` (`scheduledAt`, `attempt`). */
+  handler: (ctx: CronCtx<C, Sc>) => Promise<unknown>;
+};
 
 /** How deep `ctx.run` calls may nest. Past it, a function is running itself without end. */
 const MAX_RUN_DEPTH = 64;
@@ -371,7 +376,7 @@ export function describeModules(modules: Record<string, object>) {
       ids.set(value, id);
       if (value.kind === "event") events.push({ id, module, name, event: value });
       else if (value.kind === "listener") listeners.push({ id, module, name, listener: value, event: value.event() });
-      else if (value.kind === "cron") crons.push({ id, module, name, cron: value, run: value.run() });
+      else if (value.kind === "cron") crons.push({ id, module, name, cron: value });
       else functions.push({ id, module, name, kind: value.kind, fn: value });
     }
   }
@@ -421,7 +426,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   for (const l of listeners)
     if (!ids.has(l.event))
       throw new Error(`[logic-sdk] Listener ${l.id} listens to an event that isn't registered in any module.`);
-  jobsAdapter.check?.({ listeners, database });
+  jobsAdapter.check?.({ listeners, crons, database });
 
   const idOf = (x: object) => {
     const id = ids.get(x);
@@ -452,12 +457,6 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     const check = parseOwn(schema, value, what).then((parsed) => keep?.(parsed));
     check.catch(() => {}); // surfaced at commit; never an unhandled rejection
     tx.pending.push(check);
-  }
-
-  for (const c of crons) {
-    if (!ids.has(c.run))
-      throw new Error(`[logic-sdk] Cron ${c.id} runs a function that isn't registered. Export it from its module's index.ts.`);
-    assertPlain(c.cron.input, `${c.id} input`, "Cron runs travel through queues as JSON: send an ISO string and let the schema turn it into a Date");
   }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
@@ -568,7 +567,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     wrap,
     report,
     runAs: (fn, input, scope, eventDepth, queued) => invoke(fn, input, enter({ scope, trail: [], eventDepth, queued }, undefined), ["query", "mutation", "action"]),
-    listenerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, trail: [id], eventDepth, queued }, id),
+    handlerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, trail: [id], eventDepth, queued }, id),
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────

@@ -1008,14 +1008,14 @@ function cronSetup(extra: Partial<Parameters<typeof createRegistry>[0]> = {}) {
       ran.push(`${kind} as ${ctx.scope.actor}`);
     },
   });
-  const weekly = cron({ schedule: "0 9 * * 1", run: () => report, input: { kind: "weekly" }, scope: system });
-  const friday = cron({ schedule: "0 18 * * 5", timezone: "Europe/Madrid", run: () => report, input: { kind: "friday" }, scope: system });
-  const broken = cron({ schedule: "0 9 * * 1", run: () => report, input: { kind: "broken" }, scope: system, attempts: 2 });
+  const weekly = cron({ schedule: "0 9 * * 1", scope: system, handler: (ctx) => ctx.run(report, { kind: "weekly" }) });
+  const friday = cron({ schedule: "0 18 * * 5", timezone: "Europe/Madrid", scope: system, handler: (ctx) => ctx.run(report, { kind: "friday" }) });
+  const broken = cron({ schedule: "0 9 * * 1", scope: system, attempts: 2, handler: (ctx) => ctx.run(report, { kind: "broken" }) });
   const registry = createRegistry<Scope>({ modules: { reports: { report, weekly, friday, broken } }, database: memoryDatabase(), ...extra });
-  return { registry, ran };
+  return { registry, ran, weekly, broken };
 }
 
-test("crons: tick runs what's due that minute, as the cron's scope, with its input", async () => {
+test("crons: tick runs what's due that minute, as the cron's scope, and what it runs checks its policy", async () => {
   const { registry, ran } = cronSetup({ onError: () => {} });
   expect(registry.definitions.crons.map((c) => c.id)).toEqual(["reports.weekly", "reports.friday", "reports.broken"]);
   expect(await registry.jobs.tick(new Date("2026-11-23T09:00:42Z"))).toEqual(["reports.weekly", "reports.broken"]); // a Monday, any second of 9:00
@@ -1024,6 +1024,14 @@ test("crons: tick runs what's due that minute, as the cron's scope, with its inp
   expect(await registry.jobs.tick(new Date("2026-11-27T17:00:00Z"))).toEqual(["reports.friday"]); // 18:00 in Madrid
   await expect(registry.jobs.tick(new Date("garbage"))).rejects.toThrow(/tick needs a valid date/);
   expect(ran).toEqual(["weekly as system", "friday as system"]);
+
+  // a scope the function's policy refuses: the run fails as `forbidden`, like any call
+  const report = action({ authorize: signedIn, handler: async () => "sent" });
+  const anonymous = cron({ schedule: "* * * * *", scope: { actor: null, locale: "en" }, handler: (ctx) => ctx.run(report) });
+  const reported: FailureInfo[] = [];
+  const r = createRegistry<Scope>({ modules: { x: { report, anonymous } }, onError: (_e, info) => reported.push(info) });
+  await r.jobs.tick(new Date("2026-11-23T09:00:00Z"));
+  expect(reported).toMatchObject([{ source: "x.anonymous", outcome: "failed" }]);
 });
 
 test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, with the cron's attempts", async () => {
@@ -1043,23 +1051,35 @@ test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, wit
   expect(await registry.jobs.run({ kind: "cron", id: "reports.gone@x", cron: "reports.gone", scheduledAt: "", attempts: 1 })).toBe("failed"); // renamed or removed
 });
 
-test("crons: a schedule, time zone, function or input it can't use fails at startup", () => {
-  const ping = query({ handler: async () => 1 });
-  expect(() => cron({ schedule: "@daily", run: () => ping, scope: system })).toThrow(/needs five fields/);
-  expect(() => cron({ schedule: "0 9 * * *", timezone: "Europe/Madird", run: () => ping, scope: system })).toThrow(RangeError);
-  expect(() => cron({ schedule: "0 9 * * *", run: () => ping, scope: system, attempts: 0 })).toThrow(/cron attempts must be a whole number/);
-  const orphan = cron({ schedule: "0 9 * * *", run: () => ping, scope: system });
-  expect(() => createRegistry<Scope>({ modules: { x: { orphan } } })).toThrow(/Cron x\.orphan runs a function that isn't registered/);
-  const dated = query({ input: z.object({ at: z.any() }), handler: async () => 1 });
-  const withDate = cron({ schedule: "0 9 * * *", run: () => dated, input: { at: new Date() }, scope: system });
-  expect(() => createRegistry<Scope>({ modules: { x: { dated, withDate } } })).toThrow(/x\.withDate input isn't plain data at at: a Date/);
+test("crons: the handler gets ctx.cron and runs its module's private functions; wrap sees the run as kind cron", async () => {
+  const seen: unknown[] = [];
+  const calls: Call[] = [];
+  const tagged = init<{ scope: Scope; db: Store; meta: { tags?: string[] } }>();
+  const tidy = tagged.mutation({ handler: async ({ db }) => void (db.rows.tidied ??= []).push("yes") }); // not exported: private
+  const nightly = tagged.cron({
+    schedule: "0 3 * * *",
+    scope: system,
+    attempts: 2,
+    meta: { tags: ["ops"] },
+    async handler(ctx) {
+      seen.push(ctx.cron, ctx.scope.actor);
+      await ctx.run(tidy);
+    },
+  });
+  const db = memoryDatabase();
+  const r = tagged.createRegistry({ modules: { ops: { nightly } }, database: db, wrap: (call, next) => (calls.push(call), next()) });
+  await r.jobs.run({ kind: "cron", id: "ops.nightly@20261124T0300Z", cron: "ops.nightly", scheduledAt: "2026-11-24T03:00:00.000Z", attempts: 2 }, { attempt: 2 });
+  expect(seen).toEqual([{ id: "ops.nightly", scheduledAt: "2026-11-24T03:00:00.000Z", attempt: 2 }, "system"]);
+  expect(db.store.rows.tidied).toEqual(["yes"]);
+  expect(calls.map((c) => [c.kind, c.id, c.depth])).toEqual([["cron", "ops.nightly", 0], ["mutation", "ops.(private)", 1]]);
+  expect(calls[0]).toMatchObject({ meta: { tags: ["ops"] }, scope: system, input: undefined });
 });
 
-test("crons: run is read when the registry is built, so a cron can come before its function (as in an import cycle)", () => {
-  const early = cron({ schedule: "0 9 * * *", run: () => later, scope: system }); // `run: later` would throw here
-  const later = query({ handler: async () => 1 });
-  const registry = createRegistry<Scope>({ modules: { x: { early, later } } });
-  expect(registry.definitions.crons).toMatchObject([{ id: "x.early", run: later }]);
+test("crons: a schedule, time zone or attempts it can't use fails at startup", () => {
+  const handler = async () => {};
+  expect(() => cron({ schedule: "@daily", scope: system, handler })).toThrow(/needs five fields/);
+  expect(() => cron({ schedule: "0 9 * * *", timezone: "Europe/Madird", scope: system, handler })).toThrow(RangeError);
+  expect(() => cron({ schedule: "0 9 * * *", scope: system, attempts: 0, handler })).toThrow(/cron attempts must be a whole number/);
 });
 
 test("testing: t.jobs.tick runs the crons due at a minute (default: the frozen now), and throws a failure", async () => {
@@ -1069,6 +1089,18 @@ test("testing: t.jobs.tick runs the crons due at a minute (default: the frozen n
   await expect(t.jobs.tick()).rejects.toThrow("smtp down"); // reports.broken
   expect(ran).toEqual(["weekly as system"]);
   expect(await t.jobs.tick("2026-11-27T17:00:00Z")).toEqual(["reports.friday"]);
+  await t.rollback();
+});
+
+test("testing: t.jobs.perform(cron) runs that one cron, due or not, for a minute (default: the frozen now)", async () => {
+  const { registry, ran, weekly, broken } = cronSetup();
+  const t = createTestRegistry(registry, { now: "2026-11-25T12:34:00Z" }); // a Wednesday: weekly isn't due
+  await t.begin();
+  expect(await t.jobs.perform(weekly)).toBe("done");
+  expect(ran).toEqual(["weekly as system"]); // only this cron, not the others
+  await expect(t.jobs.perform(broken, { attempt: 2 })).rejects.toThrow("smtp down");
+  expect(() => t.jobs.perform(cron({ schedule: "* * * * *", scope: system, handler: async () => {} }))).toThrow(/cron that isn't registered/);
+  expect(() => t.jobs.perform(weekly, { at: "nope" })).toThrow(/needs a valid date/);
   await t.rollback();
 });
 
@@ -1241,7 +1273,7 @@ test("a cron starts a chain: what its function emits is the first hop", async ()
   const pinged = event({ payload: z.object({}) });
   const ping = mutation({ async handler(ctx) { ctx.emit(pinged, {}); } });
   const pong = listener({ event: () => pinged, async handler() {} });
-  const nightly = cron({ schedule: "0 3 * * *", run: () => ping, scope: { actor: null, locale: "en" } });
+  const nightly = cron({ schedule: "0 3 * * *", scope: { actor: null, locale: "en" }, handler: (ctx) => ctx.run(ping) });
   const depths: number[] = [];
   const r = createRegistry<Scope>({
     modules: { x: { pinged, ping, pong, nightly } },

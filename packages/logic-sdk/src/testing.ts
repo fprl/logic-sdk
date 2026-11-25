@@ -4,6 +4,7 @@ import {
   type DatabaseAdapter,
   type DeepPartial,
   type CallJob,
+  type Cron,
   type Delivery,
   type Envelope,
   type Fn,
@@ -47,6 +48,11 @@ export interface TestJobs<S> {
   drain(options?: { until?: Date | string }): Promise<void>;
   /** Run one listener by hand, as if its event had been emitted as `scope`. Throws its failure, like `drain()`. */
   perform<O>(listener: Listener<O>, payload: O, options: { scope: S; attempt?: number }): Promise<JobOutcome>;
+  /**
+   * Run one cron by hand, as its own scope, for the minute `at` (default: the test's now), whatever its schedule. Throws
+   * its failure. `t.jobs.tick(at)` runs every cron due that minute instead.
+   */
+  perform(cron: Cron, options?: { at?: Date | string; attempt?: number }): Promise<JobOutcome>;
   /** Run the crons due in `at`'s minute (default: the test's now), here and now. Resolves their ids; throws a failure. */
   tick(at?: Date | string): Promise<string[]>;
 }
@@ -270,8 +276,19 @@ export function createTestRegistry<S extends object, Mods extends Record<string,
           travelled = undefined;
         }
       },
-      perform(listener, payload, { scope, attempt }) {
+      perform(target: Listener<any> | Cron, ...rest: any[]) {
         const state = current();
+        if (target.kind === "cron") {
+          const { at, attempt } = (rest[0] ?? {}) as { at?: Date | string; attempt?: number };
+          const cron = state.registry.definitions.crons.find((c) => c.cron === target);
+          if (!cron) throw new Error("[logic-sdk] t.jobs.perform got a cron that isn't registered: export it from its module.");
+          const when = at === undefined ? clock() : new Date(at);
+          if (Number.isNaN(when.getTime())) throw new Error(`[logic-sdk] t.jobs.perform({ at }) needs a valid date (got ${String(at)}).`);
+          const [job] = state.registry[INTERNAL].due(when, cron.id);
+          return settle(state, () => state.registry.jobs.run(job!, { attempt }));
+        }
+        const listener = target;
+        const [payload, { scope, attempt }] = rest as [unknown, { scope: S; attempt?: number }];
         const registered = state.registry.definitions.listeners.find((l) => l.listener === listener);
         if (!registered) throw new Error("[logic-sdk] t.jobs.perform got a listener that isn't registered: export it from its module.");
         const envelope = state.registry[INTERNAL].envelope(registered.event, payload, scope);

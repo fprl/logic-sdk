@@ -98,7 +98,7 @@ test("delay: sent with delaySeconds; over Cloudflare's 24 hours, createRegistry 
 test("handleScheduled ticks at the trigger's time and sweeps; a cron's run goes through the queue like any job", async () => {
   ran.length = 0;
   const queue = fakeQueue();
-  const nightly = cron({ schedule: "0 3 * * *", run: () => emit, input: { what: ["nightly"] }, scope: { actor: "system" } });
+  const nightly = cron({ schedule: "0 3 * * *", scope: { actor: "system" }, handler: (ctx) => ctx.run(emit, { what: ["nightly"] }) });
   const registry = createRegistry({ modules: { x: { ...modules.x, nightly } }, database: memoryDatabase(), jobs: { adapter: cloudflareQueue(queue), scope: { load: (saved) => saved } } });
   await handleScheduled(registry, { scheduledTime: Date.parse("2026-11-23T03:00:00Z") });
   const [message] = queue.sent.flat();

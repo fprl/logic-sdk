@@ -61,7 +61,12 @@ const tidy = mutation({
     ran.push("tidy");
   },
 });
-const yearly = cron({ schedule: "0 9 1 1 *", run: () => tidy, scope: { actor: "system" } }); // only when a test ticks it
+const yearly = cron({
+  schedule: "0 9 1 1 *", // only when a test ticks it
+  scope: { actor: "system" },
+  meta: { pgBoss: { worker: { pollingIntervalSeconds: 0.5 } } }, // tuned like a listener
+  handler: (ctx) => ctx.run(tidy),
+});
 const modules = { shop: { placed, place, email, remind, plan, tidy, yearly } };
 
 interface Guarantees {
@@ -181,7 +186,7 @@ async function openPgBoss(url?: string): Promise<Running> {
   return {
     db,
     adapter: pgBoss(boss),
-    start: (registry) => work(registry, boss, { calls: { worker: { pollingIntervalSeconds: 0.5 } }, crons: { worker: { pollingIntervalSeconds: 0.5 } } }),
+    start: (registry) => work(registry, boss, { calls: { worker: { pollingIntervalSeconds: 0.5 } } }),
     async settle() {
       const end = performance.now() + 15_000;
       while (performance.now() < end) {

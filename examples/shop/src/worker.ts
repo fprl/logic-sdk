@@ -26,7 +26,7 @@ export default {
   async queue(batch, env, ctx) {
     await handleQueue(shopFor(env, ctx), batch);
   },
-  // every minute: the crons in code (orders.morningDigest), and what never reached the queue
+  // every minute: the crons in code (orders.sendDigest), and what never reached the queue
   async scheduled(controller, env, ctx) {
     await handleScheduled(shopFor(env, ctx), controller);
   },
