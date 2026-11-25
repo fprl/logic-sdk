@@ -75,7 +75,7 @@ const digest = mutation({
     ran.push("digest");
   },
 });
-const leapDay = cron({ schedule: "0 9 29 2 *", run: () => digest, scope: system }); // never due on the real clock: tests tick it
+const leapDay = cron({ schedule: "0 9 29 2 *", scope: system, handler: (ctx) => ctx.run(digest) }); // never due on the real clock: tests tick it
 
 const modules = { x: { added, add, react, noted, note, later, remind, plan, digest, leapDay } };
 const failures: FailureInfo[] = [];

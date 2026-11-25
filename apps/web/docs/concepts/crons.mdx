@@ -1,23 +1,30 @@
 ---
 title: Crons
-description: Run a function on a schedule, declared in code, the same on Node, Cloudflare and Vercel.
+description: Work on a schedule, declared in code like a listener, the same on Node, Cloudflare and Vercel.
 ---
 
 ```ts
 // orders/crons.ts
-export const morningDigest = cron({
-  schedule: "0 8 * * 1-5",     // weekdays at 8:00
-  timezone: "Europe/Madrid",   // optional, default UTC
-  run: () => sendDigest,       // any query, mutation or action
-  scope: system,               // who it runs as: a cron has no caller
+/** Weekday mornings, email staff how many orders wait to ship */
+export const sendDigest = cron({
+  schedule: "0 8 * * 1-5",                 // weekdays at 8:00
+  timezone: "Europe/Madrid",               // optional, default UTC
+  scope: { kind: "system", job: "orders.sendDigest" }, // who it runs as: your scope, a cron has no caller
+  async handler(ctx) {
+    const waiting = await ctx.run(toShip); // checks toShip's policy against that scope
+    if (waiting > 0) await ctx.services.mailer.send({ to: "staff", subject: `${waiting} orders to ship` });
+  },
 });
 ```
 
-- **One cron per export,** found through your modules like listeners, so a new one can't be forgotten.
-- **`run` names a normal function,** behind `() =>` like a listener's `event`, so it's read when the registry is built and import cycles between files can't break it. The function keeps its `authorize`, validation and tracing, and you call it from anywhere else too. `input` is what it gets, typed by it and required when it needs one: `input: { kind: "weekly" }`.
-- **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from. Use a [system scope](/docs/concepts/scope#the-system), `asSystem("orders.morningDigest")`, not a fake user, and grant it in policies (`staffOrSystem`).
-- **`attempts`** works like a listener's: default 1.
-- **Its `scope` and `input` come from your code each time it runs,** never stored, so `jobs.scope.store` and `load` don't apply to the cron itself, and a deploy that changes them applies to runs already queued. What its function emits or schedules is stored as usual, so a [system scope](/docs/concepts/scope#the-system) must survive your `store` and `load`.
+- **A listener reacts to an event, a cron to the clock.** Same shape: a `handler` with an action's ctx, exported from its module and found like listeners, so a new one can't be forgotten.
+- **Named after its work,** like a listener: `sendDigest`, not `morningDigest`. A cron that runs shared work (a function something else also calls) is named for when it runs: `export const nightly = cron({ …, handler: (ctx) => ctx.run(reports.rebuild) })`.
+- **What it runs checks its policy.** Every `ctx.run` checks the function's `authorize` against the cron's scope, as in a listener, so the work keeps its policy, validation and tracing.
+- **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from. Use a [system scope](/docs/concepts/scope#the-system), a variant of your own `Scope` like `{ kind: "system", job: "orders.sendDigest" }`, not a fake user, and grant it in policies (`staffOrSystem`). In the handler, `ctx.scope` is typed as the scope you declared.
+- **`ctx.cron`** says which run this is: `id`, `scheduledAt` (the minute it's for, even when it runs late or again: which day a digest covers) and `attempt`.
+- **`attempts`** works like a listener's: default 1. A retry runs the whole handler again, so make it idempotent, like a listener. Work that must be all or nothing goes in one `ctx.run(mutation)`; each mutation it runs commits on its own, so a `try`/`catch` per row lets one row fail without the rest.
+- **`meta`** works like a listener's: `wrap` and plugins see the run as `kind: "cron"`, and pg-boss reads `meta.pgBoss`.
+- **Its `scope` comes from your code each time it runs,** never stored, so `jobs.scope.store` and `load` don't apply to the cron itself, and a deploy that changes it applies to runs already queued. What it emits or schedules is stored as usual, so a [system scope](/docs/concepts/scope#the-system) must survive your `store` and `load`.
 
 ## Ticking
 
@@ -120,4 +127,4 @@ test("weekday mornings, staff get a digest", async () => {
 });
 ```
 
-`t.jobs.tick(at)` runs the crons due at that minute, here and now, and throws a failure. Without `at` it uses the test's `now`. To test what a cron does, run its function: `t.as(system).run(sendDigest)`.
+`t.jobs.tick(at)` runs the crons due at that minute, here and now, and throws a failure. Without `at` it uses the test's `now`. To run one cron, due or not, use `t.jobs.perform(orders.sendDigest, { at })`: it runs as the cron's own scope, for that minute.

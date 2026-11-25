@@ -299,7 +299,7 @@ test("sweep({ limit }) claims at most that many", async () => {
 
 test("crons: several servers ticking the same minute run each cron once, and old runs are pruned", async () => {
   const tidy = mutation({ async handler(ctx) { await ctx.db.insert(items).values({ name: `tidied ${ran.length}` }); ran.push("tidy"); } });
-  const nightly = cron({ schedule: "0 3 * * *", run: () => tidy, scope: { actor: "system" } });
+  const nightly = cron({ schedule: "0 3 * * *", scope: { actor: "system" }, handler: (ctx) => ctx.run(tidy) });
   const make = () => createRegistry({ modules: { x: { tidy, nightly } }, database, jobs: { adapter: databaseQueue(database), scope: { load: (saved) => saved } } });
   await db.insert(cronRunsTable).values({ id: "x.nightly@old", ranAt: new Date("2026-01-01T00:00:00Z") });
 

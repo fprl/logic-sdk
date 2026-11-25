@@ -53,14 +53,15 @@ Where the transaction ends depends on who calls. A mutation's nested mutations j
 | Caller | `ctx.run(mutation)` | One fails and is caught |
 | --- | --- | --- |
 | `mutation` | joins the caller's transaction | nothing commits |
-| `action`, listener | its own transaction | the others commit |
+| `action`, listener, cron | its own transaction | the others commit |
 
-Work over many rows where each must succeed or fail alone, like a cron over every account, is an action:
+Work over many rows where each must succeed or fail alone, like a cron over every account, runs from a cron's handler (or an action):
 
 ```ts
 /** Every minute: wake each due reminder in its own transaction */
-export const wakeDue = action({
-  authorize: system,
+export const wakeDue = cron({
+  schedule: "* * * * *",
+  scope: { kind: "system", job: "reminders.wakeDue" },
   async handler(ctx) {
     for (const { id } of await ctx.run(dueReminders)) {
       try {

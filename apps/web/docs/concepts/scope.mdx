@@ -29,7 +29,7 @@ Make it a union of signed in and signed out, so [policies](/docs/concepts/author
 Work nobody asked for in a request, like a [cron](/docs/concepts/crons), still runs as a scope. Make it a variant of your type, not a fake user:
 
 ```ts
-export type System = Base & { actor: null; system: string }; // names what's acting: "orders.morningDigest"
+export type System = Base & { actor: null; system: string }; // names what's acting: "orders.sendDigest"
 export type Scope = (Base & { actor: null }) | (Base & { actor: Actor }) | System;
 
 export const asSystem = (name: string, accountId: string): System => ({ actor: null, system: name, accountId, locale: "en" });

@@ -57,7 +57,7 @@ export function seamScenarios(name: string, target: Target) {
       const remind = action({ input: z.object({ at: z.string() }), async handler(_ctx, { at }) { ran.push(at); } });
       const book = mutation({ input: z.object({ at: z.string() }), async handler(ctx, { at }) { ctx.schedule(remind, { at }, { delay: 3600, replace: "b1" }); } });
       const tidy = mutation({ async handler() { ran.push("tidy"); } });
-      const nightly = cron({ schedule: "0 3 * * *", run: () => tidy, scope: { who: "system" } });
+      const nightly = cron({ schedule: "0 3 * * *", scope: { who: "system" }, handler: (ctx) => ctx.run(tidy) });
       const registry = createRegistry({
         modules: { x: { added, add, react, remind, book, tidy, nightly } },
         database,

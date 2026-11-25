@@ -6,7 +6,7 @@ import { fromDrizzle, type Db, type DrizzleTransactionLike, type JobInsert, type
 import { replaceKeyOf, type DatabaseAdapter, type ForListeners, type Job, type Jobs, type JobsAdapter, type Registry } from "./index.ts";
 import { startTicking } from "./node.ts";
 
-/** One queue's tuning: `meta.pgBoss`, and `work()`'s `calls` and `crons`. */
+/** One queue's tuning: a listener's or cron's `meta.pgBoss`, and `work()`'s `calls`. */
 export interface PgBossTuning {
   /** The listener's queue (`expireInSeconds`, `retryDelay`, `deadLetter`…), applied by `work()`. `partition` only when it's created. */
   queue?: Omit<Queue, "name" | "retryLimit" | "retryBackoff" | "policy">;
@@ -15,7 +15,7 @@ export interface PgBossTuning {
 }
 
 /**
- * What this adapter reads from a listener's `meta` (not a function's): `init<{ meta: PgBossMeta & AppMeta }>()`, then
+ * What this adapter reads from a listener's or cron's `meta` (not a function's): `init<{ meta: PgBossMeta & AppMeta }>()`, then
  * `meta: { pgBoss: { queue: { expireInSeconds: 120 }, worker: { localConcurrency: 5 } } }`. Tuning only: retries are the
  * listener's `attempts`, and the other adapters ignore it.
  */
@@ -123,10 +123,11 @@ export function pgBoss(boss: PgBoss): JobsAdapter {
     holds: true, // `startAfter`, however far ahead
     replaces: true,
     /** Needs `database`: jobs are inserted in the mutation's transaction, and `retry` opens its own through it. */
-    check({ listeners, database: given }) {
+    check({ listeners, crons, database: given }) {
       if (!given) throw new Error("[logic-sdk] pgBoss(boss) needs `database`: jobs are inserted in your mutation's transaction.");
       database = given;
       for (const l of listeners) queueOptions.set(queueName(l.id), tuningOf(l.listener.meta)?.queue);
+      for (const c of crons) queueOptions.set(queueName(c.id), tuningOf(c.cron.meta)?.queue);
     },
     /** Inside the mutation's transaction: one insert per queue. pg-boss skips a row whose id it already has. */
     async enqueue(tx, jobs) {
@@ -176,15 +177,13 @@ export function pgBoss(boss: PgBoss): JobsAdapter {
 export interface PgBossWorkOptions {
   /** The shared queue of scheduled calls, tuned like a listener's `meta.pgBoss`: `{ worker: { localConcurrency: 10 } }`. */
   calls?: PgBossTuning;
-  /** Every cron's queue, tuned the same way (crons have no `meta`): `{ queue: { expireInSeconds: 3600 } }` for a long one. */
-  crons?: PgBossTuning;
   /** Where a failed cron tick goes, and a queue left with jobs but no listener. Default `console.error`. */
   onError?: (error: unknown) => void;
 }
 
 /**
  * Your worker process: a queue and its workers for every listener and cron, one for scheduled calls, and the cron tick
- * every minute. `boss.stop()` stops all of it. Applies each listener's `meta.pgBoss`.
+ * every minute. `boss.stop()` stops all of it. Applies each listener's and cron's `meta.pgBoss`.
  *
  * ```ts
  * await boss.start();
@@ -201,7 +200,7 @@ export async function work(
   const onError = options.onError ?? ((error) => console.error("[logic-sdk]", error));
   const queues: { name: string; tuning: PgBossTuning | undefined }[] = [
     ...listeners.map((l) => ({ name: queueName(l.id), tuning: tuningOf(l.listener.meta) })),
-    ...crons.map((c) => ({ name: queueName(c.id), tuning: options.crons })),
+    ...crons.map((c) => ({ name: queueName(c.id), tuning: tuningOf(c.cron.meta) })),
     { name: CALLS_QUEUE, tuning: options.calls },
   ];
 

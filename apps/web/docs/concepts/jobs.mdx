@@ -25,7 +25,7 @@ A **job** is one piece of work that runs after your transaction commits. It come
 |---|---|---|
 | A listener's share of an event | `ctx.emit(event, payload)` in a mutation: one job per listener | today |
 | A scheduled call | `ctx.schedule(fn, input, { at })` in a mutation: run this function once, later | today |
-| A cron's run | `cron({ schedule, run, scope })`: run this function on a schedule ([Crons](/docs/concepts/crons)) | today |
+| A cron's run | `cron({ schedule, scope, handler })`: a handler on a schedule, like a listener for the clock ([Crons](/docs/concepts/crons)) | today |
 
 If you've used Rails, Laravel or Oban, a listener is what you'd write as a job class, and the `jobs` slot is their queue adapter.
 
