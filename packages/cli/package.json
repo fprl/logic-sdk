@@ -1,6 +1,6 @@
 {
   "name": "@logic-sdk/cli",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "The logic-sdk CLI: list, show and graph an app. Run it with `npx logic-sdk`.",
   "license": "MIT",
   "repository": {
@@ -49,6 +49,6 @@
     "@types/node": "^26.6.6"
   },
   "peerDependencies": {
-    "logic-sdk": ">=0.7.0 <0.8.0"
+    "logic-sdk": ">=0.7.1 <0.8.0"
   }
 }
