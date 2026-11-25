@@ -1,5 +1,14 @@
 # @logic-sdk/cli
 
+## 0.6.4
+
+### Patch Changes
+
+- f417377: `ctx.run(fn, input, { scope })` takes the whole scope and no longer merges it over the caller's: write `{ scope: { ...ctx.scope, locale: "es" } }`. A partial scope could type-check and still build one that's none of your variants, passing a policy without the fields it promises. The CLI skips a spread of the caller's own scope, so `(scope: locale)` still names what changed.
+- Updated dependencies [f417377]
+- Updated dependencies [f417377]
+  - logic-sdk@0.7.0
+
 ## 0.6.3
 
 ### Patch Changes
