@@ -612,6 +612,33 @@ export const wakeDue = cron({
 
 The app hit this porting its tasks: an action `wakeDue` run by a per-minute cron. The cron couldn't also be `wakeDue` (one id namespace per module, and `export *` silently drops two exports of one name: tsc's TS2308 is the only warning), so it became `wakeDueEveryMinute`, and the action stayed exported only so the cron could point at it.
 
+The four options, as the app would write `wakeDue`:
+
+```ts
+// A · the cron points at a function (before 0.7.1)
+export const wakeDueEveryMinute = cron({ schedule: "* * * * *", scope, run: () => wakeDue });
+
+// B · one app-level map
+createRegistry({ modules, schedules: { wakeDue: { schedule: "* * * * *", run: tasks.wakeDue, scope } } });
+
+// C · a map per module
+export const crons = schedules({ wakeDue: { schedule: "* * * * *", run: wakeDue, scope } });
+
+// D · the cron has a handler, like a listener (picked)
+export const wakeDue = cron({ schedule: "* * * * *", scope, async handler(ctx) { … } });
+```
+
+| | A | B | C | D |
+|---|---|---|---|---|
+| Named after its work (`wakeDue`) | ❌ | ✅ | ✅ | ✅ |
+| No function exported only for the cron | ❌ | ❌ | ❌ | ✅ |
+| Module owns its schedules | ✅ | ❌ | ✅ | ✅ |
+| New shape to learn | none | a registry slot | a new definer | none: the listener's |
+| Every schedule in one view | `logic-sdk list` | the map | `logic-sdk list` | `logic-sdk list` |
+| Precedent | Convex, Laravel `job()`, Oban (they point at a unit) | Vercel, Convex, Laravel, Solid Queue, Oban (central files, for platform reasons) | none found | Laravel closures, Solid Queue `command`, Inngest, Trigger.dev |
+
+Why D, point by point:
+
 - **The pointer was the problem, not the export.** One export per cron keeps what a module owns and finds crons like listeners, and `logic-sdk list` already shows every schedule in one view. A handler names the cron after its work, as a listener is, and the work can stay private: the handler `ctx.run`s its module's private functions with the cron id in the trail.
 - **Policy, validation and tracing stay.** They were the reason for `run` (above): each `ctx.run` in the handler checks that function's policy against the cron's scope, as in listeners. `wrap` now sees the run itself (`kind: "cron"`, `meta`), which before looked like any `registry.as(scope).run`.
 - **`ctx.cron.scheduledAt`:** the minute the run is for, even when it runs late or on a retry. A function behind `run` got only a fixed `input`, so a late digest couldn't tell which day it covered.
