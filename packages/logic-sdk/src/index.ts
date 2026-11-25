@@ -162,7 +162,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
      * Work on a schedule, as `scope` (a cron has no caller): a handler, like a listener's, run when the clock says. Export
      * it from a module and call `registry.jobs.tick()` every minute (or from your platform's cron trigger). Must be
      * idempotent: a retry runs the whole handler again.
-     * `cron({ schedule: "0 9 * * MON", scope: asSystem("reports.weekly"), async handler(ctx) { await ctx.run(send) } })`.
+     * `cron({ schedule: "0 9 * * MON", scope: { kind: "system", job: "reports.weekly" }, async handler(ctx) { await ctx.run(send) } })`.
      */
     cron: <const Sc extends ScopeOf<C>>(def: CronDef<C, Sc>): Cron<C> => {
       const { id, schedule, timezone, scope, attempts, meta, handler } = def;

@@ -277,7 +277,7 @@ export interface Listener<O = unknown, C extends Config = any> extends FromInit<
 export interface RunOptions<S = object> {
   /**
    * The whole scope for this call and everything it runs, never merged: `{ scope: { ...ctx.scope, locale: "es" } }`
-   * to render in another language, `{ scope: asSystem("reports.weekly") }` to act as someone else on purpose. The
+   * to render in another language, `{ scope: { kind: "system", job: "reports.weekly" } }` to act as someone else on purpose. The
    * callee's policy sees it. Whole, so it's one of your scope's variants: a patch could build one that isn't.
    */
   scope?: S;

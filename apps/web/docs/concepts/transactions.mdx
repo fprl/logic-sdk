@@ -61,7 +61,7 @@ Work over many rows where each must succeed or fail alone, like a cron over ever
 /** Every minute: wake each due reminder in its own transaction */
 export const wakeDue = cron({
   schedule: "* * * * *",
-  scope: asSystem("reminders.wakeDue"),
+  scope: { kind: "system", job: "reminders.wakeDue" },
   async handler(ctx) {
     for (const { id } of await ctx.run(dueReminders)) {
       try {
