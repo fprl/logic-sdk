@@ -3,6 +3,7 @@ import {
   createRegistry, init, inProcess, isDomainError, type Call, type Delivery, type JobsAdapter, type Job, type DomainError, type Envelope, type FailureInfo,
 } from "../src/index.ts";
 import { createTestRegistry } from "../src/testing.ts";
+import { causes } from "../src/errors.ts";
 import { expect, test } from "bun:test";
 import { memoryDatabase, type Store } from "./memory-db.ts";
 
@@ -52,7 +53,7 @@ const locale = query({ handler: async ({ scope }) => scope.locale });
 const whoami = query({
   handler: async ({ scope, run }) => ({
     outer: scope.locale,
-    inner: await run(locale, undefined, { scope: { locale: "en" } }),
+    inner: await run(locale, undefined, { scope: { ...scope, locale: "en" } }),
     nested: await run(locale),
   }),
 });
@@ -102,9 +103,14 @@ test("failed mutation: nothing written, no events", async () => {
   expect(services.log).toEqual([]);
 });
 
-test("a nested failure dooms the transaction even when caught", async () => {
+test("a nested failure dooms the transaction even when caught: the commit says which, and how to split it", async () => {
   const { app, services, db } = setup();
-  await expect(app.run(items.addTwo, { a: "ok", b: "boom" })).rejects.toMatchObject({ code: "items.boom" });
+  const failure = await app.run(items.addTwo, { a: "ok", b: "boom" }).then(() => undefined, (e: unknown) => e);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toMatch(
+    /^\[logic-sdk\] items\.add failed inside items\.addTwo's transaction \(items\.addTwo → items\.add\) and was caught, so items\.addTwo can't commit: .* run them from an action\. The failure \(this error's cause\): /,
+  );
+  expect((failure as Error).cause).toMatchObject({ code: "items.boom" });
   expect(db.store.rows.items).toEqual(undefined);
   expect(services.log).toEqual([]);
 });
@@ -133,7 +139,7 @@ test("a function's check runs on every call, nested ones too", async () => {
 test("run options: { scope } changes who is calling for that call, and checks see it", async () => {
   const asAdmin = action({
     input: z.object({ name: z.string() }),
-    handler: async ({ run }, { name }) => run(add, { name }, { scope: { actor: "system" } }),
+    handler: async ({ run, scope }, { name }) => run(add, { name }, { scope: { ...scope, actor: "system" } }),
   });
   const r = createRegistry<Scope>({ modules: { items, log, x: { asAdmin } }, database: memoryDatabase(), services: { log: [] } });
   expect(await r.as({ actor: null, locale: "es" }).run(asAdmin, { name: "z" })).toEqual({ name: "z" });
@@ -176,7 +182,7 @@ test("output schema is enforced", async () => {
 test("scope: nested calls inherit it, a run's { scope } overrides it for that call only", async () => {
   const { app } = setup();
   expect(await app.run(items.whoami)).toEqual({ outer: "es", inner: "en", nested: "es" });
-  expect(await app.run(items.locale, undefined, { scope: { locale: "fr" } })).toEqual("fr");
+  expect(await app.run(items.locale, undefined, { scope: { actor: "ana", locale: "fr" } })).toEqual("fr");
   expect(await app.run(items.locale)).toEqual("es");
 });
 
@@ -310,8 +316,8 @@ test("abort signal: checked before the call starts, never between its steps", as
 test("run options: events emitted by the callee carry its scope; the caller's own events don't", async () => {
   const emits = mutation({
     input: z.object({ name: z.string() }),
-    async handler({ run }, { name }) {
-      return run(add, { name }, { scope: { actor: "system" } });
+    async handler({ run, scope }, { name }) {
+      return run(add, { name }, { scope: { ...scope, actor: "system" } });
     },
   });
   const seen: Envelope[] = [];
@@ -753,6 +759,53 @@ test("a mutation that loses a race (deadlock) is re-run in a fresh transaction; 
   expect(attempts).toEqual(2);
   expect(db.store.rows.items).toEqual([{ name: "again" }]);
   expect(services.log).toEqual(["added again (items.added, es)"]);
+});
+
+test("a deadlock in a nested mutation the caller caught still re-runs the transaction: `retryable` finds it as the cause", async () => {
+  const db = memoryDatabase();
+  let attempts = 0;
+  const flaky = mutation({
+    input: z.object({}),
+    async handler() {
+      if (++attempts === 1) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    },
+  });
+  const swallows = mutation({
+    input: z.object({}),
+    async handler({ db: tx, run }) {
+      try { await run(flaky, {}); } catch {}
+      (tx.rows.t ??= []).push("done");
+      return "ok";
+    },
+  });
+  // like the Postgres adapter's: the driver's code anywhere in the chain
+  const retryable = (e: unknown) => [...causes(e)].some((c) => "code" in c && c.code === "40P01");
+  const r = createRegistry<Scope>({ modules: { x: { flaky, swallows } }, database: { ...db, retryable } });
+  expect(await r.as({ actor: "a", locale: "es" }).run(swallows, {})).toEqual("ok");
+  expect(attempts).toEqual(2);
+  expect(db.store.rows.t).toEqual(["done"]);
+});
+
+test("the commit's error names the path, so a catch in the middle shows: a → b → c", async () => {
+  const fails = mutation({ input: z.object({}), async handler({ errors }) { throw errors.reject("no"); } });
+  const catches = mutation({ input: z.object({}), async handler({ run }) { try { await run(fails, {}); } catch {} } });
+  const outer = mutation({ input: z.object({}), async handler({ run }) { await run(catches, {}); } });
+  const r = createRegistry<Scope>({ modules: { x: { fails, catches, outer } }, database: memoryDatabase() });
+  await expect(r.as({ actor: "a", locale: "es" }).run(outer, {})).rejects.toThrow(
+    "x.fails failed inside x.outer's transaction (x.outer → x.catches → x.fails) and was caught",
+  );
+});
+
+test("a job whose mutation swallowed a nested `reject` fails at once, as the `reject` would", async () => {
+  const happened = event({ payload: z.object({}) });
+  const refuses = mutation({ input: z.object({}), async handler({ errors }) { throw errors.reject("no"); } });
+  const swallows = mutation({ input: z.object({}), async handler({ run }) { try { await run(refuses, {}); } catch {} } });
+  const react = listener({ event: () => happened, attempts: 3, async handler({ run }) { await run(swallows, {}); } });
+  const reported: FailureInfo[] = [];
+  const r = createRegistry<Scope>({ modules: { x: { happened, refuses, swallows, react } }, database: memoryDatabase(), onError: (_e, info) => reported.push(info) });
+  const envelope = { id: "e", name: "x.happened", payload: {}, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 };
+  expect(await r.jobs.run({ kind: "delivery", id: "x.react@e", listener: "x.react", envelope, attempts: 3 }, { attempt: 1 })).toEqual("failed");
+  expect(reported.at(-1)).toMatchObject({ source: "x.react", attempt: 1, outcome: "failed" });
 });
 
 test("retries stop after `transactionAttempts`, and errors that aren't retryable are never retried", async () => {

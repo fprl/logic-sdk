@@ -34,13 +34,53 @@ try {
 }
 ```
 
-Postgres does the same after a failed statement. See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
+Postgres does the same after a failed statement, and so does Ecto: a rescued inner failure aborts [the whole outer transaction](https://github.com/elixir-ecto/ecto/blob/master/lib/ecto/repo.ex). See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
+
+When the caller caught the failure and returned, the commit fails with an error of its own. It names the path down to the failure, and keeps the failure as its `cause`:
+
+```text
+[logic-sdk] reminders.wake failed inside reminders.wakeDue's transaction (reminders.wakeDue → reminders.wake)
+and was caught, so reminders.wakeDue can't commit: a mutation shares its transaction with the mutations it runs.
+To let each one commit or fail on its own, run them from an action. The failure (this error's cause): …
+```
+
+A job is retried the way its cause would be, so a swallowed `reject` still fails at once.
+
+## One commit per item
+
+Where the transaction ends depends on who calls. A mutation's nested mutations join its transaction. An action has none, so each mutation it runs commits on its own:
+
+| Caller | `ctx.run(mutation)` | One fails and is caught |
+| --- | --- | --- |
+| `mutation` | joins the caller's transaction | nothing commits |
+| `action`, listener | its own transaction | the others commit |
+
+Work over many rows where each must succeed or fail alone, like a cron over every account, is an action:
+
+```ts
+/** Every minute: wake each due reminder in its own transaction */
+export const wakeDue = action({
+  authorize: system,
+  async handler(ctx) {
+    for (const { id } of await ctx.run(dueReminders)) {
+      try {
+        await ctx.run(wake, { reminderId: id });
+      } catch (error) {
+        console.error(error); // one bad row doesn't block the rest
+      }
+    }
+  },
+});
+```
+
+Written as a mutation, one bad row would roll back every other row's work, every time it runs. Convex draws the same line: an action's [`runMutation` calls run in separate transactions](https://github.com/get-convex/convex-backend/blob/main/npm-packages/docs/docs/functions/actions.mdx).
 
 ## Lost races are retried
 
 Sometimes Postgres aborts a transaction because it lost a race with another one: a deadlock (`40P01`) or a serialization failure (`40001`). The registry then runs the whole mutation again, in a fresh transaction.
 
 - Up to **3 attempts**, with a short random pause between them.
+- **Even when a caller caught it.** A nested mutation that lost the race dooms the transaction, so the whole mutation runs again, even if its caller went on and Postgres then failed the next statement (`25P02`).
 - **Safe**, because mutations have no side effects and their events are rebuilt on each attempt.
 - **Familiar**: Laravel does the same with `DB::transaction(fn, attempts)`, and Convex re-runs conflicting mutations automatically.
 - **Not a job retry**: a listener's `attempts` decide how often a job runs. Each of those runs can retry its own transactions.
