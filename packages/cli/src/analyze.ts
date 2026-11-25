@@ -421,7 +421,12 @@ export function analyze(projectRoot: string, registryPath: string): Source {
             if (d.id?.type === "Identifier" && isFunction(fn)) add(d.id.name, fn);
           }
       }
-    /** `{ scope: { actor: system } }` in run options → the keys it changes; "(dynamic)" when they can't be read. */
+    /**
+     * `{ scope: { ...ctx.scope, actor: system } }` in run options → the keys it changes; "(dynamic)" when they can't
+     * be read. Spreading the caller's own scope (`...ctx.scope`, `...scope`) changes nothing, so it isn't listed.
+     */
+    const ownScope = (n: Node | undefined) =>
+      (n?.type === "Identifier" && n.name === "scope") || (n?.type === "MemberExpression" && n.property?.name === "scope");
     const scopeOf = (options: Node | undefined): { scope?: string[] } => {
       const o = unwrap(options);
       if (!o) return {};
@@ -430,7 +435,11 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       if (!prop) return {};
       const value = unwrap(prop.value);
       if (value?.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
-      return { scope: value.properties.map((p: Node) => p.key?.name ?? p.key?.value ?? "(dynamic)") };
+      return {
+        scope: value.properties
+          .filter((p: Node) => !(p.type === "SpreadElement" && ownScope(unwrap(p.argument))))
+          .map((p: Node) => p.key?.name ?? p.key?.value ?? "(dynamic)"),
+      };
     };
     const readConfig = (found: Found, key: string | undefined) => {
       if (key === undefined) return;

@@ -37,3 +37,24 @@ test("a deadlock gets three tries by default, or drizzleAdapter's transactionAtt
   expect(tries).toBe(2);
   await t.rollback();
 });
+
+test("a deadlock a caller caught and went on from is still retried: Postgres fails the next statement with 25P02", async () => {
+  await db.execute(sql`create table if not exists after_catch (v text)`);
+  let attempts = 0;
+  const losesOnce = mutation({
+    async handler(ctx) {
+      if (++attempts === 1) await ctx.db.execute(sql`do $$ begin raise exception 'lost the race' using errcode = '40P01'; end $$`);
+    },
+  });
+  const goesOn = mutation({
+    async handler(ctx) {
+      try { await ctx.run(losesOnce); } catch {}
+      await ctx.db.execute(sql`insert into after_catch values ('written')`);
+      return "ok";
+    },
+  });
+  const app = createRegistry({ modules: { x: { losesOnce, goesOn } }, database: drizzleAdapter(db) }).as({});
+  expect(await app.run(goesOn)).toBe("ok");
+  expect(attempts).toBe(2);
+  expect((await db.execute(sql`select v from after_catch`)).rows).toEqual([{ v: "written" }]);
+});

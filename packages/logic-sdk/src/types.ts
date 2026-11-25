@@ -267,10 +267,11 @@ export interface Listener<O = unknown, C extends Config = any> extends FromInit<
 /** What a single call may change: who it runs as (part of the scope) and when to give up. Nothing else. */
 export interface RunOptions<S = object> {
   /**
-   * Merged over the current scope for this call and everything it runs: `{ scope: { actor: system } }` to act as
-   * someone else on purpose, `{ scope: { locale: "es" } }` to render in another language. The callee's policy sees it.
+   * The whole scope for this call and everything it runs, never merged: `{ scope: { ...ctx.scope, locale: "es" } }`
+   * to render in another language, `{ scope: asSystem("reports.weekly") }` to act as someone else on purpose. The
+   * callee's policy sees it. Whole, so it's one of your scope's variants: a patch could build one that isn't.
    */
-  scope?: Partial<S>;
+  scope?: S;
   /**
    * Checked before this call starts. Inside, actions get it as `ctx.signal` to pass on (`fetch(url, { signal })`).
    * Never checked between your steps, so a caller who gives up can't leave a workflow half done.

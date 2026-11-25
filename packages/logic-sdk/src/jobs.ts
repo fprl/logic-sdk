@@ -1,4 +1,4 @@
-import { describeIssues, isDomainError, StalePayload } from "./errors.ts";
+import { CaughtNestedFailure, describeIssues, isDomainError, StalePayload } from "./errors.ts";
 import { isDue, parseSchedule } from "./schedule.ts";
 import type {
   ActionCtx,
@@ -185,7 +185,9 @@ export function makeJobs(deps: JobsDeps) {
       try {
         return await work();
       } catch (error) {
-        const retrying = attempt < attempts && !(error instanceof StalePayload) && !(isDomainError(error) && error.kind !== "conflict");
+        // a caught nested failure is retried as its cause would be: a swallowed `reject` still fails at once
+        const decisive = error instanceof CaughtNestedFailure ? error.cause : error;
+        const retrying = attempt < attempts && !(decisive instanceof StalePayload) && !(isDomainError(decisive) && decisive.kind !== "conflict");
         if (!retrying) return failed(error);
         report(error, { ...info, outcome: "retry" });
         throw error;

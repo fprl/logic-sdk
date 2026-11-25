@@ -1,4 +1,4 @@
-import { describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf, PRIVATE } from "./errors.ts";
+import { CaughtNestedFailure, describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf, PRIVATE } from "./errors.ts";
 import { inProcess, makeJobs, replaceKeyOf, runsNow } from "./jobs.ts";
 import { assertTimeZone, parseSchedule } from "./schedule.ts";
 import { BRAND, INTERNAL } from "./types.ts";
@@ -242,6 +242,10 @@ interface TxState {
   db: unknown;
   doomed: boolean;
   reason: unknown;
+  /** Where the transaction's own mutation sits in the trail: what the error at commit prints starts there. */
+  from: number;
+  /** The calls down to the nested mutation whose failure doomed it, from the transaction's own mutation. */
+  doomedBy: readonly string[] | undefined;
   events: Envelope[];
   /** Each event's payload as its schema parsed it, for listeners' `when`: the value their handler gets. */
   parsed: Map<Envelope, unknown>;
@@ -262,6 +266,22 @@ interface Frame {
   /** Inside a job: where the jobs it queues wait until it's settled. */
   queued?: Job[];
   tx?: TxState;
+}
+
+/** What a mutation throws at commit when a nested mutation failed and was caught: the transaction they share is doomed. */
+function caughtNestedFailure(id: string, tx: TxState): CaughtNestedFailure {
+  let why: string;
+  try {
+    why = tx.reason instanceof Error ? tx.reason.message : String(tx.reason);
+  } catch {
+    why = Object.prototype.toString.call(tx.reason); // an object String() can't print
+  }
+  return new CaughtNestedFailure(
+    `[logic-sdk] ${tx.doomedBy?.at(-1)} failed inside ${id}'s transaction (${tx.doomedBy?.join(" → ")}) and was ` +
+      `caught, so ${id} can't commit: a mutation shares its transaction with the mutations it runs. To let each one ` +
+      `commit or fail on its own, run them from an action. The failure (this error's cause): ${why}`,
+    { cause: tx.reason },
+  );
 }
 
 /** Create the registry once at startup. Prefer the `createRegistry` returned by `init()`: it's typed with your config. */
@@ -441,10 +461,10 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   }
 
   // ── ctx ──────────────────────────────────────────────────────────────────
-  /** The frame for a call from here: its scope patch and signal. `invoke` adds the call to the trail. */
+  /** The frame for a call from here: its scope and signal. `invoke` adds the call to the trail. */
   const enter = (frame: Frame, options: RunOptions | undefined): Frame => ({
     ...frame,
-    scope: options?.scope ? { ...frame.scope, ...options.scope } : frame.scope,
+    scope: options?.scope ?? frame.scope,
     signal: options?.signal ?? frame.signal,
     abortOn: options?.signal,
   });
@@ -600,6 +620,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           if (!tx.doomed) {
             tx.doomed = true;
             tx.reason = e;
+            tx.doomedBy = frame.trail.slice(tx.from);
           }
           throw e;
         }
@@ -612,20 +633,31 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       const input = await prepare();
       let committed: { out: unknown; events: Envelope[]; jobs: Job[] };
       for (let attempt = 1; ; attempt++) {
+        const attemptTx: { current?: TxState } = {};
         try {
           committed = await database.transaction(async (txDb) => {
             // fresh per attempt, so a retry never reuses events from a failed attempt
-            const tx: TxState = { db: txDb, doomed: false, reason: undefined, events: [], parsed: new Map(), calls: [], pending: [] };
+            const tx: TxState = {
+              db: txDb, doomed: false, reason: undefined, from: frame.trail.length - 1, doomedBy: undefined,
+              events: [], parsed: new Map(), calls: [], pending: [],
+            };
+            attemptTx.current = tx;
             const out = await execute(input, mutationCtx({ ...frame, tx }, tx, id));
             await Promise.all(tx.pending);
-            if (tx.doomed) throw tx.reason;
+            // a nested failure was caught: a bug, so its own error, with the failure as its cause (Ecto's aborted
+            // transaction). Retries still see a deadlock: `retryable` walks causes
+            if (tx.doomed) throw caughtNestedFailure(id, tx);
             const jobs = toJobs(tx.events, tx.calls, tx.parsed);
             if (jobs.length) await jobsAdapter.enqueue?.(txDb, jobs);
             return { out, events: tx.events, jobs };
           });
           break;
         } catch (e) {
-          if (attempt < transactionAttempts && database.retryable?.(e)) {
+          // a lost race dooms the transaction even when a caller caught it and went on: Postgres then fails the next
+          // statement with 25P02, or the caller throws its own error, and the race is still what to retry
+          const doomed = attemptTx.current?.doomed ? attemptTx.current.reason : undefined;
+          const lostRace = database.retryable?.(e) || (doomed !== undefined && database.retryable?.(doomed));
+          if (attempt < transactionAttempts && lostRace) {
             // a random pause, so transactions that just deadlocked don't retry in lockstep and collide again
             await new Promise((r) => setTimeout(r, Math.random() * 20 * attempt));
             continue;

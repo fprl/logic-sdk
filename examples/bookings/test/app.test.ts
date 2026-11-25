@@ -18,7 +18,7 @@ async function seedProperty(app: Caller<Scope>) {
   return app.run(
     properties.create,
     { name: "Casa Azul", nightlyRate: 120_00, cleaningFee: 60_00, minNights: 2 },
-    { scope: { actor: { id: "owner_1", role: "owner" } } },
+    { scope: scopeAs("owner") },
   );
 }
 

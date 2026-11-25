@@ -132,7 +132,7 @@ Laravel's policies are the same shape: boolean methods on a user and a record.
 ```ts
 const system = { id: "system", role: "admin" } as const;
 
-await ctx.run(tasks.create, { bookingId, title: "Prepare the house" }, { scope: { actor: system } });
+await ctx.run(tasks.create, { bookingId, title: "Prepare the house" }, { scope: { ...ctx.scope, actor: system } });
 ```
 
 ## Recipes

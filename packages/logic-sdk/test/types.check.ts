@@ -76,6 +76,9 @@ async function check() {
   const t: true = w.ok;
   // @ts-expect-error scope fields are typed
   app.run(getOne, { id: "x" }, { scope: { nope: 1 } });
+  // @ts-expect-error a run's scope is whole: a patch could build a scope that's none of your variants
+  app.run(getOne, { id: "x" }, { scope: { actor: "b" } });
+  app.run(getOne, { id: "x" }, { scope: { actor: "b", tenant: "t" } });
   // @ts-expect-error scope must be complete
   registry.as({ actor: "a" });
   void n; void t;

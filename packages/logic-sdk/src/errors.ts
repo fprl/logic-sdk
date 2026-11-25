@@ -57,12 +57,21 @@ export const describeIssues = (issues: readonly StandardSchemaV1.Issue[]) =>
 export class StalePayload extends Error {}
 
 /**
+ * A mutation's commit after a nested mutation failed and was caught: the transaction they share is doomed. Its
+ * `cause` is that failure, and retries (a transaction's, a job's) treat it as the cause would be treated.
+ */
+export class CaughtNestedFailure extends Error {}
+
+/**
  * Throw where there's no valid session, outside your functions (a route, a middleware): `toResponse` makes it a 401.
  * Inside a function, a policy answers instead (a scope with no actor, then `forbidden`).
  */
 export const unauthenticated = (code = "unauthenticated", details?: unknown) => new DomainError("unauthenticated", code, details);
 
-/** An error and the ones it wraps (`cause`), five deep at most: a driver's error usually arrives wrapped by the ORM. */
+/**
+ * An error and the ones it wraps (`cause`), six deep at most: a driver's error usually arrives wrapped by the ORM,
+ * and a caught nested failure wraps that once more.
+ */
 export function* causes(error: unknown): Generator<object> {
-  for (let e = error, i = 0; typeof e === "object" && e !== null && i < 5; e = "cause" in e ? e.cause : undefined, i++) yield e;
+  for (let e = error, i = 0; typeof e === "object" && e !== null && i < 6; e = "cause" in e ? e.cause : undefined, i++) yield e;
 }
