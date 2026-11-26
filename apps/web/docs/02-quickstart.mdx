@@ -105,7 +105,7 @@ import * as bookings from "./bookings";
 export const registry = createRegistry({
   // Ids come from the keys: "bookings.cancel"
   modules: { bookings, availability },
-  database: drizzleAdapter(db),
+  database: { adapter: drizzleAdapter(db) },
   services: { mailer, payments },
   // Read env here, at the entry; modules read ctx.config
   config: { app: { url: process.env.APP_URL! } },

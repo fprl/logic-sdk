@@ -60,7 +60,7 @@ Register your modules and call them from anywhere:
 // src/registry.ts
 export const registry = createRegistry({
   modules: { bookings, availability },
-  database: drizzleAdapter(db),
+  database: { adapter: drizzleAdapter(db) },
   services: { mailer, payments },
 });
 
@@ -76,8 +76,8 @@ const database = drizzleAdapter(db);
 
 export const registry = createRegistry({
   modules: { bookings, availability },
-  database,
-  jobs: { adapter: databaseQueue(database), scope: { store, load } },
+  database: { adapter: database },
+  jobs: { adapter: databaseQueue(), scope: { store, load } },
 });
 
 // a listener, with tries
@@ -95,7 +95,7 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 - **One transaction across modules.** A failure anywhere rolls back everything, even if someone catches it.
 - **Side effects after commit.** Mutations emit events; listeners send the email once the data is safe.
 - **Jobs, four ways.** Your Postgres as the queue (`databaseQueue`), Cloudflare Queues alone, an outbox in front of a queue, or pg-boss. All but in-process can run a job twice, so make them idempotent.
-- **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `drizzleAdapter(db, { transactionAttempts })`.
+- **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `database: { adapter, transactionAttempts }`.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
 - **Internal by default.** A function reaches clients only when you publish it: in your oRPC router or an agent's tools, which refuse one without `authorize`, or from your own route, which should only call functions that have one.
@@ -109,10 +109,10 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 
 | Import | |
 |---|---|
-| `logic-sdk/drizzle/pg` | The database adapter, `databaseQueue` and `outbox` |
-| `logic-sdk/postgres` | `databaseQueue` and `outbox` on Postgres with any ORM |
+| `logic-sdk/drizzle/pg` | The database adapter, `databaseQueue`, `outbox` and `failedJobs` |
+| `logic-sdk/postgres` | `databaseQueue`, `outbox` and `failedJobs` on Postgres with any ORM |
 | `logic-sdk/drizzle/sqlite` | The same on SQLite: `drizzleAdapter(() => drizzle("app.db"))` |
-| `logic-sdk/sqlite` | `databaseQueue` and `outbox` on SQLite with any ORM |
+| `logic-sdk/sqlite` | `databaseQueue`, `outbox` and `failedJobs` on SQLite with any ORM |
 | `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
 | `logic-sdk/pg-boss` | Jobs in pg-boss |
 | `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |

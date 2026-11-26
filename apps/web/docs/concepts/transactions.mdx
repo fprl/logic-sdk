@@ -86,17 +86,17 @@ Sometimes Postgres aborts a transaction because it lost a race with another one:
 - **Familiar**: Laravel does the same with `DB::transaction(fn, attempts)`, and Convex re-runs conflicting mutations automatically.
 - **Not a job retry**: a listener's `attempts` decide how often a job runs. Each of those runs can retry its own transactions.
 
-It's a database setting, so it goes on the database adapter:
+It goes in `createRegistry`, next to the database adapter:
 
 ```ts
 createRegistry({
   modules,
   // 1 turns retries off
-  database: drizzleAdapter(db, { transactionAttempts: 5 }),
+  database: { adapter: drizzleAdapter(db), transactionAttempts: 5 },
 });
 ```
 
-With your own adapter, set `transactionAttempts` next to `retryable`.
+It's the registry's, not the adapter's: how many tries a mutation gets decides what ends up in your data. The adapter only says what's worth retrying (`retryable`).
 
 ## Lock rows in one order
 

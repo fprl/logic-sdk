@@ -34,6 +34,7 @@ export interface ListenerInfo {
   module: string;
   /** The export name: how the source refers to it (the id can differ). */
   name: string;
+  kind: "listener";
   event: string;
   /** It has a `when`: some events of its kind get no job for it. */
   conditional: boolean;
@@ -45,6 +46,7 @@ export interface CronInfo {
   id: string;
   module: string;
   name: string;
+  kind: "cron";
   schedule: string;
   timezone: string;
   description: string | null;
@@ -212,6 +214,7 @@ export async function loadProject(root: string): Promise<Project> {
     description: src(l)?.doc ?? null,
     at: src(l)?.at ?? null,
     runs: real(src(l)?.runs ?? []),
+    kind: "listener",
   }));
 
   const crons: CronInfo[] = described.crons.map((c) => ({
@@ -223,6 +226,7 @@ export async function loadProject(root: string): Promise<Project> {
     description: src(c)?.doc ?? null,
     at: src(c)?.at ?? null,
     runs: real(src(c)?.runs ?? []),
+    kind: "cron", // last: `list --json` prints a cron's keys in this order
   }));
 
   const byId = new Map(functions.map((f) => [f.id, f]));
@@ -231,7 +235,6 @@ export async function loadProject(root: string): Promise<Project> {
       const callee = byId.get(edge.to);
       if (callee && !callee.calledBy.includes(caller.id)) callee.calledBy.push(caller.id);
     }
-
 
   const events: EventInfo[] = described.events.map((e) => ({
     id: e.id,

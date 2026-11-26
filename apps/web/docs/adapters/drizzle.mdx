@@ -8,7 +8,7 @@ import { drizzleAdapter } from "logic-sdk/drizzle/pg";
 
 createRegistry({
   modules,
-  database: drizzleAdapter(db),
+  database: { adapter: drizzleAdapter(db) },
 });
 ```
 
@@ -31,7 +31,7 @@ Without Drizzle, write the two sides yourself: `db: ReadWrite<MyReader, MyTx>`, 
 
 ## Retries
 
-The adapter tells the registry which failures are worth retrying: Postgres deadlocks (`40P01`) and serialization failures (`40001`). Three tries by default; `drizzleAdapter(db, { transactionAttempts: 5 })` changes it. See [Transactions](/docs/concepts/transactions#lost-races-are-retried).
+The adapter tells the registry which failures are worth retrying: Postgres deadlocks (`40P01`) and serialization failures (`40001`). Three tries by default; `database: { adapter: drizzleAdapter(db), transactionAttempts: 5 }` changes it. See [Transactions](/docs/concepts/transactions#lost-races-are-retried).
 
 ## `sqlState`
 
@@ -39,7 +39,7 @@ Reads the SQLSTATE code of a database error, even when Drizzle wraps it. Use it 
 
 ## Database queue
 
-`databaseQueue(database)` makes your database the queue, like Laravel's `database` driver: each job is a row written in the mutation's transaction, so a committed one is never lost (a receipt, a webhook). Your app runs it, with no worker process. Postgres, Drizzle 1.0, or [another ORM](/docs/adapters/other-orms).
+`databaseQueue()` makes your database the queue, like Laravel's `database` driver: each job is a row written in the mutation's transaction, so a committed one is never lost (a receipt, a webhook). Your app runs it, with no worker process. Postgres, Drizzle 1.0, or [another ORM](/docs/adapters/other-orms).
 
 ```ts
 // db/schema.ts: drizzle-kit adds the table to your migrations
@@ -52,8 +52,8 @@ const database = drizzleAdapter(db);
 
 export const registry = createRegistry({
   modules,
-  database,
-  jobs: { adapter: databaseQueue(database), scope: { store, load } }, // who a job runs as: see Jobs
+  database: { adapter: database },
+  jobs: { adapter: databaseQueue(), scope: { store, load } }, // who a job runs as: see Jobs
 });
 
 // what a crash or a failure left behind: a platform trigger, or on Node
@@ -72,11 +72,11 @@ export default {
 - **After commit, the request runs them one by one** (through `waitUntil` on serverless), claiming each just before it runs and deleting it once it's done. So a slow or dead listener doesn't spend the others' attempts. What a dead process hadn't claimed, a sweep runs as a first try, from 30 seconds after the mutation.
 - **A listener's `attempts` decide its tries** (default 1). Out of them, the row is `failed`. With tries left, a failure keeps the row with the error and a backoff (`e^attempt` seconds: 3, 7, 20, 55…), and `registry.jobs.sweep()` runs it when it's due. See [Jobs](/docs/concepts/jobs#attempts-and-delay).
 - **A rule saying no is `failed` at once:** a domain error other than `conflict`, or a payload that no longer matches its schema. Retrying can't help.
-- **A crash is a lease running out.** A runner owns a row for `lease` seconds (default 300) and extends that while it works, for up to 15 minutes, as Laravel Cloud does on SQS. When it stops extending, `registry.jobs.sweep()` takes it over. Each claim gets its own `receipt`, and only that one can finish the job, so a slow runner can't undo a newer one, after a `retry(id)` either. A last try that never finished is `failed` without running again, like Laravel's worker. A listener that runs past the 15 minutes counts as crashed: give `lease` a longer time for one. An extension needs a connection, so with a pool of one it waits for a running mutation: a mutation longer than about two thirds of `lease` can lose it.
+- **A crash is a lease running out.** A runner owns a row for `lease` seconds (default 300) and extends that while it works, for up to 15 minutes, as Laravel Cloud does on SQS. When it stops extending, `registry.jobs.sweep()` takes it over. Each claim gets its own `receipt` and `claimed_at` (empty while the row waits, first or after a backoff, so a query can tell running from waiting), and only that receipt can finish the job, so a slow runner can't undo a newer one, after a `retry(id)` either. A last try that never finished is `failed` without running again, like Laravel's worker. A listener that runs past the 15 minutes counts as crashed: give `lease` a longer time for one. An extension needs a connection, so with a pool of one it waits for a running mutation: a mutation longer than about two thirds of `lease` can lose it.
 - **On Workers, a job that runs right after the request has 30 seconds:** that's what `waitUntil` gets after the response. Longer than that, it's killed: `failed` with one attempt, run again by the sweep with more. Give a long listener `delay: 1`, so the Cron Trigger's sweep runs it (15 minutes), or run it through a queue.
 - **`delay`ed jobs wait as rows** until they're due, and a sweep runs them. Sweep at least as often as your shortest delay should be honoured.
 - **A job whose listener this process doesn't have** (renamed, removed, not deployed yet) uses its attempts, like a missing class in Laravel, then fails with that reason in `last_error`. `registry.jobs.retry(id)` runs it once the code is back.
-- **Failed rows are yours to query** with Drizzle (`status = 'failed'`, `failed_at`, and `last_error` with the stack), and `registry.jobs.retry(id)` puts one back in line. It only touches failed rows (a pending one belongs to its runner) and returns `false` when there's none with that id.
+- **Failed rows are listed** by `registry.jobs.failed({ source, scope })`, newest first, and are yours to query with Drizzle too (`status = 'failed'`, `failed_at`, and `last_error` with the stack). `registry.jobs.retry(id)` puts one back in line and `registry.jobs.forget(id)` deletes it. Both only touch failed rows (a pending one belongs to its runner) and return `false` when there's none with that id. See [Failed jobs](/docs/concepts/jobs#failed-jobs-and-running-a-cron-now).
 - **Same database as `database`:** it writes in your mutation's transaction, so `createRegistry` throws if it's given another one. A queue in another database (another Postgres, Redis) goes behind an [outbox](#outbox).
 - **One registry per jobs table.** A sweep takes any due row, so a second registry with other modules on the same table spends the first's attempts and fails its jobs as "isn't a registered listener". Different logic on the same data is modules in one registry, told apart by scope and policies. The same registry built again (per request, on several servers) is fine.
 - **A discarded job** (`jobs.scope.load` returned `null`) is deleted, and `sweep` counts it as `discarded`. See [Jobs](/docs/concepts/jobs#who-a-job-runs-as).
@@ -92,7 +92,7 @@ export default {
 
 ## Outbox
 
-`outbox(database, queue)` puts that table in front of another queue. The row is kept only until the queue has the job, then the queue runs it:
+`outbox(queue)` puts that table in front of another queue. The row is kept only until the queue has the job, then the queue runs it:
 
 ```ts
 import { drizzleAdapter, outbox } from "logic-sdk/drizzle/pg";
@@ -100,7 +100,7 @@ import { cloudflareQueue } from "logic-sdk/cloudflare";
 
 const database = drizzleAdapter(db);
 // in createRegistry
-jobs: { adapter: outbox(database, cloudflareQueue(env.JOBS)), scope: { store, load } },
+jobs: { adapter: outbox(cloudflareQueue(env.JOBS)), scope: { store, load } },
 ```
 
 - **Same table, same sweep:** re-export `jobsTable` and trigger `registry.jobs.sweep()`, as above. The sweep sends what a crash or a failed send left behind.

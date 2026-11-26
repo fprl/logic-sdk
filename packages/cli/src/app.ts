@@ -34,9 +34,15 @@ function guarded<F extends object, A extends unknown[]>(func: (this: Context, fl
 const policy = (f: { authorize: string | null }) => f.authorize ?? dim("none");
 /** "tasks.assign (scope: actor)": the run, and the scope keys it changes on purpose. */
 const runLabel = (e: { to: string; scope?: string[] }) => (e.scope ? `${e.to} (scope: ${e.scope.join(", ")})` : e.to);
-const scopeChanges = (runs: { to: string; scope?: string[] }[]) => runs.flatMap((e) => (e.scope ? [{ run: e.to, keys: e.scope }] : []));
-const plainRuns = <T extends FnInfo | ListenerInfo | CronInfo>(x: T) => ({ ...x, runs: x.runs.map((e) => e.to), scopeChanges: scopeChanges(x.runs) });
-const plainFn = (f: FnInfo) => ({ ...plainRuns(f), emits: f.emits.map((e) => e.to), schedules: f.schedules.map((e) => e.to) });
+const plainRuns = (runs: { to: string; scope?: string[] }[]) => ({
+  runs: runs.map((e) => e.to),
+  scopeChanges: runs.flatMap((e) => (e.scope ? [{ run: e.to, keys: e.scope }] : [])),
+});
+const plainFn = (f: FnInfo) => ({ ...f, ...plainRuns(f.runs), emits: f.emits.map((e) => e.to), schedules: f.schedules.map((e) => e.to) });
+/** A listener or cron as `show --json` prints it: with its `kind`, like a function. */
+const plainJob = (x: ListenerInfo | CronInfo) => ({ ...x, ...plainRuns(x.runs) });
+/** The listeners an event triggers, by id. */
+const listenersOf = (p: Project, eventId: string) => p.listeners.filter((l) => l.event === eventId).map((l) => l.id);
 
 // ── list ─────────────────────────────────────────────────────────────────────
 const list = buildCommand({
@@ -52,8 +58,8 @@ const list = buildCommand({
     const p = await loadProject(this.cwd);
     const rows = [
       ...p.functions.map((f) => plainFn(f)),
-      ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: "listener" as const, authorize: null, description: l.description ?? `on ${l.event}`, event: l.event })),
-      ...p.crons.map((c) => ({ ...c, kind: "cron" as const, authorize: null, description: [`${c.schedule} ${c.timezone}`, c.description].filter(Boolean).join(" · ") })),
+      ...p.listeners.map((l) => ({ id: l.id, module: l.module, kind: l.kind, authorize: null, description: l.description ?? `on ${l.event}`, event: l.event })),
+      ...p.crons.map((c) => ({ ...c, authorize: null, description: [`${c.schedule} ${c.timezone}`, c.description].filter(Boolean).join(" · ") })),
     ].filter(
       (r) => (!flags.module || r.module === flags.module) && (!flags.kind || r.kind === flags.kind),
     );
@@ -82,11 +88,10 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
     const event = p.events.find((e) => e.id === name);
     if (!fn && !listener && !cron && !event) throw unknownName(p, name);
 
-    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? plainRuns(listener) : cron ? plainRuns(cron) : event);
+    if (flags.json) return print(this, fn ? plainFn(fn) : listener ? plainJob(listener) : cron ? plainJob(cron) : event);
 
     const lines: string[] = [];
     const row = (label: string, value: string) => lines.push(`${dim(label.padEnd(12))}${value}`);
-    const listenersOf = (eventId: string) => p.events.find((e) => e.id === eventId)?.listeners ?? [];
 
     if (fn) {
       lines.push(`${bold(fn.id)}  ${kind(fn.kind)}${fn.private ? `  ${dim("private: only its module's own code runs it")}` : ""}`);
@@ -102,7 +107,7 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
       if (fn.checks.length) row("checks", fn.checks.join(", "));
       if (fn.config.length) row("config", fn.config[0] === "*" ? "all of it (passed on whole)" : fn.config.join(", "));
       if (fn.runs.length) row("runs", fn.runs.map(runLabel).join(", "));
-      for (const e of fn.emits) row("emits", `${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
+      for (const e of fn.emits) row("emits", `${e.to} ${dim("→")} ${listenersOf(p, e.to).join(", ") || dim("no listeners")}`);
       if (fn.schedules.length) row("schedules", fn.schedules.map((e) => e.to).join(", "));
       row("called by", fn.calledBy.join(", ") || dim("nothing in this app (an entry point)"));
       if (fn.meta) row("meta", JSON.stringify(fn.meta));
@@ -125,7 +130,12 @@ const show = buildCommand<{ json?: boolean }, [string], Context>({
 });
 
 // ── graph ────────────────────────────────────────────────────────────────────
-const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json" }, [], Context>({
+type GraphFormat = "text" | "mermaid" | "json";
+type GraphEdge = { from: string; to: string; type: "runs" | "triggers" | "emits" | "schedules" };
+/** What `--module` keeps: every edge touching the module, and whether an id is in it (everything without the flag). */
+type GraphView = { module?: string; touches: (id: string) => boolean; shown: GraphEdge[] };
+
+const graph = buildCommand<{ module?: string; format: GraphFormat }, [], Context>({
   docs: { brief: "Who runs and schedules whom, and who reacts to which event" },
   parameters: {
     flags: {
@@ -133,78 +143,91 @@ const graph = buildCommand<{ module?: string; format: "text" | "mermaid" | "json
       format: { kind: "enum", values: ["text", "mermaid", "json"], brief: "Output format", default: "text" },
     },
   },
-  func: guarded(async function (this: Context, flags: { module?: string; format: "text" | "mermaid" | "json" }) {
+  func: guarded(async function (this: Context, flags: { module?: string; format: GraphFormat }) {
     const p = await loadProject(this.cwd);
-    const edges = [
-      ...p.functions.flatMap((f) => f.runs.map((e) => ({ from: f.id, to: e.to, type: "runs" as const }))),
-      ...p.listeners.flatMap((l) => [
-        { from: l.event, to: l.id, type: "triggers" as const },
-        ...l.runs.map((e) => ({ from: l.id, to: e.to, type: "runs" as const })),
-      ]),
-      ...p.functions.flatMap((f) => f.emits.map((e) => ({ from: f.id, to: e.to, type: "emits" as const }))),
-      ...p.functions.flatMap((f) => f.schedules.map((e) => ({ from: f.id, to: e.to, type: "schedules" as const }))),
-      ...p.crons.flatMap((c) => c.runs.map((e) => ({ from: c.id, to: e.to, type: "runs" as const }))),
-    ];
     const touches = (id: string) => !flags.module || id.startsWith(flags.module + ".");
-    const shown = edges.filter((e) => touches(e.from) || touches(e.to));
-
-    if (flags.format === "json")
-      return print(this, {
-        nodes: [...p.functions.map((f) => ({ id: f.id, kind: f.kind, authorize: f.authorize })), ...p.listeners.map((l) => ({ id: l.id, kind: "listener" })), ...p.crons.map((c) => ({ id: c.id, kind: "cron", schedule: c.schedule, timezone: c.timezone })), ...p.events.map((e) => ({ id: e.id, kind: "event" }))].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
-        edges: shown,
-      });
-
-    if (flags.format === "mermaid") {
-      const id = (s: string) => s.replace(/[^\w]/g, "_");
-      const lines = ["flowchart LR"];
-      for (const m of p.modules.filter((m) => !flags.module || m === flags.module || shown.some((e) => e.from.startsWith(m + ".") || e.to.startsWith(m + ".")))) {
-        lines.push(`  subgraph ${m}`);
-        for (const f of p.functions.filter((f) => f.module === m)) lines.push(`    ${id(f.id)}["${f.name}"]`);
-        for (const l of p.listeners.filter((l) => l.module === m)) lines.push(`    ${id(l.id)}(["${l.id.split(".")[1]}"])`);
-        for (const c of p.crons.filter((c) => c.module === m)) lines.push(`    ${id(c.id)}{{"${c.name} · ${c.schedule}"}}`);
-        lines.push("  end");
-      }
-      for (const e of shown.filter((e) => e.type === "runs")) lines.push(`  ${id(e.from)} --> ${id(e.to)}`);
-      for (const e of shown.filter((e) => e.type === "schedules")) lines.push(`  ${id(e.from)} -->|schedules| ${id(e.to)}`);
-      for (const f of p.functions)
-        for (const ev of f.emits)
-          for (const l of p.listeners.filter((l) => l.event === ev.to))
-            if (touches(f.id) || touches(l.id)) lines.push(`  ${id(f.id)} -. ${ev.to} .-> ${id(l.id)}`);
-      return out(this, lines.join("\n"));
-    }
-
-    const listenersOf = (eventId: string) => p.listeners.filter((l) => l.event === eventId).map((l) => l.id);
-    const blocks: string[] = [];
-    for (const m of p.modules.filter((m) => !flags.module || m === flags.module)) {
-      const members: (FnInfo | ListenerInfo | CronInfo)[] = [
-        ...p.functions.filter((f) => f.module === m),
-        ...p.listeners.filter((l) => l.module === m),
-        ...p.crons.filter((c) => c.module === m),
-      ];
-      const kindOf = (f: FnInfo | ListenerInfo | CronInfo) => ("kind" in f ? f.kind : "schedule" in f ? "cron" : "listener");
-      const width = Math.max(...members.map((f) => f.id.length - m.length - 1));
-      const kindWidth = Math.max(...members.map((f) => kindOf(f).length));
-      const lines = [bold(m)];
-      members.forEach((f, i) => {
-        const last = i === members.length - 1;
-        const branch = dim(last ? "└─ " : "├─ ");
-        const rest = dim(last ? "   " : "│  ");
-        const k = kindOf(f);
-        const head = `${f.id.slice(m.length + 1).padEnd(width)}  ${kind(k)}${" ".repeat(kindWidth - k.length)}`;
-        const details: string[] = [];
-        if ("event" in f) details.push(`${dim("on")} ${f.event}`);
-        if ("schedule" in f) details.push(`${dim("at")} ${f.schedule} ${dim(f.timezone)}`);
-        if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
-        if ("emits" in f) for (const e of f.emits) details.push(`${dim("emits")} ${e.to} ${dim("→")} ${listenersOf(e.to).join(", ") || dim("no listeners")}`);
-        if ("schedules" in f && f.schedules.length) details.push(`${dim("schedules")} ${f.schedules.map((e) => e.to).join(", ")}`);
-        lines.push(`${branch}${head}${details.length ? "  " + details[0] : ""}`.trimEnd());
-        for (const d of details.slice(1)) lines.push(`${rest}${" ".repeat(width + kindWidth + 4)}${d}`);
-      });
-      blocks.push(lines.join("\n"));
-    }
-    out(this, blocks.join("\n\n"));
+    const view: GraphView = { module: flags.module, touches, shown: edgesOf(p).filter((e) => touches(e.from) || touches(e.to)) };
+    if (flags.format === "json") return print(this, graphJson(p, view));
+    out(this, flags.format === "mermaid" ? graphMermaid(p, view) : graphText(p, view));
   }),
 });
+
+function edgesOf(p: Project): GraphEdge[] {
+  return [
+    ...p.functions.flatMap((f) => f.runs.map((e) => ({ from: f.id, to: e.to, type: "runs" as const }))),
+    ...p.listeners.flatMap((l) => [
+      { from: l.event, to: l.id, type: "triggers" as const },
+      ...l.runs.map((e) => ({ from: l.id, to: e.to, type: "runs" as const })),
+    ]),
+    ...p.functions.flatMap((f) => f.emits.map((e) => ({ from: f.id, to: e.to, type: "emits" as const }))),
+    ...p.functions.flatMap((f) => f.schedules.map((e) => ({ from: f.id, to: e.to, type: "schedules" as const }))),
+    ...p.crons.flatMap((c) => c.runs.map((e) => ({ from: c.id, to: e.to, type: "runs" as const }))),
+  ];
+}
+
+function graphJson(p: Project, { touches, shown }: GraphView) {
+  return {
+    nodes: [
+      ...p.functions.map((f) => ({ id: f.id, kind: f.kind, authorize: f.authorize })),
+      ...p.listeners.map((l) => ({ id: l.id, kind: l.kind })),
+      ...p.crons.map((c) => ({ id: c.id, kind: c.kind, schedule: c.schedule, timezone: c.timezone })),
+      ...p.events.map((e) => ({ id: e.id, kind: "event" })),
+    ].filter((n) => touches(n.id) || shown.some((e) => e.from === n.id || e.to === n.id)),
+    edges: shown,
+  };
+}
+
+function graphMermaid(p: Project, { module, touches, shown }: GraphView): string {
+  const id = (s: string) => s.replace(/[^\w]/g, "_");
+  const lines = ["flowchart LR"];
+  for (const m of p.modules.filter((m) => !module || m === module || shown.some((e) => e.from.startsWith(m + ".") || e.to.startsWith(m + ".")))) {
+    lines.push(`  subgraph ${m}`);
+    for (const f of p.functions.filter((f) => f.module === m)) lines.push(`    ${id(f.id)}["${f.name}"]`);
+    for (const l of p.listeners.filter((l) => l.module === m)) lines.push(`    ${id(l.id)}(["${l.id.split(".")[1]}"])`);
+    for (const c of p.crons.filter((c) => c.module === m)) lines.push(`    ${id(c.id)}{{"${c.name} · ${c.schedule}"}}`);
+    lines.push("  end");
+  }
+  for (const e of shown.filter((e) => e.type === "runs")) lines.push(`  ${id(e.from)} --> ${id(e.to)}`);
+  for (const e of shown.filter((e) => e.type === "schedules")) lines.push(`  ${id(e.from)} -->|schedules| ${id(e.to)}`);
+  for (const f of p.functions)
+    for (const ev of f.emits)
+      for (const l of p.listeners.filter((l) => l.event === ev.to))
+        if (touches(f.id) || touches(l.id)) lines.push(`  ${id(f.id)} -. ${ev.to} .-> ${id(l.id)}`);
+  return lines.join("\n");
+}
+
+/** Each module as a tree: its functions, listeners and crons, with what each one does. */
+function graphText(p: Project, { module }: GraphView): string {
+  const blocks: string[] = [];
+  for (const m of p.modules.filter((m) => !module || m === module)) {
+    const members: (FnInfo | ListenerInfo | CronInfo)[] = [
+      ...p.functions.filter((f) => f.module === m),
+      ...p.listeners.filter((l) => l.module === m),
+      ...p.crons.filter((c) => c.module === m),
+    ];
+    const width = Math.max(...members.map((f) => f.id.length - m.length - 1));
+    const kindWidth = Math.max(...members.map((f) => f.kind.length));
+    const lines = [bold(m)];
+    members.forEach((f, i) => {
+      const last = i === members.length - 1;
+      const branch = dim(last ? "└─ " : "├─ ");
+      const rest = dim(last ? "   " : "│  ");
+      const head = `${f.id.slice(m.length + 1).padEnd(width)}  ${kind(f.kind)}${" ".repeat(kindWidth - f.kind.length)}`;
+      const details: string[] = [];
+      if (f.kind === "listener") details.push(`${dim("on")} ${f.event}`);
+      if (f.kind === "cron") details.push(`${dim("at")} ${f.schedule} ${dim(f.timezone)}`);
+      if (f.runs.length) details.push(`${dim("runs")} ${f.runs.map(runLabel).join(", ")}`);
+      if (f.kind !== "listener" && f.kind !== "cron") {
+        for (const e of f.emits) details.push(`${dim("emits")} ${e.to} ${dim("→")} ${listenersOf(p, e.to).join(", ") || dim("no listeners")}`);
+        if (f.schedules.length) details.push(`${dim("schedules")} ${f.schedules.map((e) => e.to).join(", ")}`);
+      }
+      lines.push(`${branch}${head}${details.length ? "  " + details[0] : ""}`.trimEnd());
+      for (const d of details.slice(1)) lines.push(`${rest}${" ".repeat(width + kindWidth + 4)}${d}`);
+    });
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.join("\n\n");
+}
 
 function unknownName(p: Project, name: string) {
   const names = [...p.functions.map((f) => f.id), ...p.listeners.map((l) => l.id), ...p.crons.map((c) => c.id), ...p.events.map((e) => e.id)];

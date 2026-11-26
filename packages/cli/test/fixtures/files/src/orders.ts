@@ -16,8 +16,8 @@ export const count = query({
 export const place = mutation({
   input: z.object({ sku: z.string() }),
   async handler({ run, emit }, { sku }) {
-    emit(placed, { sku });
-    return run(stock.reserve, { sku });
+    const queued = emit(placed, { sku }); // what it returns is still read as an emit
+    return run(stock.reserve, { sku: queued.payload.sku });
   },
 });
 

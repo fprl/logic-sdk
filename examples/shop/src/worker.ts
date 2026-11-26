@@ -13,7 +13,7 @@ const shopFor = (env: Env, ctx: Pick<ExecutionContext, "waitUntil">) => {
   return createShop({
     database,
     settings: settingsFrom(env),
-    jobs: outbox(database, cloudflareQueue(env.JOBS)),
+    jobs: outbox(cloudflareQueue(env.JOBS)),
     waitUntil: (promise) => ctx.waitUntil(promise),
   });
 };

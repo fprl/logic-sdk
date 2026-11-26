@@ -15,11 +15,11 @@ export const createShop = (options: {
 }) =>
   createRegistry({
     modules: { catalog, orders },
-    database: options.database,
+    database: { adapter: options.database },
     services: { mailer: options.mailer ?? consoleMailer },
     config: options.settings,
     jobs: {
-      adapter: options.jobs ?? databaseQueue(options.database),
+      adapter: options.jobs ?? databaseQueue(),
       // demo auth has no users table. In your app: `store` the ids, `load` the user with today's role
       scope: { load: (saved) => saved },
     },

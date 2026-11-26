@@ -12,7 +12,7 @@ import * as tasks from "./tasks";
 export const makeRegistry = (db: Db, services: Services, options: { waitUntil?: (p: Promise<unknown>) => void } = {}) =>
   createRegistry({
     modules: { properties, availability, pricing, enquiries, bookings, tasks },
-    database: drizzleAdapter(db),
+    database: { adapter: drizzleAdapter(db) },
     services,
     ...options,
   });
