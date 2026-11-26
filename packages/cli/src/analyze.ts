@@ -185,6 +185,19 @@ export function analyze(projectRoot: string, registryPath: string): Source {
   // (`packages/logic/src/…`), and a real dependency stays under node_modules, which appFile skips.
   const root = realpathSync(projectRoot);
   const registryFile = realpathSync(registryPath);
+  const reader = createReader(root);
+  const modules = registryModules(reader, root, registryFile);
+  const graph = moduleGraph(reader);
+  const { prepared, privateIds, unregistered } = collectDefinitions(modules, graph);
+  const { fns, privates } = followHandlers(prepared, privateIds);
+  const reached = new Set(prepared.flatMap((m) => [...m.files.keys()]));
+  return { modules, fns, privates, unregistered: [...unregistered, ...unreachedDefinitions(registryFile, modules, reached, reader.read, graph)] };
+}
+
+// ── Reading files ────────────────────────────────────────────────────────────
+
+/** Resolves an import the way the app's tooling does, and parses each file once. */
+function createReader(root: string) {
   // tsconfig `paths` (found from each file, like tsc) and package.json `imports` (#alias) resolve like any import.
   const options: NapiResolveOptions = {
     extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs"],
@@ -197,35 +210,45 @@ export function analyze(projectRoot: string, registryPath: string): Source {
   const resolve = (fromFile: string, spec: string) =>
     withTsconfig.resolveFileSync(fromFile, spec).path ?? plain.resolveFileSync(fromFile, spec).path;
 
-  const parsed = new Map<string, ReturnType<typeof parse>>();
-  const read = (file: string) => {
+  const parsed = new Map<string, Parsed>();
+  const read = (file: string): Parsed => {
     let r = parsed.get(file);
-    if (!r) parsed.set(file, (r = parse(file)));
+    if (!r) parsed.set(file, (r = parseFile(root, file)));
     return r;
   };
-  const parse = (file: string) => {
-    const text = readFileSync(file, "utf8");
-    const result = parseSync(file, text);
-    const lineStarts = [0];
-    for (let i = 0; i < text.length; i++) if (text[i] === "\n") lineStarts.push(i + 1);
-    const loc = (offset: number): Loc => {
-      let line = lineStarts.findIndex((start) => start > offset);
-      if (line === -1) line = lineStarts.length;
-      return { file: relative(root, file), line, column: offset - lineStarts[line - 1]! + 1 };
-    };
-    /** The `/** … *\/` block right above `start` (only whitespace between): its first paragraph, on one line. */
-    const docAt = (start: number) => {
-      const c = result.comments.findLast((c) => c.end <= start);
-      if (!c || c.type !== "Block" || !c.value.startsWith("*") || text.slice(c.end, start).trim()) return undefined;
-      const lines = c.value.slice(1).split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trim());
-      const body = lines.slice(lines.findIndex(Boolean)); // drop leading blank lines
-      const end = body.findIndex((l) => l === "" || l.startsWith("@")); // a blank line or a tag ends the paragraph
-      return body.slice(0, end === -1 ? undefined : end).join(" ") || undefined;
-    };
-    return { file, program: result.program as unknown as Node, loc, docAt };
-  };
+  return { resolve, read };
+}
+type Reader = ReturnType<typeof createReader>;
+type Read = Reader["read"];
+type Parsed = ReturnType<typeof parseFile>;
 
-  // registry.ts: `import * as bookings from "./bookings"` + `modules: { bookings, ... }`
+/** A file's AST, with where an offset is (relative to the project root) and the JSDoc above it. */
+function parseFile(root: string, file: string) {
+  const text = readFileSync(file, "utf8");
+  const result = parseSync(file, text);
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === "\n") lineStarts.push(i + 1);
+  const loc = (offset: number): Loc => {
+    let line = lineStarts.findIndex((start) => start > offset);
+    if (line === -1) line = lineStarts.length;
+    return { file: relative(root, file), line, column: offset - lineStarts[line - 1]! + 1 };
+  };
+  /** The `/** … *\/` block right above `start` (only whitespace between): its first paragraph, on one line. */
+  const docAt = (start: number) => {
+    const c = result.comments.findLast((c) => c.end <= start);
+    if (!c || c.type !== "Block" || !c.value.startsWith("*") || text.slice(c.end, start).trim()) return undefined;
+    const lines = c.value.slice(1).split("\n").map((l) => l.replace(/^\s*\*?\s?/, "").trim());
+    const body = lines.slice(lines.findIndex(Boolean)); // drop leading blank lines
+    const end = body.findIndex((l) => l === "" || l.startsWith("@")); // a blank line or a tag ends the paragraph
+    return body.slice(0, end === -1 ? undefined : end).join(" ") || undefined;
+  };
+  return { file, program: result.program as unknown as Node, loc, docAt };
+}
+
+// ── The registry ─────────────────────────────────────────────────────────────
+
+/** registry.ts: `import * as bookings from "./bookings"` + `modules: { bookings, ... }`. */
+function registryModules({ read, resolve }: Reader, root: string, registryFile: string): Source["modules"] {
   const reg = read(registryFile);
   const namespaces: Record<string, string> = {};
   for (const s of reg.program.body)
@@ -245,12 +268,19 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     throw new ParseError(
       `Couldn't find the modules in ${relative(root, registryFile)}. Expected createRegistry({ modules: { bookings, ... } }) with each module imported as \`import * as bookings from "./bookings"\`.`,
     );
+  return modules;
+}
 
-  // A module is what its entry exports, followed through re-exports and imports to where each name is declared,
-  // the way the registry sees it. So any layout works: one file, a folder, `orders.ts` beside `orders/`, renames.
-  /** Where an export is declared: the file, and its name there. */
-  type Decl = { file: string; local: string };
-  const declKey = (d: Decl) => `${d.file}#${d.local}`;
+// ── Exports ──────────────────────────────────────────────────────────────────
+// A module is what its entry exports, followed through re-exports and imports to where each name is declared,
+// the way the registry sees it. So any layout works: one file, a folder, `orders.ts` beside `orders/`, renames.
+
+/** Where an export is declared: the file, and its name there. */
+type Decl = { file: string; local: string };
+const declKey = (d: Decl) => `${d.file}#${d.local}`;
+
+/** The app's imports and exports, traced to declarations, and which definer made a call. */
+function moduleGraph({ read, resolve }: Reader) {
   /** An import that points into the app (not a dependency or a .d.ts), as a file we can parse. */
   const appFile = (fromFile: string, spec: string) => {
     const f = resolve(fromFile, spec);
@@ -304,26 +334,58 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     }
     return out;
   };
+  /** The kind of a call's definer, when it's one from `init()`. */
+  const kindOfCall = (path: string, call: Node) => (call.callee.type === "Identifier" ? definerKind(read, declOf(path, call.callee.name)) : undefined);
+  return { read, importsOf, declOf, exportsOf, kindOfCall };
+}
+type ModuleGraph = ReturnType<typeof moduleGraph>;
 
-  /** The kind of the definer `decl` names: the key it was destructured as from `init()` of "logic-sdk", so aliases work. */
-  const definerKind = (decl: Decl | undefined): DefinerKind | undefined => {
-    if (!decl) return undefined;
-    const { program } = read(decl.file);
-    const init = program.body
-      .filter((s: Node) => s.type === "ImportDeclaration" && s.source.value === "logic-sdk")
-      .flatMap((s: Node) => s.specifiers)
-      .find((sp: Node) => sp.type === "ImportSpecifier" && idName(sp.imported) === "init")?.local.name;
-    if (!init) return undefined;
-    for (const { d } of topConsts(program)) {
-      const call = unwrap(d.init);
-      if (d.id?.type !== "ObjectPattern" || call?.type !== "CallExpression" || call.callee.type !== "Identifier" || call.callee.name !== init) continue;
-      const key = d.id.properties.find((p: Node) => p.value?.type === "Identifier" && p.value.name === decl.local)?.key;
-      const kind = key && KINDS.find((k) => k === idName(key));
-      if (kind) return kind;
-    }
-    return undefined;
-  };
+/** The kind of the definer `decl` names: the key it was destructured as from `init()` of "logic-sdk", so aliases work. */
+function definerKind(read: Read, decl: Decl | undefined): DefinerKind | undefined {
+  if (!decl) return undefined;
+  const { program } = read(decl.file);
+  const init = program.body
+    .filter((s: Node) => s.type === "ImportDeclaration" && s.source.value === "logic-sdk")
+    .flatMap((s: Node) => s.specifiers)
+    .find((sp: Node) => sp.type === "ImportSpecifier" && idName(sp.imported) === "init")?.local.name;
+  if (!init) return undefined;
+  for (const { d } of topConsts(program)) {
+    const call = unwrap(d.init);
+    if (d.id?.type !== "ObjectPattern" || call?.type !== "CallExpression" || call.callee.type !== "Identifier" || call.callee.name !== init) continue;
+    const key = d.id.properties.find((p: Node) => p.value?.type === "Identifier" && p.value.name === decl.local)?.key;
+    const kind = key && KINDS.find((k) => k === idName(key));
+    if (kind) return kind;
+  }
+  return undefined;
+}
 
+// ── Definitions ──────────────────────────────────────────────────────────────
+
+/** A definer call's options: `{ input, authorize, handler, … }`. */
+const propsOf = (call: Node): Node[] => (call.arguments[0]?.type === "ObjectExpression" ? call.arguments[0].properties : []);
+/** Each top-level `const x = …(…)` in a file. */
+const definitionsIn = (program: Node): { statement: Node; d: Node; call: Node }[] =>
+  topConsts(program).flatMap(({ statement, d }) => {
+    const call = unwrap(d.init);
+    return d.id?.type === "Identifier" && call?.type === "CallExpression" ? [{ statement, d, call }] : [];
+  });
+
+type File = Parsed & { nameOf: (arg: Node | undefined) => string };
+type Found = Pick<SourceFn, "runs" | "emits" | "schedules" | "checks" | "config">;
+/** A `const x = definer({…})` in a module's files: exported from its entry under `names`, or private. */
+type Def = { file: File; statement: Node; d: Node; call: Node; names: string[]; private?: FnKind };
+/** A module's files, and the definitions in them its handlers get followed from. */
+type ModuleDefs = { mod: string; files: Map<string, File>; defs: Def[] };
+/** A private function → its `id`, or undefined. Its name depends on the module that runs it, as at runtime. */
+type PrivateIds = Map<string, string | undefined>;
+const privateName = (privateIds: PrivateIds, mod: string, decl: Decl) => `${mod}.${privateIds.get(declKey(decl)) ?? `(private) ${decl.local}`}`;
+
+/**
+ * Every module's files and definitions, before any handler is followed, so a run of any private function resolves.
+ * Also what a module's files define that its index doesn't export, besides functions: it never runs.
+ */
+function collectDefinitions(modules: Source["modules"], graph: ModuleGraph) {
+  const { read, importsOf, declOf, exportsOf, kindOfCall } = graph;
   const publicName = new Map<string, string>(); // a declaration → "<module>.<export>", the name the registry gives it
   const owner = new Map<string, string>(); // a file → the module it belongs to: its entry, or where its exports are declared
   for (const [mod, { entry }] of Object.entries(modules)) owner.set(entry, mod);
@@ -334,32 +396,10 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     }
   }
 
-  /** A definer call's options: `{ input, authorize, handler, … }`. */
-  const propsOf = (call: Node): Node[] => (call.arguments[0]?.type === "ObjectExpression" ? call.arguments[0].properties : []);
-  /** Each top-level `const x = …(…)` in a file. */
-  const definitionsIn = (path: string): { statement: Node; d: Node; call: Node }[] =>
-    topConsts(read(path).program).flatMap(({ statement, d }) => {
-      const call = unwrap(d.init);
-      return d.id?.type === "Identifier" && call?.type === "CallExpression" ? [{ statement, d, call }] : [];
-    });
-  /** The kind of a call's definer, when it's one from `init()`. */
-  const kindOfCall = (path: string, call: Node) => (call.callee.type === "Identifier" ? definerKind(declOf(path, call.callee.name)) : undefined);
-
-  const fns = new Map<string, SourceFn>();
-  const privates: PrivateFn[] = [];
+  const privateIds: PrivateIds = new Map();
   const unregistered: Unregistered[] = [];
-  /** A private function → its `id`, or undefined. Its name depends on the module that runs it, as at runtime. */
-  const privateIds = new Map<string, string | undefined>();
-  const privateName = (mod: string, decl: Decl) => `${mod}.${privateIds.get(declKey(decl)) ?? `(private) ${decl.local}`}`;
   const listed = new Set<string>(); // unregistered declarations already listed: a file two modules import is in both
-
-  type File = ReturnType<typeof read> & { nameOf: (arg: Node | undefined) => string };
-  type Found = Pick<SourceFn, "runs" | "emits" | "schedules" | "checks" | "config">;
-  /** A `const x = definer({…})` in a module's files: exported from its entry under `names`, or private. */
-  type Def = { file: File; statement: Node; d: Node; call: Node; names: string[]; private?: FnKind };
-
-  // First every module's files and definitions, so a run of any private function resolves while following handlers.
-  const prepared = Object.entries(modules).map(([mod, { entry }]) => {
+  const prepared = Object.entries(modules).map(([mod, { entry }]): ModuleDefs => {
     // Its files: where its exports are declared, plus what those import that no other module owns (helpers, shared code).
     const exported = new Map<string, string[]>(); // a declaration → its export names
     for (const [name, d] of exportsOf(entry)) exported.set(declKey(d), [...(exported.get(declKey(d)) ?? []), name]);
@@ -368,7 +408,7 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       for (const { from } of importsOf(path).values()) if ((owner.get(from) ?? mod) === mod) paths.add(from);
     /** The function a declaration is, as this module names it: `stock.hold`, `files.(private) record`, or "(dynamic)". */
     const named = (decl: Decl | undefined) =>
-      !decl ? "(dynamic)" : (publicName.get(declKey(decl)) ?? (privateIds.has(declKey(decl)) ? privateName(mod, decl) : "(dynamic)"));
+      !decl ? "(dynamic)" : (publicName.get(declKey(decl)) ?? (privateIds.has(declKey(decl)) ? privateName(privateIds, mod, decl) : "(dynamic)"));
     const files = new Map<string, File>();
     const defs: Def[] = [];
     for (const path of paths) {
@@ -383,7 +423,7 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       const file = { ...read(path), nameOf };
       files.set(path, file);
 
-      for (const { statement, d, call } of definitionsIn(path)) {
+      for (const { statement, d, call } of definitionsIn(file.program)) {
         const decl = { file: path, local: d.id.name };
         const names = exported.get(declKey(decl)) ?? [];
         // exported: matched to the registry by name, whatever made it. The rest of this module's files: what a definer made
@@ -405,78 +445,17 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     }
     return { mod, files, defs };
   });
+  return { prepared, privateIds, unregistered };
+}
 
+// ── Following handlers ───────────────────────────────────────────────────────
+
+/** What each definition's handler runs, emits and schedules, and the checks and config it uses, through its helpers. */
+function followHandlers(prepared: ModuleDefs[], privateIds: PrivateIds) {
+  const fns = new Map<string, SourceFn>();
+  const privates: PrivateFn[] = [];
   for (const { mod, files, defs } of prepared) {
-    // Functions declared at the top level of this module's files: helpers like findBooking(ctx, id),
-    // followed (transitively) for the runs, emits, schedules and record checks they make.
-    const helpers = new Map<string, { node: Node; file: File }[]>();
-    for (const file of files.values())
-      for (const top of file.program.body) {
-        const s = top.type === "ExportNamedDeclaration" || top.type === "ExportDefaultDeclaration" ? top.declaration : top;
-        const add = (name: string, node: Node) => helpers.set(name, [...(helpers.get(name) ?? []), { node, file }]);
-        if (s?.type === "FunctionDeclaration" && s.id) add(s.id.name, s);
-        if (s?.type === "VariableDeclaration")
-          for (const d of s.declarations) {
-            const fn = unwrap(d.init);
-            if (d.id?.type === "Identifier" && isFunction(fn)) add(d.id.name, fn);
-          }
-      }
-    /**
-     * `{ scope: { ...ctx.scope, actor: system } }` in run options → the keys it changes; "(dynamic)" when they can't
-     * be read. Spreading the caller's own scope (`...ctx.scope`, `...scope`) changes nothing, so it isn't listed.
-     */
-    const ownScope = (n: Node | undefined) =>
-      (n?.type === "Identifier" && n.name === "scope") || (n?.type === "MemberExpression" && n.property?.name === "scope");
-    const scopeOf = (options: Node | undefined): { scope?: string[] } => {
-      const o = unwrap(options);
-      if (!o) return {};
-      if (o.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
-      const prop = o.properties.find((p: Node) => p.key?.name === "scope");
-      if (!prop) return {};
-      const value = unwrap(prop.value);
-      if (value?.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
-      return {
-        scope: value.properties
-          .filter((p: Node) => !(p.type === "SpreadElement" && ownScope(unwrap(p.argument))))
-          .map((p: Node) => p.key?.name ?? p.key?.value ?? "(dynamic)"),
-      };
-    };
-    const readConfig = (found: Found, key: string | undefined) => {
-      if (key === undefined) return;
-      const k = key || "*"; // "*": all of it escaped (passed on whole), so any key may be read
-      if (!found.config.includes(k)) found.config.push(k);
-    };
-    const follow = (node: unknown, file: File, ctx: ReturnType<typeof ctxIn>, found: Found, seen: Set<Node>) => {
-      for (const k of ctx.configKeys) readConfig(found, k);
-      const callees = new Set<Node>();
-      walk(node, (n) => {
-        if (n.type === "MemberExpression") {
-          const key = ctx.configPath(n, callees.has(n));
-          if (key) readConfig(found, key); // "" here is `ctx.config` itself, the start of a longer path
-        }
-        if (n.type !== "CallExpression") return;
-        if (n.callee.type === "MemberExpression") callees.add(n.callee); // walked after its call: see the method
-        for (const arg of n.arguments) {
-          const key = ctx.configPath(arg);
-          // handed on: a destructured setting, or all of config. A longer path is read as a member expression
-          if (arg.type === "Identifier" || key === "") readConfig(found, key);
-        }
-        const name = calleeName(n);
-        const kind = ctx.kindOf(n);
-        if (kind === "run") found.runs.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start), ...scopeOf(n.arguments[2]) });
-        else if (kind === "emit") found.emits.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
-        else if (kind === "schedule") found.schedules.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
-        else if (name && CAN.test(name)) {
-          if (!found.checks.includes(name)) found.checks.push(name);
-        } else if (name && n.callee.type === "Identifier")
-          for (const h of helpers.get(name) ?? []) {
-            if (seen.has(h.node)) continue;
-            seen.add(h.node);
-            follow(h.node.body, h.file, ctxIn([h.node], "any"), found, seen);
-          }
-      });
-    };
-
+    const helpers = helpersIn(files);
     for (const def of defs) {
       const { file, statement, d, call } = def;
       const found: Omit<SourceFn, "key"> = { at: file.loc(d.start), runs: [], emits: [], schedules: [], checks: [], config: [], doc: file.docAt(statement.start) };
@@ -491,14 +470,14 @@ export function analyze(projectRoot: string, registryPath: string): Source {
 
       // ctx is the first parameter: `handler(ctx, input)` in a function, `handler(ctx, payload)` in a listener
       const handlers = props.filter((p) => p.key?.name === "handler").map((p) => p.value).filter(isFunction);
-      follow(call.arguments, file, ctxIn(handlers, 0), found, new Set());
+      follow(helpers, call.arguments, file, ctxIn(handlers, 0), found, new Set());
       // keep the most specific keys: `orders.maxItems`, not also `orders`
       found.config = found.config.includes("*") ? ["*"] : found.config.filter((k) => !found.config.some((o) => o.startsWith(k + "."))).sort();
       for (const name of def.names) fns.set(`${mod}.${name}`, { ...found, key: `${mod}.${name}` });
       if (def.private)
         privates.push({
           ...found,
-          key: privateName(mod, { file: file.file, local: d.id.name }),
+          key: privateName(privateIds, mod, { file: file.file, local: d.id.name }),
           module: mod,
           name: d.id.name,
           kind: def.private,
@@ -507,11 +486,97 @@ export function analyze(projectRoot: string, registryPath: string): Source {
         });
     }
   }
+  return { fns, privates };
+}
 
-  // Files no module reaches, in the registry's folder and each module's: a forgotten `export * from "./listeners"`.
-  // Like Trigger.dev's `dirs`, without tests: what they define is never registered on purpose. A symlinked file is
-  // read where it really lives, and with a TypeScript registry, `.js` files are build output.
-  const reached = new Set(prepared.flatMap((m) => [...m.files.keys()]));
+type Helpers = Map<string, { node: Node; file: File }[]>;
+/**
+ * Functions declared at the top level of a module's files: helpers like findBooking(ctx, id),
+ * followed (transitively) for the runs, emits, schedules and record checks they make.
+ */
+function helpersIn(files: Map<string, File>): Helpers {
+  const helpers: Helpers = new Map();
+  for (const file of files.values())
+    for (const top of file.program.body) {
+      const s = top.type === "ExportNamedDeclaration" || top.type === "ExportDefaultDeclaration" ? top.declaration : top;
+      const add = (name: string, node: Node) => helpers.set(name, [...(helpers.get(name) ?? []), { node, file }]);
+      if (s?.type === "FunctionDeclaration" && s.id) add(s.id.name, s);
+      if (s?.type === "VariableDeclaration")
+        for (const d of s.declarations) {
+          const fn = unwrap(d.init);
+          if (d.id?.type === "Identifier" && isFunction(fn)) add(d.id.name, fn);
+        }
+    }
+  return helpers;
+}
+
+/**
+ * `{ scope: { ...ctx.scope, actor: system } }` in run options → the keys it changes; "(dynamic)" when they can't
+ * be read. Spreading the caller's own scope (`...ctx.scope`, `...scope`) changes nothing, so it isn't listed.
+ */
+const ownScope = (n: Node | undefined) =>
+  (n?.type === "Identifier" && n.name === "scope") || (n?.type === "MemberExpression" && n.property?.name === "scope");
+const scopeOf = (options: Node | undefined): { scope?: string[] } => {
+  const o = unwrap(options);
+  if (!o) return {};
+  if (o.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
+  const prop = o.properties.find((p: Node) => p.key?.name === "scope");
+  if (!prop) return {};
+  const value = unwrap(prop.value);
+  if (value?.type !== "ObjectExpression") return { scope: ["(dynamic)"] };
+  return {
+    scope: value.properties
+      .filter((p: Node) => !(p.type === "SpreadElement" && ownScope(unwrap(p.argument))))
+      .map((p: Node) => p.key?.name ?? p.key?.value ?? "(dynamic)"),
+  };
+};
+const readConfig = (found: Found, key: string | undefined) => {
+  if (key === undefined) return;
+  const k = key || "*"; // "*": all of it escaped (passed on whole), so any key may be read
+  if (!found.config.includes(k)) found.config.push(k);
+};
+
+/** Walks `node` for what ctx does, into `found`, and into each helper it calls (once: `seen`). */
+function follow(helpers: Helpers, node: unknown, file: File, ctx: ReturnType<typeof ctxIn>, found: Found, seen: Set<Node>): void {
+  for (const k of ctx.configKeys) readConfig(found, k);
+  const callees = new Set<Node>();
+  walk(node, (n) => {
+    if (n.type === "MemberExpression") {
+      const key = ctx.configPath(n, callees.has(n));
+      if (key) readConfig(found, key); // "" here is `ctx.config` itself, the start of a longer path
+    }
+    if (n.type !== "CallExpression") return;
+    if (n.callee.type === "MemberExpression") callees.add(n.callee); // walked after its call: see the method
+    for (const arg of n.arguments) {
+      const key = ctx.configPath(arg);
+      // handed on: a destructured setting, or all of config. A longer path is read as a member expression
+      if (arg.type === "Identifier" || key === "") readConfig(found, key);
+    }
+    const name = calleeName(n);
+    const kind = ctx.kindOf(n);
+    if (kind === "run") found.runs.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start), ...scopeOf(n.arguments[2]) });
+    else if (kind === "emit") found.emits.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
+    else if (kind === "schedule") found.schedules.push({ to: file.nameOf(n.arguments[0]), at: file.loc(n.start) });
+    else if (name && CAN.test(name)) {
+      if (!found.checks.includes(name)) found.checks.push(name);
+    } else if (name && n.callee.type === "Identifier")
+      for (const h of helpers.get(name) ?? []) {
+        if (seen.has(h.node)) continue;
+        seen.add(h.node);
+        follow(helpers, h.node.body, h.file, ctxIn([h.node], "any"), found, seen);
+      }
+  });
+}
+
+// ── Unreached files ──────────────────────────────────────────────────────────
+
+/**
+ * Definitions in files no module reaches, in the registry's folder and each module's: a forgotten
+ * `export * from "./listeners"`. Like Trigger.dev's `dirs`, without tests: what they define is never registered on
+ * purpose. A symlinked file is read where it really lives, and with a TypeScript registry, `.js` files are build output.
+ */
+function unreachedDefinitions(registryFile: string, modules: Source["modules"], reached: Set<string>, read: Read, { kindOfCall }: ModuleGraph): Unregistered[] {
+  const unregistered: Unregistered[] = [];
   const folderOf = (entry: string) => (/^index\.[^.]+$/.test(basename(entry)) ? dirname(entry) : entry.replace(/\.[^./]+$/, ""));
   // nearest first: a module nested in another's folder takes its own files
   const folders = Object.entries(modules)
@@ -526,7 +591,7 @@ export function analyze(projectRoot: string, registryPath: string): Source {
       if (e.isDirectory() && e.name !== "node_modules" && !e.name.startsWith(".")) scan(path);
       if (!e.isFile() || !SOURCE.test(e.name) || skipped.test(e.name) || reached.has(path)) continue;
       const file = read(path);
-      for (const { statement, d, call } of definitionsIn(path)) {
+      for (const { statement, d, call } of definitionsIn(file.program)) {
         const kind = kindOfCall(path, call);
         if (kind)
           unregistered.push({ module: folders.find((f) => path.startsWith(f.folder))?.mod ?? null, name: d.id.name, kind, at: file.loc(d.start), doc: file.docAt(statement.start) });
@@ -534,6 +599,5 @@ export function analyze(projectRoot: string, registryPath: string): Source {
     }
   };
   for (const dir of roots) scan(dir);
-
-  return { modules, fns, privates, unregistered };
+  return unregistered;
 }

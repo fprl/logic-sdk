@@ -1,0 +1,862 @@
+// The public types (re-exported from index.ts), the helper types the core shares, and the two symbols that brand
+// definitions and hide the registry's internals.
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+import type { DomainError } from "./errors.ts";
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Types
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+export type Schema<I = any, O = any> = StandardSchemaV1<I, O>;
+export type In<S> = S extends StandardSchemaV1<infer I, unknown> ? I : never;
+export type Out<S> = S extends StandardSchemaV1<unknown, infer O> ? O : never;
+
+/** What you declare once in `init<...>()`. */
+export interface Config {
+  /** Who and where: actor, account, locale... Must be JSON-serializable (it travels with events). */
+  scope: object;
+  /**
+   * Your database's type: `DrizzleDb<Db>`, or your own `ReadWrite<Reader, Tx>`. Queries get the reader, mutations the
+   * transaction. A plain type is what both get.
+   */
+  db?: unknown;
+  /** Side-effecting services (mailer, payments...). Only actions and listeners receive them. */
+  services?: object;
+  /**
+   * Your app's settings, read as `ctx.config` in every function: base URL, limits, switches. Plain data, read-only.
+   * Build it once from your env at the entry; clients built from secrets go in `services` instead.
+   */
+  config?: object;
+  /**
+   * The shape of `meta`: yours, plus what your adapters read (`AppMeta & AIMeta & PgBossMeta`). Yours goes on functions
+   * and listeners, each adapter's only where it reads it.
+   */
+  meta?: object;
+}
+export type ScopeOf<C extends Config> = C["scope"];
+declare const READ_WRITE: unique symbol;
+/** A database type with two sides: what queries get and what mutations get. `DrizzleDb<Db>` is one. Type only. */
+export interface ReadWrite<Reader, Tx> {
+  readonly [READ_WRITE]: { reader: Reader; tx: Tx };
+}
+/** Says what's missing from the setup, where `never` would say nothing. */
+interface SetupError<Message extends string> {
+  readonly setupError: Message;
+}
+type NoDb = SetupError<"Add db to the Config you pass to init">;
+/** What mutations get, and `database`'s transaction type. `never`: the app declared no database. */
+export type DbOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<any, infer Tx> ? Tx : D) : never;
+type ReaderOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<infer Reader, any> ? Reader : D) : NoDb;
+type TxOf<C extends Config> = C extends { db: unknown } ? DbOf<C> : NoDb;
+export type ServicesOf<C extends Config> = C extends { services: infer S } ? S : {};
+type MetaOf<C extends Config> = C extends { meta: infer M } ? M : never;
+declare const FOR_FUNCTIONS: unique symbol;
+declare const FOR_LISTENERS: unique symbol;
+/** An adapter's part of `meta`, read on queries, mutations and actions: `type AIMeta = ForFunctions<{ ai?: ... }>`. */
+export interface ForFunctions<M> {
+  readonly [FOR_FUNCTIONS]?: M;
+}
+/** An adapter's part of `meta`, read on listeners: `type PgBossMeta = ForListeners<{ pgBoss?: ... }>`. */
+export interface ForListeners<M> {
+  readonly [FOR_LISTENERS]?: M;
+}
+type AppPart<M> = { [P in keyof M as P extends symbol ? never : P]: M[P] };
+type AdapterPart<M, S extends symbol> = S extends keyof M ? NonNullable<M[S]> : {};
+/** `never` when nothing is left, or `{}` would take any object. */
+type NeverIfEmpty<M> = keyof M extends never ? never : M;
+/** A query, mutation or action's `meta`. */
+export type FunctionMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_FUNCTIONS>>
+  : never;
+/** A listener's `meta`. */
+export type ListenerMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_LISTENERS>>
+  : never;
+/** What `wrap` sees: it runs for both. */
+export type CallMetaOf<C extends Config, M = MetaOf<C>> = M extends unknown
+  ? NeverIfEmpty<AppPart<M> & AdapterPart<M, typeof FOR_FUNCTIONS> & AdapterPart<M, typeof FOR_LISTENERS>>
+  : never;
+/** Without a declared `config`, nothing may be passed or read: no silently ignored settings. */
+export type ConfigOf<C extends Config> = C extends { config: infer F } ? F : Record<string, never>;
+
+type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+/** Read-only all the way down: what `ctx.config` gives you. Primitives (branded ones too) stay as they are. */
+export type Frozen<T> = T extends Primitive
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly Frozen<U>[]
+    : { readonly [K in keyof T]: Frozen<T[K]> };
+/** Any part of `T`, at any depth: what a test may override in `config`. Arrays are replaced whole, like at runtime. */
+export type DeepPartial<T> = T extends Primitive | readonly unknown[] ? T : { [K in keyof T]?: DeepPartial<T[K]> };
+
+export type Kind = "query" | "mutation" | "action";
+
+declare const types: unique symbol;
+/** Brands every definer's result, so `createRegistry` finds them among a module's exports. */
+export const BRAND: unique symbol = Symbol.for("logic-sdk.brand");
+
+/** Which `init` defined it, as a phantom type: `createRegistry` refuses another init's (`any` when the type was erased, as in a bare `Fn`). */
+type FromInit<C extends Config> = { readonly [types]?: { init: (config: C) => void } };
+
+/** A query, mutation or action. Call it with `caller.run(fn, input)` or `ctx.run(fn, input)`. */
+export interface Fn<K extends Kind = Kind, I = unknown, O = unknown, A extends boolean = boolean, C extends Config = any, IS extends Schema | undefined = Schema | undefined> {
+  readonly [BRAND]: K;
+  readonly kind: K;
+  /**
+   * Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name.
+   * A private function (the index doesn't export it) is `notifications.(private)` without one.
+   */
+  readonly id?: string;
+  /** What callers pass, validated on every call, as you wrote it: `fn.input.pick({ name: true })` for a form. Undefined: the function takes nothing (`run(fn)`). */
+  readonly input: IS;
+  /** What callers get back, checked before it leaves. */
+  readonly output?: Schema;
+  /** Your own data about the function. Checked against `meta` in `init` where you set it, typed in `wrap`; loose here, for adapters. */
+  readonly meta?: Readonly<Record<string, unknown>>;
+  /** Who may call it (from `authorize`). Runs on every call, before validation. */
+  readonly authorize?: Policy<never>;
+  readonly handler: (ctx: never, input: never) => Promise<unknown>;
+  /** Phantom types, never set at runtime. `authorized`: it has an `authorize`, so adapters may publish it. */
+  readonly [types]?: { input: I; output: O; authorized: A; init: (config: C) => void };
+}
+/**
+ * A function that says who may call it (`authorize`), so an adapter may publish it: `toORPCProcedure(fn)`,
+ * `toAITool(caller, fn)`. Everyone is a decision too: `authorize: anyone`, with `const anyone = () => true`.
+ */
+export type PublishableFn<K extends Kind = Kind, I = unknown, O = unknown, C extends Config = any> = Fn<K, I, O, true, C>;
+/** The scope of the `init` that defined `F`: what a caller running it must be bound to. */
+export type ScopeOfFn<F> = F extends Fn<Kind, unknown, unknown, true, infer C> ? ScopeOf<C> : object;
+/** What callers pass to a function. */
+export type FnIn<F> = F extends Fn<Kind, infer I, unknown> ? I : never;
+/** What a function returns. */
+export type FnOut<F> = F extends Fn<Kind, unknown, infer O> ? O : never;
+
+/** `I`: what `emit` takes. `O`: what listeners receive (after the payload schema's transforms and defaults). */
+export interface EventDef<I = unknown, O = I> {
+  readonly [BRAND]: "event";
+  readonly kind: "event";
+  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  readonly id?: string;
+  /** The payload's schema, checked when emitted and again at delivery. */
+  readonly payload: Schema;
+  readonly [types]?: { input: I; payload: O };
+}
+
+/**
+ * What a jobs adapter stores and delivers. Fully JSON: `payload` is what was emitted (validated),
+ * and listeners get it parsed again by the event's payload schema at delivery.
+ */
+export interface Envelope {
+  id: string;
+  name: string;
+  payload: unknown;
+  scope: object;
+  occurredAt: string;
+  /** Hops in the chain: 1 for an event a caller's mutation emitted, +1 each time a listener's mutation emits (or a call it schedules to run now). */
+  depth: number;
+}
+
+/**
+ * One listener's share of one event: what a queue carries, one message each, so a failing listener retries alone.
+ * `id` (`<listener id>@<event id>`) is the key to dedupe on.
+ */
+export interface Delivery {
+  /** What kind of job this is. Stored with it, so jobs queued today still run when other kinds exist. */
+  kind: "delivery";
+  id: string;
+  /** The listener's id, `"<module>.<id or export>"`. */
+  listener: string;
+  envelope: Envelope;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
+  /** When it may run (ISO), for a listener with a `delay`. Absent: right away. */
+  runAt?: string;
+}
+
+/** One run of a cron: `id` is `<cron id>@<minute>` (`reports.weekly@20261123T0900Z`), so a tick runs once. */
+export interface CronJob {
+  kind: "cron";
+  id: string;
+  /** The cron's id, `"<module>.<id or export>"`. */
+  cron: string;
+  /** The minute it was due (ISO). */
+  scheduledAt: string;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
+  /** When it may run (ISO), like a delivery's. Absent for crons: they run when ticked. */
+  runAt?: string;
+}
+
+/** A function `ctx.schedule` asked to run later: `id` is `<function id>@<uuid>`. */
+export interface CallJob {
+  kind: "call";
+  id: string;
+  /** The function's id, `"<module>.<id or export>"`. */
+  fn: string;
+  input: unknown;
+  /** Who it runs as, as `jobs.scope.store` saved it (`load` rebuilds it when it runs). */
+  scope: object;
+  /** Tries in total, stamped when it's queued, like Laravel's `maxTries` and Oban's `max_attempts`: a deploy that changes them applies to jobs queued after it. */
+  attempts: number;
+  /**
+   * Hops in the chain, counted with events' (`maxEventDepth`): a call due now continues the chain that scheduled it, so a
+   * function that schedules itself with no delay stops like a listener loop. A delayed one starts a new chain (0).
+   */
+  depth: number;
+  /** `true`: a newer call to `fn` with the same input replaces this one while it waits (the function and its input are the identity). */
+  replace?: true;
+  /** When it may run (ISO). */
+  runAt?: string;
+}
+
+/**
+ * One unit of background work, what `registry.jobs` runs, sweeps and retries: a listener's share of an event, a cron's
+ * run, or a call `ctx.schedule` asked for.
+ */
+export type Job = Delivery | CronJob | CallJob;
+
+/** Work on a schedule, as `scope`: a handler, like a listener's, run when the clock says. Export it from a module. */
+export interface Cron<C extends Config = any> extends FromInit<C> {
+  readonly [BRAND]: "cron";
+  readonly kind: "cron";
+  readonly id?: string;
+  readonly schedule: string;
+  readonly timezone?: string;
+  readonly scope: object;
+  readonly attempts?: number;
+  readonly meta?: Readonly<Record<string, unknown>>;
+  readonly handler: (ctx: never) => Promise<unknown>;
+}
+
+/** The run a cron's handler is doing. No scope here: `ctx.scope` is the one it runs as. */
+export interface CronRun {
+  /** The cron's id: `tasks.wakeDue`. */
+  id: string;
+  /** The minute this run is for (ISO), even when it runs late or again: which day a digest covers. */
+  scheduledAt: string;
+  /** 1 on the first try. */
+  attempt: number;
+}
+
+/**
+ * What running a job resolved to. `failed`: out of attempts (code this process doesn't have uses them too), a rule said
+ * no (`invalid`, `unauthenticated`, `forbidden`, `not_found`, `rejected`), or the payload no longer matches its schema.
+ * It's over, so acknowledge it; it's been reported.
+ * `discarded`: `jobs.scope.load` returned null (who it ran as is gone). Acknowledge it too; it's been reported.
+ */
+export type JobOutcome = "done" | "failed" | "discarded";
+
+/**
+ * What `ctx.emit` queued: the `id`, `name` and `occurredAt` its listeners see as `ctx.event`. `payload` is a copy of what
+ * you passed; listeners get it parsed by the event's schema.
+ */
+export interface EmittedEvent<I = unknown> {
+  readonly id: string;
+  readonly name: string;
+  readonly payload: I;
+  /** ISO. */
+  readonly occurredAt: string;
+}
+
+/** The event a listener is handling. No scope here: `ctx.scope` is the one it runs as. */
+export interface ListenerEvent<O = unknown> {
+  id: string;
+  name: string;
+  payload: O;
+  occurredAt: string;
+  /** 1 on the first try. Queues count their redeliveries. */
+  attempt: number;
+}
+
+export interface Listener<O = unknown, C extends Config = any> extends FromInit<C> {
+  readonly [BRAND]: "listener";
+  readonly kind: "listener";
+  /** Stable id, local to the module: `id: "send"` in `notifications` is `notifications.send`. Defaults to the export name. */
+  readonly id?: string;
+  /** Lazy, so listeners can import other modules' barrels without import cycles. */
+  readonly event: () => EventDef<unknown, O>;
+  /** Tries in total, the first included. Default 1. */
+  readonly attempts?: number;
+  /** Seconds after the event before the first try. Default 0. */
+  readonly delay?: number;
+  /** Whether this event gets a job for this listener, from the parsed payload, at commit. Default: every event. */
+  readonly when?: (payload: O) => boolean;
+  readonly meta?: Readonly<Record<string, unknown>>;
+  readonly handler: (ctx: never, payload: O) => Promise<unknown>;
+}
+
+/** What a single call may change: who it runs as (part of the scope) and when to give up. Nothing else. */
+export interface RunOptions<S = object> {
+  /**
+   * The whole scope for this call and everything it runs, never merged: `{ scope: { ...ctx.scope, locale: "es" } }`
+   * to render in another language, `{ scope: { kind: "system", job: "reports.weekly" } }` to act as someone else on purpose. The
+   * callee's policy sees it. Whole, so it's one of your scope's variants: a patch could build one that isn't.
+   */
+  scope?: S;
+  /**
+   * Checked before this call starts. Inside, actions get it as `ctx.signal` to pass on (`fetch(url, { signal })`).
+   * Never checked between your steps, so a caller who gives up can't leave a workflow half done.
+   */
+  signal?: AbortSignal;
+}
+/** `run(fn, input, options?)`, or `run(fn)` for a function that takes no input. */
+export type RunArgs<F, S> = undefined extends FnIn<F>
+  ? [input?: FnIn<F>, options?: RunOptions<S>]
+  : [input: FnIn<F>, options?: RunOptions<S>];
+type Run<Allowed extends Kind, S> = <F extends Fn<Allowed>>(fn: F, ...args: RunArgs<F, S>) => Promise<FnOut<F>>;
+
+/**
+ * Expected failures, namespaced to the module you're in: inside `bookings`, `ctx.errors.reject("not_pending")` has
+ * code `"bookings.not_pending"`. Throw what they return. Codes are plain strings on purpose (see the errors docs).
+ */
+export interface Errors {
+  /** A business rule said no, and trying again won't help. `throw ctx.errors.reject("not_pending", { status })` */
+  reject(code: string, details?: unknown): DomainError;
+  /** Someone else got there first, or it already exists. Refreshing and retrying may work. */
+  conflict(code: string, details?: unknown): DomainError;
+  /** It doesn't exist, or isn't visible in this scope. Code defaults to `"<module>.not_found"`. */
+  notFound(code?: string, details?: unknown): DomainError;
+  /** The caller is known but may not do this. Code defaults to `"<module>.<function>.forbidden"`, or `"<module>.forbidden"` in an unnamed private function. */
+  deny(code?: string, details?: unknown): DomainError;
+}
+interface BaseCtx<C extends Config, S> {
+  scope: S;
+  /** Your settings from `createRegistry({ config })`. Read-only; tests override parts of it. */
+  config: Frozen<ConfigOf<C>>;
+  /** Expected failures: `throw ctx.errors.reject("not_pending")`. */
+  errors: Errors;
+  /** Current time. Fixed in tests. */
+  now: () => Date;
+}
+/** `S` is the scope, narrowed by the function's policy. Alias it next to `init`: `type QueryCtx = QueryCtx<Config>`. */
+export interface QueryCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
+  db: ReaderOf<C>;
+  /** Call another query, with its policy, validation and output check: `await ctx.run(pricing.quote, { nights })`. */
+  run: Run<"query", ScopeOf<C>>;
+}
+export interface MutationCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
+  db: TxOf<C>;
+  /**
+   * Call a query or mutation inside this same transaction, with its policy and validation:
+   * `await ctx.run(availability.hold, { propertyId })`. If it fails, the whole transaction rolls back.
+   */
+  run: Run<"query" | "mutation", ScopeOf<C>>;
+  /**
+   * Queue an event. Delivered to listeners only after the transaction commits. Returns what it queued: the id, name and
+   * time its listeners see as `ctx.event`, so a row you write in this transaction can carry `event.id` and a listener
+   * finds it by `ctx.event.id`.
+   */
+  emit<I>(event: EventDef<I, unknown>, payload: I): EmittedEvent<I>;
+  /**
+   * Run a mutation or action once, later, as this scope: `ctx.schedule(guests.remind, { bookingId }, { at })` or
+   * `{ delay: 3600 }` (seconds). Committed with this transaction, so a rollback never leaves one behind. Nothing to
+   * keep: there's no cancel. It runs whatever happens meanwhile, so it checks that its reason still holds ("still
+   * confirmed?") against your own row. `attempts`: tries in total, default 1; give an action that calls an API a few.
+   * `replace: true`: a newer call to this function with the same input replaces the one still waiting (the dates of
+   * `{ bookingId }` changed), like Oban's `replace`. Keep the input to ids, so it names one thing.
+   */
+  schedule<F extends Fn<"mutation" | "action">>(fn: F, input: FnIn<F>, options: ScheduleOptions<ScopeOf<C>>): void;
+}
+/** When a scheduled call runs (`at` or `delay` in seconds), and how many tries it gets. */
+export type ScheduleOptions<S = object> = ({ at: Date; delay?: never } | { delay: number; at?: never }) & {
+  attempts?: number;
+  /** `true`: the call to this function waiting with the same input (not started yet) is replaced by this one. */
+  replace?: true;
+  /**
+   * Who it runs as, whole, never merged, as `ctx.run` takes it: `{ scope: { kind: "system", job: "tasks.wake", organization } }`.
+   * Default: this mutation's scope. The function's policy checks it when it runs.
+   */
+  scope?: S;
+};
+export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, S> {
+  services: ServicesOf<C>;
+  /** Call any function: `await ctx.run(bookings.confirmPaid, { bookingId })`. Each mutation you run commits on its own. */
+  run: Run<Kind, ScopeOf<C>>;
+  /** The caller's abort signal: pass it on, `fetch(url, { signal: ctx.signal })`. Always undefined in listeners (they outlive the request). */
+  signal: AbortSignal | undefined;
+}
+export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C> {
+  event: ListenerEvent<O>;
+}
+/** A cron's handler's ctx: an action's, as the cron's own scope, plus the run. */
+export interface CronCtx<C extends Config, S = ScopeOf<C>> extends ActionCtx<C, S> {
+  cron: CronRun;
+}
+
+/**
+ * Who may call a function at all: signed in, admin, staff. Sync, reads only the scope, returns exactly `true` to allow.
+ * Write it as a type guard (`(s): s is Admin => ...`) to narrow `ctx.scope` in `handler`.
+ * Rules about one record ("only the owner may cancel") go in `handler`, after loading it.
+ */
+export type Policy<S> = (scope: S) => boolean;
+type Guarded<F, S> = F extends (scope: any) => scope is infer G ? G : S;
+type CtxOf<C extends Config, K extends Kind, S> = K extends "query"
+  ? QueryCtx<C, S>
+  : K extends "mutation"
+    ? MutationCtx<C, S>
+    : ActionCtx<C, S>;
+
+/** What a function without `input` gets: nothing. */
+type NoInput = StandardSchemaV1<undefined, undefined>;
+type Def<C extends Config, K extends Kind, IS, OS, R, P, A> = {
+  /**
+   * Stable id, local to its module: in a `notifications` module, `id: "send"` is `notifications.send`. Jobs store it,
+   * so set it before you rename the export and queued jobs keep finding this code. Defaults to the export name.
+   */
+  id?: string;
+  /** What callers pass, validated on every call. Leave it out when the function takes nothing. */
+  input?: IS;
+  /**
+   * Who may call it, on every call. A type guard narrows `ctx.scope` in `handler`. Required to publish it through an
+   * adapter: callers outside your server are untrusted. Leave it out when only your own code runs it.
+   */
+  authorize?: P & ((scope: ScopeOf<C>) => A);
+  /**
+   * What callers get back, checked before it leaves: unknown fields are stripped, and a published function's client
+   * types come from it. Without it, the handler's return type, all of it.
+   */
+  output?: OS;
+  meta?: FunctionMetaOf<C>;
+  handler: (ctx: CtxOf<C, K, Guarded<P, ScopeOf<C>>>, input: Out<IS>) => Promise<[OS] extends [Schema] ? In<OS> : R>;
+};
+/**
+ * One signature, not overloads, so a mistake gets one error naming the missing field ("Property 'handler' is missing")
+ * instead of "No overload matches this call". Keep `output: OS` plain: `OS & Schema` makes TypeScript compare the whole
+ * schema type structurally on every definition (about 10x slower to check).
+ */
+export type Constructor<C extends Config, K extends Kind> = <
+  IS extends Schema = NoInput,
+  OS extends Schema | undefined = undefined,
+  R = unknown,
+  P extends Policy<ScopeOf<C>> = Policy<ScopeOf<C>>,
+  // `authorize`'s return type, inferred after an inline policy is typed: `never` when there's none. `P` can't tell,
+  // since an inline policy takes its default.
+  A extends boolean = never,
+>(
+  def: Def<C, K, IS, OS, R, P, A>,
+) => Fn<K, In<IS>, [OS] extends [Schema] ? Out<OS> : R, [A] extends [never] ? false : true, C, NoInput extends IS ? undefined : IS>;
+
+type OtherInit = SetupError<"Defined with another init(), so it would run with this registry's scope, not its own. Define it with the init() this createRegistry came from">;
+/** `createRegistry`'s modules: a function, listener or cron defined with another `init` is an error, since it would run with this one's scope. Events have no `init`. */
+export type OwnModules<C extends Config, Mods> = {
+  [M in keyof Mods]: { [N in keyof Mods[M]]: Mods[M][N] extends FromInit<never> ? (Mods[M][N] extends FromInit<C> ? Mods[M][N] : OtherInit) : Mods[M][N] };
+};
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Database and jobs adapters
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+export interface DatabaseAdapter<Db = unknown, Tx = Db> {
+  /** Root handle, used by top-level queries. */
+  readonly db: Db;
+  transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
+  /** An adapter bound to an existing transaction (nested transactions become savepoints). Used by the test helper. */
+  nest?(tx: Tx): DatabaseAdapter<Tx, Tx>;
+  /** Did this transaction lose a race the database says to retry (deadlock, serialization failure)? */
+  retryable?(error: unknown): boolean;
+}
+
+/** A database adapter that runs SQL: what `databaseQueue()`, `outbox(queue)` and `pgBoss(boss)` need. */
+export interface SqlDatabase<Db = any, Tx = any> extends DatabaseAdapter<Db, Tx> {
+  /**
+   * One SQL statement (`$1` parameters on Postgres, `?` on SQLite), on the database or on a transaction of it. Resolves
+   * the rows it returns. The jobs table runs through it, so any ORM that can run SQL has it.
+   */
+  query(client: Db | Tx, text: string, params: unknown[]): Promise<Record<string, unknown>[]>;
+}
+
+/**
+ * `createRegistry({ database })`: the adapter, and how the core uses it. `transactionAttempts`: tries in total for a
+ * top-level mutation whose transaction lost a race (`retryable`), each in a fresh one, like Laravel's
+ * `DB::transaction(fn, attempts)`. Default 3; 1 turns it off. A job's own tries are its `attempts`.
+ */
+export interface DatabaseOptions<A extends DatabaseAdapter<any, any> = DatabaseAdapter<unknown, unknown>> {
+  adapter: A;
+  transactionAttempts?: number;
+}
+
+/** Runs one job: resolves when it's done or failed for good (acknowledge it), throws when a retry might help. */
+export type RunJob = (job: Job, options?: RunJobOptions) => Promise<JobOutcome>;
+
+export interface RunJobOptions {
+  /** 1 on the first try; the adapter counts. */
+  attempt?: number;
+  /**
+   * Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it. Default: the adapter's
+   * `fail` (`databaseQueue` and `outbox` write a failed row).
+   */
+  fail?: (error: unknown) => Promise<void>;
+}
+
+/** What a sweep did: done, failed for good, discarded (`jobs.scope.load` returned null), or put back with a backoff. */
+export interface SweepResult {
+  done: number;
+  failed: number;
+  discarded: number;
+  retrying: number;
+}
+
+/** What the registry hands an adapter: run a job here, or report a failure of the adapter's own (a send that failed). */
+export interface Runner {
+  /** Every failure it meets is already reported to `onError`; a throw means "retry it". */
+  run: RunJob;
+  report(error: unknown, job: Job, attempt?: number): void;
+}
+
+export interface JobsAdapter {
+  /** How it's set up, for messages: `"databaseQueue()"`. The core names capabilities, the adapter itself. */
+  name?: string;
+  /**
+   * It can run a job again after a failed try: a queue redelivers it, a table backs off. Without it (`inProcess()`),
+   * `createRegistry` refuses `attempts` above 1 rather than ignore them, as it refuses a delay it can't hold.
+   */
+  retries?: true;
+  /**
+   * It writes jobs with SQL in the mutation's transaction, through the registry's database: `createRegistry` refuses a
+   * registry whose `database.adapter` doesn't run SQL (`query`), and `connect` gets it as `setup.sql`.
+   */
+  sql?: true;
+  /**
+   * It can hold a job until its `runAt` (a listener's `delay`, `ctx.schedule`): `true`, or for at most `max` seconds.
+   * Without it (`inProcess()`), `createRegistry` refuses delayed listeners and `ctx.schedule` throws, rather than run
+   * them early or lose them.
+   */
+  holds?: true | { max: number };
+  /**
+   * Can replace a call waiting to run: `enqueue` gets a call with `replace`, and a pending call with the same key
+   * (`storedReplaceKey`) that hasn't started is replaced by it. `databaseQueue` and `outbox` can; a queue that already
+   * has the message can't. Without it, `ctx.schedule` with `replace` is refused.
+   */
+  replaces?: true;
+  /**
+   * At `createRegistry`, once: take what the adapter needs from the registry (its database, for an adapter that writes
+   * jobs in the mutation's transaction), and refuse a setup it can't honour.
+   */
+  connect?(setup: AdapterSetup): void;
+  /** Inside the transaction, before commit. In-process: nothing. `databaseQueue` and `outbox`: insert one row per job with `tx`. */
+  enqueue?(tx: unknown, jobs: Job[]): Promise<void>;
+  /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
+  deliver(jobs: Job[], runner: Runner): Promise<void>;
+  /** Run what's due (retries, deliveries whose runner crashed). Only adapters that store deliveries have it. */
+  sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
+  /** Put a failed job back in line. `false` when there's no failed job with that id. Only adapters that store them. */
+  retry?(id: string): Promise<boolean>;
+  /** A page of failed jobs, newest first. Only adapters that store them and can filter them. */
+  failed?(options: FailedQuery): Promise<{ rows: FailedRow[]; cursor: string | null }>;
+  /** Delete one failed job. `false` when there's no failed job with that id: a waiting or running one is never touched. */
+  forget?(id: string): Promise<boolean>;
+  /**
+   * Keep a job that failed for good after it left the adapter: `registry.jobs.run` calls it from a queue consumer, so
+   * `outbox` stores the failure Cloudflare would otherwise drop. Not called for jobs the adapter ran itself.
+   */
+  fail?(job: Job, error: unknown): Promise<void>;
+}
+
+/**
+ * What `onError` gets with a failure after commit. `job`, `attempt` and `outcome` are set when a job failed: the job
+ * itself, like Laravel's `JobFailed` and Oban's exception telemetry.
+ */
+export interface FailureInfo {
+  /** The listener, cron or scheduled function that failed, or the part of the registry (`"(jobs adapter)"`). */
+  source: string;
+  /** The job that failed, or that the adapter couldn't take (`"(jobs adapter)"`). */
+  job?: Job;
+  attempt?: number;
+  /** `retry`: tries are left and the adapter may run it again. `failed` and `discarded`: it's over. */
+  outcome?: "retry" | "failed" | "discarded";
+}
+
+/** What `createRegistry` gives an adapter's `connect`. */
+export interface AdapterSetup {
+  listeners: readonly RegisteredListener[];
+  crons: readonly RegisteredCron[];
+  /** The registry's `database.adapter`. */
+  database: DatabaseAdapter<unknown, unknown> | undefined;
+  /** The same, when it runs SQL: always set for an adapter that declares `sql: true`. */
+  sql: SqlDatabase | undefined;
+}
+
+/**
+ * A store for failed jobs, apart from the queue that runs them, like Laravel's `failed` driver. `failedJobs()`
+ * keeps them in the jobs table. For adapters that keep their own, it isn't needed.
+ */
+export interface FailedJobs {
+  /** For messages: `"failedJobs()"`. */
+  name?: string;
+  /** Keeps failed jobs with SQL, through the registry's database (`setup.sql`): see `JobsAdapter.sql`. */
+  sql?: true;
+  /** At `createRegistry`, once: take the registry's database. */
+  connect?(setup: AdapterSetup): void;
+  /** Keep a job that failed for good. */
+  fail(job: Job, error: unknown): Promise<void>;
+  /** A page of failed jobs, newest first. */
+  failed(query: FailedQuery): Promise<{ rows: FailedRow[]; cursor: string | null }>;
+  /** Remove a failed job and return it, for `retry` to hand to the queue again. Undefined when there's none with that id. */
+  take(id: string): Promise<Job | undefined>;
+  /** Delete a failed job. `false` when there's none with that id. */
+  forget(id: string): Promise<boolean>;
+}
+
+/** One field of a stored scope a `failed({ scope })` filter matches exactly: `["organization", "id"]` and `"org_1"`. */
+export interface ScopeMatch {
+  path: string[];
+  value: string | number | boolean | null;
+}
+/** What `registry.jobs.failed` asks an adapter for. The core checks and flattens the filter first. */
+export interface FailedQuery {
+  /** The listener, cron or function id. */
+  source?: string;
+  /** Every one must equal the stored scope's field at `path` (the job's `scope`, or its envelope's). */
+  scope?: ScopeMatch[];
+  limit: number;
+  /** From the last page: where to go on. */
+  cursor?: string;
+}
+/** A failed job as an adapter keeps it. */
+export interface FailedRow {
+  id: string;
+  job: Job;
+  error: string;
+  /** ISO. */
+  failedAt: string;
+}
+/** A failed job, as `registry.jobs.failed` lists it: pass its `id` to `retry` or `forget`. */
+export interface FailedJob<Stored = Record<string, unknown>> {
+  id: string;
+  kind: Job["kind"];
+  /** The listener, cron or function that failed, as in `FailureInfo`. */
+  source: string;
+  /** What `jobs.scope.store` saved with it. Undefined for a cron run: it has none. */
+  scope: Stored | undefined;
+  /** The last error, with its stack. */
+  error: string;
+  /** ISO. */
+  failedAt: string;
+  job: Job;
+}
+export interface FailedOptions<Stored = Record<string, unknown>> {
+  /** Only this listener's, cron's or function's: `"emails.send"`. */
+  source?: string;
+  /**
+   * Only jobs whose stored scope has these values (what `jobs.scope.store` saved): `{ organizationId: "org_1" }`,
+   * nested fields too. Never a cron run: it stores none. Values are strings, numbers, booleans or null.
+   */
+  scope?: DeepPartial<Stored>;
+  /** 1 to 1000. Default 100. */
+  limit?: number;
+  /** The `cursor` of the page before. */
+  cursor?: string;
+}
+export interface FailedPage<Stored = Record<string, unknown>> {
+  jobs: FailedJob<Stored>[];
+  /** Pass it back for the next page; null on the last one. */
+  cursor: string | null;
+}
+
+/**
+ * Who a job runs as, at rest. `store` picks what's saved with the job (ids, not whole objects); `load` rebuilds the
+ * scope when it runs, so policies see today's roles. `load` returning null discards the job (reported to `onError`),
+ * a throw retries it. By default the scope is stored as it was at emit. `store` needs `load`: listeners run as a scope,
+ * not as what was saved. Every adapter but `inProcess()` keeps jobs to run later, so it needs `load`: `createRegistry` checks.
+ */
+export interface JobScope<S = object, T = any> {
+  store?: (scope: S) => T;
+  /** What `store` saved. Write `store` first so TypeScript infers it (or annotate this parameter). */
+  load?: (stored: T) => S | null | Promise<S | null>;
+}
+
+/** Marks `inProcess()` for TypeScript: the one adapter that keeps no jobs, so needs no `jobs.scope`. */
+export const RUNS_NOW: unique symbol = Symbol.for("logic-sdk.runsNow");
+/** What `inProcess()` returns. */
+export interface InProcess extends JobsAdapter {
+  readonly [RUNS_NOW]: true;
+}
+
+/**
+ * `createRegistry({ jobs })`: where background work goes, and what every adapter applies. `load` inside `scope` is
+ * checked at startup: requiring it here would report a missing one as a wrong `store`.
+ */
+export type JobsOptions<S = object, T = any> = {
+  /**
+   * Where failed jobs are kept when your adapter can't keep them itself (a queue on its own), like Laravel's `failed`
+   * driver: `failed: failedJobs()`. `registry.jobs.failed`, `retry` and `forget` then work on it.
+   */
+  failed?: FailedJobs;
+  /**
+   * Max chain of listener → mutation → event → listener… before queueing stops, reported. Calls `ctx.schedule` runs
+   * right away count too, so a function that schedules itself with no delay stops the same way. Default 8 (real chains
+   * are 2 or 3).
+   */
+  maxEventDepth?: number;
+} & (
+  | {
+      /** `inProcess()` (default), or a durable one like `databaseQueue()`. Its own options go in its factory. */
+      adapter?: InProcess;
+      /** Applied by the registry in every adapter, `inProcess()` and tests included. */
+      scope?: JobScope<S, T>;
+    }
+  | {
+      /** An adapter that keeps jobs to run later, like `databaseQueue()`. */
+      adapter?: JobsAdapter;
+      /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
+      scope: JobScope<S, T>;
+    }
+);
+
+export interface Call<M = unknown> {
+  id: string;
+  kind: Kind | "listener" | "cron";
+  /** Set on a job's own run (a listener's, a cron's, a scheduled call's): which job, and which try (1 on the first). */
+  job?: { id: string; attempt: number };
+  /** The function's, listener's or cron's `meta` (undefined when it has none). */
+  meta: M | undefined;
+  /** Raw input as received (before validation). */
+  input: unknown;
+  scope: object;
+  depth: number;
+}
+
+export interface RegistryOptions<Mods extends Record<string, object>> {
+  /** One entry per module: `{ bookings, availability }` with `import * as bookings from "./bookings"`. */
+  modules: Mods;
+  /** `database: { adapter: drizzleAdapter(db) }`, with `transactionAttempts` when 3 isn't right. */
+  database?: DatabaseOptions;
+  services?: object;
+  /** Settings every function reads as `ctx.config`. Plain data: it's copied and frozen. */
+  config?: object;
+  /** Background work: `jobs: { adapter: databaseQueue(), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
+  jobs?: JobsOptions;
+  /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
+  wrap?: (call: Call, next: () => Promise<unknown>) => Promise<unknown>;
+  /**
+   * Serverless: let listeners finish after the response. Pass the platform's global:
+   * `import { waitUntil } from "cloudflare:workers"` or `import { waitUntil } from "@vercel/functions"`.
+   * Without it, `run` waits for listeners. On a long-lived server with `databaseQueue`, `() => {}` answers first (a restart
+   * is swept up after its lease: retried, or failed when it was out of attempts); with `inProcess()`, don't: work
+   * still running at a restart is lost.
+   */
+  waitUntil?: (promise: Promise<unknown>) => void;
+  /** Failures no caller waits for: jobs, and the work after commit that runs them. They never fail the caller. */
+  onError?: (error: unknown, info: FailureInfo) => void;
+  now?: () => Date;
+}
+
+/** A registry bound to who is calling: `const caller = registry.as(scope)`. */
+export interface Caller<S extends object = object> {
+  readonly scope: S;
+  /** Run any function as this caller: `await caller.run(bookings.cancel, input, { signal: request.signal })`. */
+  run<F extends Fn>(fn: F, ...args: RunArgs<F, S>): Promise<FnOut<F>>;
+}
+
+export interface Registered {
+  id: string;
+  module: string;
+  name: string;
+}
+export interface RegisteredFn extends Registered {
+  fn: Fn;
+  kind: Kind;
+}
+
+export interface Overrides {
+  database?: DatabaseAdapter<unknown, unknown>;
+  services?: object;
+  /** Merged over the registry's config, section by section. */
+  config?: unknown;
+  adapter?: JobsAdapter;
+  /** Where failed jobs go instead of `jobs.failed`; `null` keeps none (a test registry: failures throw). */
+  failed?: FailedJobs | null;
+  now?: () => Date;
+  stubs?: Map<Fn, (ctx: never, input: never) => Promise<unknown>>;
+  record?: (envelope: Envelope) => void;
+  onError?: (error: unknown, info: FailureInfo) => void;
+  /** Present and undefined turns the registry's off. */
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+export interface RegisteredEvent extends Registered {
+  event: EventDef;
+}
+export interface RegisteredListener extends Registered {
+  listener: Listener;
+  event: EventDef;
+}
+export interface RegisteredCron extends Registered {
+  cron: Cron;
+}
+
+/**
+ * `registry.jobs`: what you call from a queue consumer, a timer, a script or a staff route. Outside your functions, as
+ * Laravel's queue commands are: guard the route yourself. A job a user wants again is a mutation that emits again.
+ */
+export interface Jobs {
+  /**
+   * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
+   * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
+   * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (`databaseQueue` and `outbox` keep it).
+   */
+  run(job: Job, options?: RunJobOptions): Promise<JobOutcome>;
+  /**
+   * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
+   * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run
+   * goes through your jobs adapter, and with `databaseQueue` or `outbox` a minute that's ticked twice still runs each cron once.
+   */
+  tick(at?: Date): Promise<string[]>;
+  /**
+   * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `databaseQueue()`, that's
+   * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing, or maintain themselves
+   * (pg-boss), resolve zeros.
+   */
+  sweep(options?: { limit?: number }): Promise<SweepResult>;
+  /**
+   * Put a failed job back in line with a fresh set of attempts. `false` when no failed job has that id (it's pending,
+   * running, done, or never existed). Throws when your adapter keeps no jobs, like `inProcess()`.
+   */
+  retry(id: string): Promise<boolean>;
+  /**
+   * Failed jobs, newest first, a page at a time: `await registry.jobs.failed({ source: "emails.send", scope: { organizationId } })`.
+   * Then `retry` or `forget` each. Pass your stored scope's type to check the filter: `failed<Stored>({ scope })`. Throws
+   * when your adapter keeps none (a queue alone without `jobs.failed`) or can't list them: its message says where they are.
+   */
+  failed<Stored = Record<string, unknown>>(options?: FailedOptions<Stored>): Promise<FailedPage<Stored>>;
+  /**
+   * Delete a failed job, like Laravel's `queue:forget`. `false` when no failed job has that id: a waiting or running one
+   * is never touched. Throws when your adapter keeps no jobs.
+   */
+  forget(id: string): Promise<boolean>;
+  /**
+   * Run a cron now, outside its schedule, through your jobs adapter like a tick: `await registry.jobs.invoke(orders.sendDigest)`,
+   * or its id from a script. `at`: the minute the run is for (`ctx.cron.scheduledAt`), default now, to redo a missed one.
+   * Its own job id, so the real tick for that minute still runs. Resolves the id; throws when the hand-off fails.
+   */
+  invoke(cron: Cron | string, options?: { at?: Date }): Promise<string>;
+}
+
+/** What `createRegistry` returns. `Cf` is your config's type, so tests can override parts of it. */
+export interface Registry<S extends object = object, Mods extends Record<string, object> = Record<string, object>, Cf = unknown> {
+  /** Bind who is calling, once per request, job or test: `const caller = registry.as(scope)`. */
+  as(scope: S): Caller<S>;
+  /** Everything you registered, with ids. Adapters and plugins read this. */
+  readonly definitions: {
+    readonly functions: readonly RegisteredFn[];
+    readonly events: readonly RegisteredEvent[];
+    readonly listeners: readonly RegisteredListener[];
+    readonly crons: readonly RegisteredCron[];
+  };
+  /** `"bookings.confirm"` for a registered function or event. Throws for anything unregistered. */
+  idOf(fnOrEvent: object): string;
+  /** The background work your `jobs` adapter holds. */
+  readonly jobs: Jobs;
+  /** @internal used by `logic-sdk/testing` */
+  readonly [INTERNAL]: {
+    options: RegistryOptions<Mods>;
+    derive(more: Overrides): Registry<S, Mods, Cf>;
+    /** An event as `emit` would make it, for `t.jobs.perform`. */
+    envelope(event: EventDef, payload: unknown, scope: S): Envelope;
+    /** The cron runs due in a minute, for `t.jobs.tick`; with `only`, that cron's run, due or not (`t.jobs.perform`). */
+    due(at: Date, only?: string): CronJob[];
+  };
+}
+
+/** The registry's internals, for `logic-sdk/testing`. */
+export const INTERNAL: unique symbol = Symbol.for("logic-sdk.internal");

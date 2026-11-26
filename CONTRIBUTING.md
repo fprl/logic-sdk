@@ -15,6 +15,10 @@ bun run test     # build, typecheck, lint, publint/attw, core + CLI + both examp
 
 This library is built with AI agents, and we're happy when you use them too, in issues and, once you're on the team, in code. The rule is the one [Ghostty](https://github.com/ghostty-org/ghostty/blob/main/CONTRIBUTING.md) uses: **you must understand and own every line you submit**, well enough to explain it without the AI. Say what you used when it shaped the change. Reports nobody checked by hand (an "issue" pasted from a model's guess) get closed.
 
+## Which layer?
+
+Before you add or change something, name its layer and check its test: userland, extensions, core, adapters, hosts or platforms ([AGENTS.md](AGENTS.md#layers), with the reasons in [DESIGN.md](DESIGN.md#layers)). Say it in the issue or the pull request: "core: it means the same on every adapter", "adapter: one contract on Postgres". If it fits none, or two, settle that in the issue first.
+
 ## Changesets
 
 Every change to a published package (`logic-sdk`, `@logic-sdk/cli`) needs a `.changeset/*.md`, written as user-facing prose with a migration note when something breaks. Skip it for docs, examples, CI and tests.

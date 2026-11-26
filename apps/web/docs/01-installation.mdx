@@ -14,8 +14,8 @@ Any [Standard Schema](https://standardschema.dev) library works for `input` and 
 | Import | What it gives you |
 |---|---|
 | `logic-sdk` | `init`, the definers, `createRegistry`, errors |
-| `logic-sdk/drizzle/pg` | `drizzleAdapter(db)`, and jobs in your Postgres: `databaseQueue`, `outbox` |
-| `logic-sdk/postgres` | The same two on Postgres with any ORM, and the tables as SQL |
+| `logic-sdk/drizzle/pg` | `drizzleAdapter(db)`, and jobs in your Postgres: `databaseQueue`, `outbox`, `failedJobs` |
+| `logic-sdk/postgres` | The same three on Postgres with any ORM, and the tables as SQL |
 | `logic-sdk/drizzle/sqlite` | `drizzleAdapter(open)` for SQLite on a disk, and the same jobs |
 | `logic-sdk/sqlite` | The jobs on SQLite with any ORM |
 | `logic-sdk/cloudflare` | `cloudflareQueue`, `handleQueue`, `handleScheduled` |

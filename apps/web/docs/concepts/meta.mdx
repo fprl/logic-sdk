@@ -28,13 +28,24 @@ export const cancel = mutation({
 ```ts
 createRegistry({
   modules,
-  database,
+  database: { adapter: database },
   wrap: async (call, next) => {
     log(call.id, call.meta?.tags);
     return next();
   },
 });
 ```
+
+A job's own run (a listener's, a cron's, a scheduled call's) also says which job and which try, so tracing can tell attempt 1 from attempt 3:
+
+```ts
+wrap: async (call, next) => {
+  if (call.job) metrics.count(call.id, call.job.attempt); // call.job: { id, attempt }
+  return next();
+},
+```
+
+What the job runs (`ctx.run` inside it) has no `call.job`: it's set on the job's own call only.
 
 An adapter of your own says where it reads:
 

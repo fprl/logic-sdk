@@ -17,8 +17,8 @@ type Config = {
 
 createRegistry({
   modules,
-  database,
-  jobs: { adapter: databaseQueue(database), scope: { store, load } },
+  database: { adapter: database },
+  jobs: { adapter: databaseQueue(), scope: { store, load } },
 });
 ```
 
@@ -37,7 +37,7 @@ You give one function that opens the file. The adapter does what Rails does: WAL
 
 - **Writes go one at a time.** A line that moves is waited for, however long. One transaction that holds the lock for more than 5 seconds fails the ones waiting behind it, so keep slow work in actions. Time spent waiting for another process doesn't count.
 - **Use `ctx.run` inside a mutation, never `registry.as(scope).run`:** that one waits behind the mutation that's waiting for it. It fails after 5 seconds and says so.
-- **Another process holding the file** is waited for without blocking the event loop. Still locked after 5 seconds, the mutation is retried: `drizzleAdapter(open, { transactionAttempts })`, three tries by default.
+- **Another process holding the file** is waited for without blocking the event loop. Still locked after 5 seconds, the mutation is retried: three tries by default, `database: { adapter, transactionAttempts }` to change it.
 - **Scripts write through mutations,** or through a connection of their own (`open()`). `database.db` refuses writes.
 - **Call `drizzleAdapter` once per process,** not per request.
 - **A failure SQLite rolls back by itself** (a full disk, `RAISE(ROLLBACK)`, `ON CONFLICT ROLLBACK`) ends the transaction at once. Don't catch one and keep writing: what follows is saved on its own.
@@ -51,7 +51,7 @@ You give one function that opens the file. The adapter does what Rails does: WAL
 export { cronRunsTable, jobsTable } from "logic-sdk/drizzle/sqlite";
 ```
 
-Without Drizzle, `logic-sdk/sqlite` has the same two functions and `jobsSchema`, for [an adapter of your own](/docs/adapters/other-orms). Its `query` gets `?` parameters, in order.
+Without Drizzle, `logic-sdk/sqlite` has the same three functions and `jobsSchema`, for [an adapter of your own](/docs/adapters/other-orms). Its `query` gets `?` parameters, in order.
 
 ## Tests
 

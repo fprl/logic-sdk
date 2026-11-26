@@ -108,7 +108,7 @@ export { jobsTable, cronRunsTable } from "logic-sdk/drizzle/pg";
 
 - **With `pgBoss(boss)`, a minute runs once** too: its pg-boss id is derived from `<cron id>@<minute>`, and pg-boss skips an insert whose id it already has (finished jobs are kept 7 days).
 - **With `inProcess()`, every server that ticks runs it,** like Laravel without `onOneServer()`. Fine for one server, or for a platform trigger; use `databaseQueue` for more.
-- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by `databaseQueue`, `outbox` and pg-boss, reported to `onError` with the cron's id.
+- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by `databaseQueue`, `outbox`, pg-boss or a `failedJobs` store, reported to `onError` with the cron's id.
 
 ## Schedules
 
@@ -116,7 +116,21 @@ Five fields, `minute hour day-of-month month day-of-week`: lists, ranges and ste
 
 - **Not supported:** seconds, `@daily`-style aliases, and `L`, `W`, `#`. `createRegistry` fails with what to write instead.
 - **Time zones:** an IANA name, matched on the clock there. Like Laravel, a time skipped when clocks go forward doesn't run that day, and one that happens twice when they go back runs twice. Avoid 1:00 to 3:00 in a time zone with DST, or use UTC.
-- **A tick runs what's due now.** A minute nobody ticked (the server was down, a deploy) is skipped, not caught up, like Laravel and pg-boss's default (`missed: 'skip'`). Runs may overlap, like Laravel, Oban and Vercel.
+- **A tick runs what's due now.** A minute nobody ticked (the server was down, a deploy) is skipped, not caught up, like Laravel and pg-boss's default (`missed: 'skip'`). Rerun one with `invoke` (below). Runs may overlap, like Laravel, Oban and Vercel.
+
+## Running one now
+
+```ts
+await registry.jobs.invoke(orders.sendDigest);                                          // now, from a staff button
+await registry.jobs.invoke("orders.sendDigest", { at: new Date("2026-11-24T07:00Z") }); // a minute a deploy missed, from a script
+```
+
+- **Through your jobs adapter, like a tick,** with the cron's scope and `attempts`: Vercel's `Schedules.invoke`, Mission Control's "Run now" (`task.enqueue`), Oban Web's "Run Now". Its schedule and the next tick don't change.
+- **Its own job id,** `orders.sendDigest@20261124T0700Z-<uuid>`, so the real tick for that minute still runs, and so does a second invoke. It resolves the id; a failure is kept under it, for `failed`, `retry` and `forget` ([Jobs](/docs/concepts/jobs#failed-jobs-and-running-a-cron-now)).
+- **`at` is the minute the run is for,** what the handler reads as `ctx.cron.scheduledAt`. Default now. It isn't checked against the schedule.
+- **The cron, or its id** from a script: an id that isn't registered throws, naming the ones that are.
+- **Unlike a tick, it throws when the hand-off fails** (a queue that's down), so whoever pressed the button sees it.
+- **Outside your functions:** guard the route that calls it, like any operator action.
 
 ## Testing
 

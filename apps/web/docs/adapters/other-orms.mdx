@@ -17,14 +17,14 @@ const database = {
 
 createRegistry({
   modules,
-  database,
-  jobs: { adapter: databaseQueue(database), scope: { store, load } },
+  database: { adapter: database },
+  jobs: { adapter: databaseQueue(), scope: { store, load } },
 });
 ```
 
 - **`SqlDatabase` is a `DatabaseAdapter` with `query`,** so a forgotten `query` is a type error here, not a failed job later. Mutations alone need only `DatabaseAdapter`.
-- **`outbox(database, queue)` has the same shape,** from the same import.
-- **`query` gets `$1`, `$2`… and only strings and numbers,** and resolves the rows as objects. The SQL casts them itself, so your driver doesn't have to guess a type.
+- **`outbox(queue)` has the same shape,** from the same import.
+- **`query` gets `$1`, `$2`… and the values to bind,** and resolves the rows as objects. The jobs table sends only strings and numbers and casts them in its SQL, so your driver doesn't have to guess a type. pg-boss runs through the same `query` and binds arrays and JSON too, as any Postgres driver does.
 - **The type of your database** is `db: ReadWrite<PrismaClient, Prisma.TransactionClient>` in `Config`: what queries get, and what mutations get.
 - **`nest` is for the test registry** (a transaction inside a transaction, as a savepoint). Without it `createTestRegistry` can't roll back each test.
 - **`retryable` says which errors lost a race** (a deadlock, `40P01`, or a serialization failure, `40001`), so the mutation [runs again](/docs/concepts/transactions#lost-races-are-retried). Without it none does.

@@ -23,7 +23,7 @@ export const { query, mutation, action, event, listener, createRegistry } = init
 // src/registry.ts, or wherever your app starts
 export const registry = createRegistry({
   modules: { orders, catalog },
-  database: drizzleAdapter(db),
+  database: { adapter: drizzleAdapter(db) },
   config: {
     app: { url: process.env.APP_URL! },
     orders: { maxItems: Number(process.env.MAX_ITEMS ?? 20), currency: "EUR" },
