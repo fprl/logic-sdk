@@ -1,5 +1,15 @@
 # @logic-sdk/cli
 
+## 0.6.6
+
+### Patch Changes
+
+- a726b80: `show --json` gives listeners and crons a `kind` (`"listener"`, `"cron"`), like functions.
+- Updated dependencies [a726b80]
+- Updated dependencies [a726b80]
+- Updated dependencies [a726b80]
+  - logic-sdk@0.7.2
+
 ## 0.6.5
 
 ### Patch Changes
