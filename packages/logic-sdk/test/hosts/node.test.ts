@@ -190,3 +190,28 @@ test("ticks stuck on an unreachable database don't pile up: past ten, a minute i
   ]);
   void stop({ timeout: 0 });
 });
+
+test("queues: work() hands its queues to attach and to every claim, and stop() detaches", async () => {
+  const swept: unknown[] = [];
+  const attached: unknown[] = [];
+  let detached = false;
+  const registry = {
+    jobs: {
+      attach: (worker: { queues?: readonly string[] }) => {
+        attached.push(worker.queues);
+        return () => void (detached = true);
+      },
+      tick: async () => [],
+      sweep: async (options?: object) => {
+        swept.push(options);
+        return none;
+      },
+    },
+  };
+  const stop = work(registry, { queues: ["mail", "default"], pollEvery: 60 });
+  await flush();
+  await stop();
+  expect(attached).toEqual([["mail", "default"]]);
+  expect(swept[0]).toEqual({ limit: 1, queues: ["mail", "default"] });
+  expect(detached).toBe(true);
+});

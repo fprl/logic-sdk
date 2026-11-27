@@ -1,9 +1,9 @@
 import type { Jobs } from "../core/types.ts";
 
 export interface WorkOptions {
-  /** Jobs this process runs at once. Default 1, like pg-boss, graphile-worker and a Laravel worker: run more processes, or raise it. */
+  /** Jobs this process runs at once. Default 1: run more processes, or raise it. */
   concurrency?: number;
-  /** Seconds a free slot waits before it looks for a job again, when there was none. Default 2, like pg-boss and graphile-worker. */
+  /** Seconds a free slot waits before it looks for a job again, when there was none. Default 2. A commit in this process wakes it at once. */
   pollEvery?: number;
   /**
    * The queues it runs, in order: each claim takes the first one with a job due, so `["mail", "default"]` sends mail
@@ -15,7 +15,7 @@ export interface WorkOptions {
 }
 
 export interface StopOptions {
-  /** Seconds to wait for the running jobs and ticks before giving up on them. Default 30, like pg-boss's `stop()`. */
+  /** Seconds to wait for the running jobs and ticks before giving up on them. Default 30. */
   timeout?: number;
 }
 
