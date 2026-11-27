@@ -95,7 +95,7 @@ export function jobsAdapterSuite(name: string, open: () => Promise<Running>, gua
       createRegistry({
         modules: (adapter.retries ? modules : once) as typeof modules,
         database: { adapter: drizzleAdapter(running.db) },
-        jobs: { adapter, scope: { load: (saved) => saved } },
+        jobs: { adapter, scope: { load: (_ctx, saved) => saved } },
         onError: (_error, info) => failures.push(info),
       });
     const tag = () => crypto.randomUUID();
@@ -127,7 +127,7 @@ export function jobsAdapterSuite(name: string, open: () => Promise<Running>, gua
     });
 
     test(guarantees.tries > 1 ? "attempts above 1 are taken" : "attempts above 1 are refused at startup, not ignored", () => {
-      const make = () => createRegistry({ modules, database: { adapter: drizzleAdapter(running.db) }, jobs: { adapter: running.adapter, scope: { load: (saved) => saved } } });
+      const make = () => createRegistry({ modules, database: { adapter: drizzleAdapter(running.db) }, jobs: { adapter: running.adapter, scope: { load: (_ctx, saved) => saved } } });
       if (guarantees.tries > 1) expect(make).not.toThrow();
       else expect(make).toThrow(/shop\.email has attempts: 3, but your jobs adapter, inProcess\(\), runs each job once/);
     });
@@ -231,7 +231,7 @@ export function jobsAdapterSuite(name: string, open: () => Promise<Running>, gua
         },
       });
       const shop = { ...(running.adapter.retries ? modules : once).shop, reply };
-      const make = () => createRegistry({ modules: { shop }, database: { adapter: drizzleAdapter(running.db) }, jobs: { adapter: running.adapter, scope: { load: (saved) => saved } }, onError: () => {} });
+      const make = () => createRegistry({ modules: { shop }, database: { adapter: drizzleAdapter(running.db) }, jobs: { adapter: running.adapter, scope: { load: (_ctx, saved) => saved } }, onError: () => {} });
       if (!guarantees.orders) {
         expect(make).toThrow(/shop\.reply has a key, but your jobs adapter, .+, can't run jobs one at a time by key/);
         return;

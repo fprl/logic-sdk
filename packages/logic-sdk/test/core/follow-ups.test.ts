@@ -38,7 +38,7 @@ const receipt = listener({
 const failures: FailureInfo[] = [];
 const modules = { shop: { ordered, paid, order, pay, charge, stock, receipt } };
 const setup = (waitUntil?: (p: Promise<unknown>) => void) =>
-  createRegistry({ modules, database: { adapter: database }, jobs: { adapter: databaseQueue(), scope: { load: (s) => s } }, onError: (_e, info) => failures.push(info), waitUntil });
+  createRegistry({ modules, database: { adapter: database }, jobs: { adapter: databaseQueue(), scope: { load: (_ctx, s) => s } }, onError: (_e, info) => failures.push(info), waitUntil });
 
 beforeEach(async () => {
   await pg.exec("TRUNCATE logic_jobs, logic_cron_runs");
@@ -74,7 +74,7 @@ test("a sweep's jobs too, and with waitUntil", async () => {
   expect(ran).toEqual(["charge", "stock", "receipt"]);
 
   ran.length = 0;
-  const quiet = createRegistry({ modules, database: { adapter: database }, jobs: { adapter: { ...databaseQueue(), deliver: async () => {} }, scope: { load: (s) => s } } });
+  const quiet = createRegistry({ modules, database: { adapter: database }, jobs: { adapter: { ...databaseQueue(), deliver: async () => {} }, scope: { load: (_ctx, s) => s } } });
   await quiet.as({ actor: "ana" }).run(order); // rows nobody ran
   await pg.exec("UPDATE logic_jobs SET available_at = now() - interval '1 second'");
   let rows: string[] = [];

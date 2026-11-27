@@ -30,7 +30,7 @@ test("ctx.schedule: a job committed with the mutation, as the caller's scope, fo
 test("ctx.schedule: refused where nothing can hold it (in-process), or for longer than the adapter can", async () => {
   const { app, book } = scheduleSetup({ jobs: {} });
   await expect(app.run(book, { who: "guest" })).rejects.toThrow(/ctx\.schedule\(bookings\.remind\) waits 3600s, but your jobs adapter, inProcess\(\), can't hold jobs/);
-  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} }, scope: { load: (saved) => saved } } });
+  const short = scheduleSetup({ jobs: { adapter: { holds: { max: 60 }, async deliver() {} }, scope: { load: (_ctx, saved) => saved } } });
   await expect(short.app.run(short.book, { who: "guest" })).rejects.toThrow(/holds jobs for at most 60s/);
   await expect(short.app.run(short.book, { who: "guest", at: "not a date" })).rejects.toThrow(/needs an `at` date or a `delay`/);
 });
@@ -40,7 +40,7 @@ test("ctx.schedule: the job runs its function as the stored scope, loaded fresh;
     onError: () => {},
     jobs: {
       adapter: { holds: true, async deliver() {} },
-      scope: { load: (saved: { actor: string | null }) => ({ actor: saved.actor, locale: "en" }) }, // today's settings
+      scope: { load: (_ctx: unknown, saved: { actor: string | null }) => ({ actor: saved.actor, locale: "en" }) }, // today's settings
     },
   });
   const run = (job: Job) => registry.jobs.run(job);
@@ -78,7 +78,7 @@ test("ctx.schedule: attempts are stamped on the job; an action that fails retrie
     modules: { x: { charge, go } },
     database: { adapter: memoryDatabase() },
     onError: () => {},
-    jobs: { adapter: { holds: true, retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { holds: true, retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (_ctx, saved) => saved } },
   });
   const app = registry.as({ actor: "a", locale: "es" });
   await app.run(go, { attempts: 3 });
@@ -121,7 +121,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
     modules: { x: { pinged, ping, deep } },
     database: { adapter: memoryDatabase() },
     onError: () => {},
-    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: { load: (saved) => saved }, maxEventDepth: 0 },
+    jobs: { adapter: { holds: true, async deliver(jobs) { held.push(...jobs); } }, scope: { load: (_ctx, saved) => saved }, maxEventDepth: 0 },
   });
   await r2.as({ actor: "a", locale: "es" }).run(deep);
   expect(held).toMatchObject([{ kind: "call", depth: 0 }]);
@@ -131,7 +131,7 @@ test("ctx.schedule: events and calls share one chain, and a real delay starts a 
   const waits = createRegistry<Scope>({
     modules: { x: { pinged, ping, later } },
     database: { adapter: memoryDatabase() },
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (_ctx, saved) => saved } },
   });
   await waits.as({ actor: "a", locale: "es" }).run(later);
   expect(sent).toMatchObject([{ kind: "call", depth: 0 }]); // waiting a minute is a new chain, not a loop
@@ -151,7 +151,7 @@ test("ctx.schedule takes a scope, whole, to run as; wrap's call says which job a
     modules: { b: { remind, book } },
     database: { adapter: memoryDatabase() },
     wrap: (call, next) => (calls.push(call), next()),
-    jobs: { adapter: { holds: true, retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { holds: true, retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (_ctx, saved) => saved } },
   });
   await registry.as({ actor: "ana", locale: "es" }).run(book, {});
   expect(sent[0]).toMatchObject({ kind: "call", fn: "b.remind", scope: { actor: "system", locale: "en" } });
@@ -172,7 +172,7 @@ test("ctx.schedule replace: in tests too, a newer call to the function with the 
     },
   });
   const replacing = { holds: true as const, replaces: true as const, async deliver() {} };
-  const registry = createRegistry<Scope>({ modules: { x: { remind, book } }, database: { adapter: memoryDatabase() }, jobs: { adapter: replacing, scope: { load: (saved) => saved } } });
+  const registry = createRegistry<Scope>({ modules: { x: { remind, book } }, database: { adapter: memoryDatabase() }, jobs: { adapter: replacing, scope: { load: (_ctx, saved) => saved } } });
   const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
   await t.begin();
   const app = t.as({ actor: "ana", locale: "es" });

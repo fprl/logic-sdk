@@ -9,7 +9,7 @@ test("an adapter that can't take the jobs: each is reported with the job itself,
   const reported: FailureInfo[] = [];
   const { app } = setup({
     onError: (_e, info) => void reported.push(info),
-    jobs: { adapter: { deliver: async () => { throw new Error("queue down"); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { deliver: async () => { throw new Error("queue down"); } }, scope: { load: (_ctx, saved) => saved } },
   });
   expect(await app.run(items.add, { name: "q" })).toBeDefined();
   expect(reported).toEqual([expect.objectContaining({ source: "(jobs adapter)", job: expect.objectContaining({ kind: "delivery", listener: "log.onAdded" }) })]);
@@ -21,7 +21,7 @@ test("custom jobs adapter: one delivery per listener, enqueued inside the transa
     jobs: { adapter: {
       async enqueue(tx, jobs) { seen.push(`enqueue ${jobs.map((d) => d.kind === "delivery" && `${d.envelope.name}→${d.listener}`)} in tx=${tx !== undefined}`); },
       async deliver(deliveries, { run }) { seen.push("deliver"); for (const d of deliveries) seen.push(await run(d)); },
-    }, scope: { load: (saved) => saved } },
+    }, scope: { load: (_ctx, saved) => saved } },
   });
   await app.run(items.add, { name: "q" });
   expect(seen).toEqual(["enqueue items.added→log.onAdded in tx=true", "deliver", "done"]);
@@ -29,7 +29,7 @@ test("custom jobs adapter: one delivery per listener, enqueued inside the transa
 
 test("deliveries are JSON: what a queue carries comes back and runs", async () => {
   const deliveries: Job[] = [];
-  const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } }, scope: { load: (saved) => saved } } });
+  const { app, registry } = setup({ jobs: { adapter: { async deliver(d) { deliveries.push(...d); } }, scope: { load: (_ctx, saved) => saved } } });
   await app.run(items.add, { name: "j" });
   const d: Delivery = JSON.parse(JSON.stringify(deliveries[0]));
   expect(d).toMatchObject({ listener: "log.onAdded", envelope: { name: "items.added", depth: 1, scope: { locale: "es" }, payload: { name: "j" } } });
@@ -95,7 +95,7 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   const now = listener({ event: () => happened, async handler() { ran.push("now"); } });
   const jobs: Delivery[] = [];
   const make = (adapter?: JobsAdapter) =>
-    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: { adapter: memoryDatabase() }, now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter, scope: { load: (saved) => saved } } });
+    createRegistry<Scope>({ modules: { x: { happened, doIt, later, now } }, database: { adapter: memoryDatabase() }, now: () => new Date("2026-07-01T10:00:00Z"), jobs: { adapter, scope: { load: (_ctx, saved) => saved } } });
   await make({ holds: true, async deliver(d) { jobs.push(...deliveriesIn(d)); } }).as({ actor: "a", locale: "es" }).run(doIt);
   expect(jobs.map((j) => [j.listener, j.runAt])).toEqual([["x.later", "2026-07-01T10:01:30.000Z"], ["x.now", undefined]]);
   // Laravel's sync queue drops the delay; running a "tomorrow" job now would be wrong, so we refuse
@@ -118,7 +118,7 @@ function keeper() {
 
 test("a consumer's job that fails for good is kept by jobs.failed", async () => {
   const { kept, failed } = keeper();
-  const { registry } = setup({ jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (saved) => saved } }, onError: () => {} });
+  const { registry } = setup({ jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (_ctx, saved) => saved } }, onError: () => {} });
   const job = { kind: "delivery" as const, attempts: 1, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job)).toEqual("failed");
   expect(kept).toEqual(["log.onAdded@e: listener exploded"]);
@@ -153,7 +153,7 @@ test("jobs.scope: store picks what's saved, load rebuilds it at run time, null d
       adapter: { async deliver(d, { run }) { for (const j of deliveriesIn(d)) { stored.push(j.envelope.scope); outcomes.push(await run(j)); } } },
       scope: {
         store: (s) => ({ actor: s.actor }), // the locale isn't saved
-        load: async (saved) => (saved.actor === "gone" ? null : { actor: saved.actor, locale: "fresh" }),
+        load: async (_ctx, saved) => (saved.actor === "gone" ? null : { actor: saved.actor, locale: "fresh" }),
       },
     },
   });
@@ -178,7 +178,7 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
 
 test("a job of a kind this version doesn't know uses its attempts, then it's kept", async () => {
   const { kept, failed } = keeper();
-  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (saved) => saved } } });
+  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (_ctx, saved) => saved } } });
   const job = { kind: "nope", id: "x", attempts: 2, listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
   await expect(registry.jobs.run(job as never)).rejects.toThrow(/which this version can't run/);
   expect(await registry.jobs.run(job as never, { attempt: 2 })).toEqual("failed");
@@ -200,7 +200,7 @@ test("jobs.scope: any adapter but inProcess() keeps jobs to run later, so it nee
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later } })).toThrow(/keeps jobs to run later, so set jobs\.scope\.load/);
   // @ts-expect-error the same, for an adapter that only forwards
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: forwards } })).toThrow(/jobs\.scope\.load/);
-  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later, scope: { load: (saved) => saved } } })).not.toThrow(); // keeping it as it was is a choice you write down
+  expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: later, scope: { load: (_ctx, saved) => saved } } })).not.toThrow(); // keeping it as it was is a choice you write down
   expect(() => createRegistry<Scope>({ modules: {}, jobs: { adapter: inProcess() } })).not.toThrow(); // runs now, in this process: nothing waits
 });
 

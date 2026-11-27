@@ -8,7 +8,7 @@ test("cloudflareQueue sends after commit; handleQueue runs each job: ack, or ret
   ran.length = 0;
   const queue = fakeQueue();
   const reported: string[] = [];
-  const registry = createRegistry({ modules, database: { adapter: memoryDatabase() }, onError: (e) => reported.push((e as Error).message), jobs: { adapter: cloudflareQueue(queue), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules, database: { adapter: memoryDatabase() }, onError: (e) => reported.push((e as Error).message), jobs: { adapter: cloudflareQueue(queue), scope: { load: (_ctx, saved) => saved } } });
   await registry.as({ actor: "ana" }).run(emit, { what: ["ok", "throw", "deny"] });
   expect(ran).toEqual([]); // nothing runs in the request
   const jobs = queue.sent.flat().map((m) => m.body);
@@ -30,7 +30,7 @@ test("handleScheduled ticks at the trigger's time and sweeps; a cron's run goes 
   ran.length = 0;
   const queue = fakeQueue();
   const nightly = cron({ schedule: "0 3 * * *", scope: { actor: "system" }, handler: (ctx) => ctx.run(emit, { what: ["nightly"] }) });
-  const registry = createRegistry({ modules: { x: { ...modules.x, nightly } }, database: { adapter: memoryDatabase() }, jobs: { adapter: cloudflareQueue(queue), scope: { load: (saved) => saved } } });
+  const registry = createRegistry({ modules: { x: { ...modules.x, nightly } }, database: { adapter: memoryDatabase() }, jobs: { adapter: cloudflareQueue(queue), scope: { load: (_ctx, saved) => saved } } });
   await handleScheduled(registry, { scheduledTime: Date.parse("2026-11-23T03:00:00Z") });
   const [message] = queue.sent.flat();
   expect(message!.body).toMatchObject({ kind: "cron", id: "x.nightly@20261123T0300Z" });

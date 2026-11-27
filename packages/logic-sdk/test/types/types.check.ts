@@ -233,7 +233,7 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
     jobs: {
       scope: {
         store: (s) => ({ who: s.actor }),
-        load: (saved) => {
+        load: (_ctx, saved) => {
           // @ts-expect-error: only what store saved
           void saved.locale;
           return { actor: saved.who, locale: "es" };
@@ -246,7 +246,7 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
     jobs: {
       scope: {
         // load first: annotate its parameter, since TypeScript reads the object in order (or write store first)
-        load: (saved: { who: string | null }) => ({ actor: saved.who, locale: "es" }),
+        load: (_ctx, saved: { who: string | null }) => ({ actor: saved.who, locale: "es" }),
         store: (s) => ({ who: s.actor }),
       },
     },
@@ -257,7 +257,18 @@ init<{ scope: Scope; servises: { mail: () => void } }>();
     jobs: { scope: { load: () => ({ nope: 1 }) } },
   });
   // keeping the scope as it was, the documented escape hatch: `saved` is the app's scope, unannotated
-  m.createRegistry({ modules: {}, jobs: { adapter: { async deliver() {} }, scope: { load: (saved) => saved } } });
+  m.createRegistry({ modules: {}, jobs: { adapter: { async deliver() {} }, scope: { load: (_ctx, saved) => saved } } });
+}
+// load's ctx: the database as queries read it, and the config
+{
+  type Db = { users: string[] };
+  const m = init<{ scope: { id: string }; db: Db; config: { region: string } }>();
+  m.createRegistry({
+    modules: {},
+    config: { region: "eu" },
+    database: { adapter: {} as never },
+    jobs: { scope: { load: async (ctx, saved) => { const d: Db = ctx.db; const r: string = ctx.config.region; void d; void r; return saved; } } },
+  });
 }
 
 // Drizzle's synchronous SQLite drivers commit before an async mutation finishes, and Drizzle's types reject them
@@ -372,10 +383,10 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const { createRegistry } = init<{ scope: { userId: string; role: string } }>();
   const queue: JobsAdapter = { async deliver() {} };
   createRegistry({ modules: {}, jobs: { adapter: inProcess() } });
-  createRegistry({ modules: {}, jobs: { adapter: queue, scope: { load: (saved) => saved } } });
+  createRegistry({ modules: {}, jobs: { adapter: queue, scope: { load: (_ctx, saved) => saved } } });
   createRegistry({
     modules: {},
-    jobs: { adapter: queue, scope: { store: (s) => ({ id: s.userId }), load: (saved) => ({ userId: saved.id, role: "today" }) } },
+    jobs: { adapter: queue, scope: { store: (s) => ({ id: s.userId }), load: (_ctx, saved) => ({ userId: saved.id, role: "today" }) } },
   });
   // @ts-expect-error who would its jobs run as?
   createRegistry({ modules: {}, jobs: { adapter: queue } });
@@ -401,7 +412,7 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   // @ts-expect-error without query, jobs can't use your database
   ({ db: prisma, transaction: (fn) => prisma.$transaction(fn) }) satisfies SqlDatabase<PrismaClient, PrismaTx>;
   const { createRegistry } = init<{ scope: { who: string }; db: ReadWrite<PrismaClient, PrismaTx> }>();
-  createRegistry({ modules: {}, database: { adapter: database }, jobs: { adapter: databaseQueue(), scope: { load: (saved) => saved } } });
+  createRegistry({ modules: {}, database: { adapter: database }, jobs: { adapter: databaseQueue(), scope: { load: (_ctx, saved) => saved } } });
 }
 
 // SQLite: one function that opens it, the same names, and queries that can't write
@@ -409,7 +420,7 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const open = () => bunSqlite({ client: new Database("app.db") });
   const database = sqlite.drizzleAdapter(open);
   const { query, createRegistry } = init<{ scope: object; db: sqlite.DrizzleDb<ReturnType<typeof open>> }>();
-  createRegistry({ modules: {}, database: { adapter: database }, jobs: { adapter: sqlite.databaseQueue(), scope: { load: (saved) => saved } } });
+  createRegistry({ modules: {}, database: { adapter: database }, jobs: { adapter: sqlite.databaseQueue(), scope: { load: (_ctx, saved) => saved } } });
   // @ts-expect-error a query has no insert
   query({ handler: async (ctx) => ctx.db.insert });
   // @ts-expect-error the function, not a connection

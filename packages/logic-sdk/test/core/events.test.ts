@@ -48,7 +48,7 @@ test("run options: events emitted by the callee carry its scope; the caller's ow
     modules: { items, log, x: { emits } },
     database: { adapter: memoryDatabase() },
     services: { log: [] },
-    jobs: { adapter: { deliver: async (jobs) => void seen.push(...jobs.flatMap((d) => (d.kind === "delivery" ? [d.envelope] : []))) }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { deliver: async (jobs) => void seen.push(...jobs.flatMap((d) => (d.kind === "delivery" ? [d.envelope] : []))) }, scope: { load: (_ctx, saved) => saved } },
   });
   await r.as({ actor: "ana", locale: "es" }).run(emits, { name: "z" });
   expect(seen.map((e) => e.scope)).toEqual([{ actor: "system", locale: "es" }]);
@@ -194,7 +194,7 @@ test("listener `when`: false, and the event gets no job for it; it sees the pars
   // a custom adapter sees exactly the jobs made: none for fraud on a small order
   const enqueued: Job[] = [];
   const adapter: JobsAdapter = { async enqueue(_tx, jobs) { enqueued.push(...jobs); }, async deliver() {} };
-  const queued = createRegistry<Scope>({ modules, database: { adapter: memoryDatabase() }, services: { log: [] }, jobs: { adapter, scope: { load: (s) => s } } });
+  const queued = createRegistry<Scope>({ modules, database: { adapter: memoryDatabase() }, services: { log: [] }, jobs: { adapter, scope: { load: (_ctx, s) => s } } });
   await queued.as(scope).run(place, { total: 100 });
   await queued.as(scope).run(place, { total: 9000 });
   expect(deliveriesIn(enqueued).map((d) => `${d.listener} ${(d.envelope.payload as { total: number }).total}`)).toEqual(["o.always 100", "o.fraud 9000", "o.always 9000"]);

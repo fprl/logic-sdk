@@ -19,6 +19,7 @@ import type {
   Jobs,
   CronRun,
   ListenerEvent,
+  LoadCtx,
   LocalWorker,
   RegisteredCron,
   RegisteredFn,
@@ -164,6 +165,8 @@ export interface JobsDeps {
   runAs(fn: Fn, input: unknown, scope: object, eventDepth: number, queued: Job[] | undefined, job: { id: string; attempt: number }): Promise<unknown>;
   /** The ctx a listener's or cron's handler gets, as `scope`, in an event chain `eventDepth` deep. `stop`: its timeout. */
   handlerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined, stop?: AbortSignal): ActionCtx<any>;
+  /** What `jobs.scope.load` gets first: the registry's database (a test's transaction in tests) and config. */
+  loadCtx(): LoadCtx;
 }
 
 /**
@@ -171,7 +174,7 @@ export interface JobsDeps {
  * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, failedStore, maxEventDepth, queues, now, wrap, report, runAs, handlerCtx } = deps;
+  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, failedStore, maxEventDepth, queues, now, wrap, report, runAs, handlerCtx, loadCtx } = deps;
   /** Your adapter, as messages name it: by what it can't do, and by its own name. */
   const yours = jobsAdapter.name ? `your jobs adapter, ${jobsAdapter.name},` : "your jobs adapter";
 
@@ -306,7 +309,7 @@ export function makeJobs(deps: JobsDeps) {
   /** Who a stored job runs as: `jobs.scope.load` rebuilds it; null means discard it (reported). */
   async function scopeOf(job: Job, stored: object, attempt: number): Promise<object | null> {
     if (!jobScope?.load) return stored;
-    const loaded = await jobScope.load(stored);
+    const loaded = await jobScope.load(loadCtx(), stored);
     if (loaded === undefined) throw new Error(`[logic-sdk] jobs.scope.load returned undefined for ${job.id}. Return the scope, or null to discard the job.`);
     if (loaded === null) report(new Error(`[logic-sdk] jobs.scope.load returned null for ${job.id}, so it was discarded.`), { ...infoOf(job, attempt), outcome: "discarded" });
     return loaded;
@@ -394,7 +397,7 @@ export function makeJobs(deps: JobsDeps) {
     if (hook)
       afterFailed = async (error) => {
         if (error instanceof StalePayload) return;
-        const scope = jobScope?.load ? await jobScope.load(envelope.scope) : envelope.scope;
+        const scope = jobScope?.load ? await jobScope.load(loadCtx(), envelope.scope) : envelope.scope;
         const r = await l.event.payload["~standard"].validate(envelope.payload);
         if (!scope || r.issues || idOf(l.event) !== envelope.name) return;
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload: r.value, occurredAt: envelope.occurredAt, attempt };

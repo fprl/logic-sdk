@@ -5,7 +5,7 @@ import { memoryDatabase, type Store } from "./memory-db.ts";
 
 /** Like inProcess(), one try per run here, but it says it retries: for tests of what `attempts` do, which inProcess() refuses. */
 export const retrying = { retries: true as const, async deliver(jobs: Job[], { run }: Runner) { for (const job of jobs) await run({ ...job, attempts: 1 }); } };
-export const inline = { adapter: retrying, scope: { load: (saved: any) => saved } };
+export const inline = { adapter: retrying, scope: { load: (_ctx: unknown, saved: any) => saved } };
 
 export const deliveriesIn = (jobs: Job[]) => jobs.filter((j): j is Delivery => j.kind === "delivery");
 
@@ -169,7 +169,7 @@ export function scheduleSetup(extra: Partial<Parameters<typeof createRegistry>[0
     modules: { bookings: { remind, book } },
     database: { adapter: memoryDatabase() },
     now: () => new Date("2026-07-01T10:00:00Z"),
-    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { holds: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (_ctx, saved) => saved } },
     ...extra,
   });
   return { registry, book, reminded, sent, app: registry.as({ actor: "ana", locale: "es" }) };

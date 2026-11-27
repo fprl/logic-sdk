@@ -46,7 +46,7 @@ interface SetupError<Message extends string> {
 type NoDb = SetupError<"Add db to the Config you pass to init">;
 /** What mutations get, and `database`'s transaction type. `never`: the app declared no database. */
 export type DbOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<any, infer Tx> ? Tx : D) : never;
-type ReaderOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<infer Reader, any> ? Reader : D) : NoDb;
+export type ReaderOf<C extends Config> = C extends { db: infer D } ? (D extends ReadWrite<infer Reader, any> ? Reader : D) : NoDb;
 type TxOf<C extends Config> = C extends { db: unknown } ? DbOf<C> : NoDb;
 export type ServicesOf<C extends Config> = C extends { services: infer S } ? S : {};
 type MetaOf<C extends Config> = C extends { meta: infer M } ? M : never;
@@ -711,10 +711,21 @@ export interface FailedPage<Stored = Record<string, unknown>> {
  * a throw retries it. By default the scope is stored as it was at emit. `store` needs `load`: listeners run as a scope,
  * not as what was saved. Every adapter but `inProcess()` keeps jobs to run later, so it needs `load`: `createRegistry` checks.
  */
-export interface JobScope<S = object, T = any> {
+/** What `jobs.scope.load` gets first: a query's ctx, without a caller yet. */
+export interface LoadCtx<Db = any, Cf = any> {
+  /** The registry's database, as your queries read it: in `createTestRegistry`, the test's transaction. */
+  db: Db;
+  config: Cf;
+}
+
+export interface JobScope<S = object, T = any, Db = any, Cf = any> {
+  /** What a job keeps of the scope it was queued as: ids, as plain JSON. Sync, from the scope only. */
   store?: (scope: S) => T;
-  /** What `store` saved. Write `store` first so TypeScript infers it (or annotate this parameter). */
-  load?: (stored: T) => S | null | Promise<S | null>;
+  /**
+   * The scope a job runs as, rebuilt from what `store` saved with today's roles: `null` discards the job. Read through
+   * `ctx.db`, as a query does, so a test's rows are visible. Write `store` first so TypeScript infers `stored`.
+   */
+  load?: (ctx: LoadCtx<Db, Cf>, stored: T) => S | null | Promise<S | null>;
 }
 
 /** Marks `inProcess()` for TypeScript: the one adapter that keeps no jobs, so needs no `jobs.scope`. */
@@ -728,7 +739,7 @@ export interface InProcess extends JobsAdapter {
  * `createRegistry({ jobs })`: where background work goes, and what every adapter applies. `load` inside `scope` is
  * checked at startup: requiring it here would report a missing one as a wrong `store`.
  */
-export type JobsOptions<S = object, T = any> = {
+export type JobsOptions<S = object, T = any, Db = any, Cf = any> = {
   /**
    * Where failed jobs are kept when your adapter can't keep them itself (a queue on its own), like Laravel's `failed`
    * driver: `failed: failedJobs()`. `registry.jobs.failed`, `retry` and `forget` then work on it.
@@ -751,13 +762,13 @@ export type JobsOptions<S = object, T = any> = {
       /** `inProcess()` (default), or a durable one like `databaseQueue()`. Its own options go in its factory. */
       adapter?: InProcess;
       /** Applied by the registry in every adapter, `inProcess()` and tests included. */
-      scope?: JobScope<S, T>;
+      scope?: JobScope<S, T, Db, Cf>;
     }
   | {
       /** An adapter that keeps jobs to run later, like `databaseQueue()`. */
       adapter?: JobsAdapter;
       /** Required: such a job runs as the scope `load` rebuilds, with today's roles. */
-      scope: JobScope<S, T>;
+      scope: JobScope<S, T, Db, Cf>;
     }
 );
 

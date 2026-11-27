@@ -50,7 +50,7 @@ test("key: jobs with the same key run one at a time, in order; another key doesn
 test("key: refused at startup by an adapter that can't run jobs in order", () => {
   const reply = listener({ event: () => said, key: (m) => m.conversation, async handler() {} });
   const queue = { name: "aQueue()", async deliver() {} };
-  expect(() => createRegistry({ modules: { chat: { said, say, reply } }, database: { adapter: memoryDatabase() }, jobs: { adapter: queue, scope: { load: (s) => s } } })).toThrow(
+  expect(() => createRegistry({ modules: { chat: { said, say, reply } }, database: { adapter: memoryDatabase() }, jobs: { adapter: queue, scope: { load: (_ctx, s) => s } } })).toThrow(
     "[logic-sdk] chat.reply has a key, but your jobs adapter, aQueue(), can't run jobs one at a time by key.",
   );
 });
@@ -83,7 +83,7 @@ test("unique: within one commit, the first job per value is kept and the rest dr
   const app = createRegistry({
     modules: { shop: { changed, restock, reindex } },
     database: { adapter: memoryDatabase() },
-    jobs: { adapter: { replaces: true, async deliver(batch) { jobs.push(...batch); } }, scope: { load: (s) => s } },
+    jobs: { adapter: { replaces: true, async deliver(batch) { jobs.push(...batch); } }, scope: { load: (_ctx, s) => s } },
   }).as({ who: "ana" });
   await app.run(restock, { products: ["p1", "p2", "p1", "p1"] });
   expect(jobs.map((j) => j.kind === "delivery" && [j.envelope.payload, j.unique])).toEqual([
@@ -95,7 +95,7 @@ test("unique: within one commit, the first job per value is kept and the rest dr
 test("unique: refused at startup by an adapter that holds jobs but can't drop one it has", () => {
   const reindex = listener({ event: () => changed, unique: (p) => p.product, async handler() {} });
   const queue = { name: "aQueue()", holds: true as const, async deliver() {} };
-  expect(() => createRegistry({ modules: { shop: { changed, restock, reindex } }, database: { adapter: memoryDatabase() }, jobs: { adapter: queue, scope: { load: (s) => s } } })).toThrow(
+  expect(() => createRegistry({ modules: { shop: { changed, restock, reindex } }, database: { adapter: memoryDatabase() }, jobs: { adapter: queue, scope: { load: (_ctx, s) => s } } })).toThrow(
     "[logic-sdk] shop.reindex is unique, but your jobs adapter, aQueue(), can't drop a job it already has.",
   );
 });
@@ -118,7 +118,7 @@ test("timeout: the try is stopped, ctx.signal aborts and no new ctx.run starts; 
   const registry = createRegistry({
     modules: { chat: { said, say, slow, note } },
     database: { adapter: memoryDatabase() },
-    jobs: { adapter: { retries: true, async deliver(jobs) { queued.push(...jobs); } }, scope: { load: (s) => s } },
+    jobs: { adapter: { retries: true, async deliver(jobs) { queued.push(...jobs); } }, scope: { load: (_ctx, s) => s } },
     onError: (_e, info) => void failures.push(info),
   });
   await registry.as({ who: "ana" }).run(say, { conversation: "c1", text: "hi" });

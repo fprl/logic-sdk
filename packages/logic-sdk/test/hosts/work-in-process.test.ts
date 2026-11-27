@@ -30,7 +30,7 @@ test("a request answers before its job, and work() in this process starts it at 
   const registry = createRegistry({
     modules: { shop: { placed, place, receipt } },
     database: { adapter: drizzleAdapter(drizzle({ client: pglite })) },
-    jobs: { adapter: databaseQueue(), scope: { load: (s) => s } },
+    jobs: { adapter: databaseQueue(), scope: { load: (_ctx, s) => s } },
   });
   const stop = work(registry, { pollEvery: 60 }); // a poll a minute: only the wake can start it in time
   await new Promise((resolve) => setTimeout(resolve, 50)); // the slot has looked once and sleeps

@@ -36,7 +36,7 @@ const registry = createRegistry({
   modules: { x: { added, add, record, onAdded } },
   database: { adapter: database },
   // `enqueue` commits jobs and never runs them, as if each process died after its commit
-  jobs: { adapter: mode === "enqueue" ? { ...queue, deliver: async () => {} } : queue, scope: { load: (saved) => saved } },
+  jobs: { adapter: mode === "enqueue" ? { ...queue, deliver: async () => {} } : queue, scope: { load: (_ctx, saved) => saved } },
 });
 
 if (mode === "sweep") console.log((await registry.jobs.sweep({ limit: 1000 })).done);

@@ -79,7 +79,7 @@ test("the receipt email", async () => {
 - **`perform`** runs one listener by hand, as if its event had been emitted as `scope`.
 - **What waits, waits for `drain()`,** in both modes: a listener's `delay` (in `t.jobs.queued`) and `ctx.schedule` (in `t.jobs.scheduled`). `drain()` runs what's due at the test's `now`; `drain({ until })` runs what's due by then, each job at the time it was due (that's what its `ctx.now()` reads).
 - **The test registry holds what your app's adapter holds:** on `inProcess()`, `ctx.schedule` throws in tests too, as it would in production. Build it from the registry your app runs, so `createRegistry`'s checks (like `jobs.scope.load` for a database queue) run in tests too.
-- **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it; one that ran through `t.registry` (an adapter's call) makes `rollback` throw. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw.
+- **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it; one that ran through `t.registry` (an adapter's call) makes `rollback` throw. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw: `perform` resolves `"discarded"`. `load` reads through `ctx.db`, the test's transaction, so a job for an account the test created isn't discarded.
 
 ```ts
 test("confirming schedules a reminder the day before", async () => {
