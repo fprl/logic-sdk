@@ -1,7 +1,7 @@
 // Jobs: what an adapter is handed, registry.jobs.run's tries, jobs.scope.
 import { z } from "zod";
 import { expect, test } from "bun:test";
-import { createRegistry, init, inProcess, type Delivery, type FailureInfo, type Job, type JobsAdapter } from "../../src/index.ts";
+import { createRegistry, init, inProcess, type Delivery, type FailedJobs, type FailureInfo, type Job, type JobsAdapter } from "../../src/index.ts";
 import { deliveriesIn, event, inline, items, listener, mutation, retrying, setup, type Scope } from "../support/app.ts";
 import { memoryDatabase, type Store } from "../support/memory-db.ts";
 
@@ -104,19 +104,24 @@ test("delay: the job says when it may run; an adapter that can't hold it (in-pro
   expect(ran).toEqual([]);
 });
 
-test("adapter hooks: connect sees the listeners and database at createRegistry; fail keeps what a consumer failed", async () => {
-  const seen: string[] = [];
-  const failed: string[] = [];
-  const adapter: JobsAdapter = {
-    connect: ({ listeners, database }) => void seen.push(...listeners.map((l) => l.id), database ? "db" : "no db"),
-    deliver: async () => {},
-    fail: async (job, error) => void failed.push(`${job.id}: ${(error as Error).message}`),
+/** A `jobs.failed` store that only keeps what it's given. */
+function keeper() {
+  const kept: string[] = [];
+  const failed: FailedJobs = {
+    fail: async (job, error) => void kept.push(`${job.id}: ${(error as Error).message}`),
+    failed: async () => ({ rows: [], cursor: null }),
+    take: async () => undefined,
+    forget: async () => false,
   };
-  const { registry } = setup({ jobs: { adapter, scope: { load: (saved) => saved } }, onError: () => {} });
-  expect(seen).toEqual(["log.onAdded", "db"]);
+  return { kept, failed };
+}
+
+test("a consumer's job that fails for good is kept by jobs.failed", async () => {
+  const { kept, failed } = keeper();
+  const { registry } = setup({ jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (saved) => saved } }, onError: () => {} });
   const job = { kind: "delivery" as const, attempts: 1, id: "log.onAdded@e", listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "listener-fails" }, scope: { actor: "a", locale: "es" }, occurredAt: "", depth: 1 } };
   expect(await registry.jobs.run(job)).toEqual("failed");
-  expect(failed).toEqual(["log.onAdded@e: listener exploded"]);
+  expect(kept).toEqual(["log.onAdded@e: listener exploded"]);
 });
 
 test("a job whose mutation swallowed a nested `reject` fails at once, as the `reject` would", async () => {
@@ -171,13 +176,13 @@ test("jobs.scope: what store returns must be plain JSON; a load that throws is r
   await expect(flaky.jobs.run(job)).rejects.toThrow("db down");
 });
 
-test("a job of a kind this version doesn't know uses its attempts, then the adapter keeps it", async () => {
-  const kept: string[] = [];
-  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {}, fail: async (_job, e) => void kept.push((e as Error).message) }, scope: { load: (saved) => saved } } });
+test("a job of a kind this version doesn't know uses its attempts, then it's kept", async () => {
+  const { kept, failed } = keeper();
+  const { registry } = setup({ onError: () => {}, jobs: { adapter: { deliver: async () => {} }, failed, scope: { load: (saved) => saved } } });
   const job = { kind: "nope", id: "x", attempts: 2, listener: "log.onAdded", envelope: { id: "e", name: "items.added", payload: { name: "a" }, scope: {}, occurredAt: "", depth: 1 } };
   await expect(registry.jobs.run(job as never)).rejects.toThrow(/which this version can't run/);
   expect(await registry.jobs.run(job as never, { attempt: 2 })).toEqual("failed");
-  expect(kept).toEqual([expect.stringMatching(/job x has kind "nope", which this version can't run/)]);
+  expect(kept).toEqual([expect.stringMatching(/x: .*job x has kind "nope", which this version can't run/)]);
 });
 
 test("jobs.scope.load failing counts as a try: at the default of one, the job fails", async () => {

@@ -1,7 +1,7 @@
 import { serve } from "@hono/node-server";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { drizzleAdapter } from "logic-sdk/drizzle/pg";
-import { startTicking } from "logic-sdk/node";
+import { work } from "logic-sdk/node";
 import postgres from "postgres";
 import { createApi } from "./http";
 import { createShop, settingsFrom } from "./registry";
@@ -16,5 +16,10 @@ const app = createApi(() => shop);
 
 serve({ fetch: app.fetch, port: 3000 }, (info) => console.log(`http://localhost:${info.port}`));
 
-// every minute: the crons in code (orders.sendDigest), and the jobs a crash or a failure left in the table
-startTicking(shop);
+// in this process: it takes the jobs requests commit (they answer first), the crons in code (orders.sendDigest) every
+// minute, and what a crash, a retry or a delay left in the table
+const stop = work(shop);
+process.on("SIGTERM", async () => {
+  await stop();
+  process.exit(0);
+});

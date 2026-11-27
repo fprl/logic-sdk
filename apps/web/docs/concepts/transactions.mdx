@@ -34,7 +34,7 @@ try {
 }
 ```
 
-Postgres does the same after a failed statement, and so does Ecto: a rescued inner failure aborts [the whole outer transaction](https://github.com/elixir-ecto/ecto/blob/master/lib/ecto/repo.ex). See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
+Postgres does the same after a failed statement. See [catching errors](/docs/concepts/errors#catching) for what you can do instead.
 
 When the caller caught the failure and returned, the commit fails with an error of its own. It names the path down to the failure, and keeps the failure as its `cause`:
 
@@ -74,7 +74,7 @@ export const wakeDue = cron({
 });
 ```
 
-Written as a mutation, one bad row would roll back every other row's work, every time it runs. Convex draws the same line: an action's [`runMutation` calls run in separate transactions](https://github.com/get-convex/convex-backend/blob/main/npm-packages/docs/docs/functions/actions.mdx).
+Written as a mutation, one bad row would roll back every other row's work, every time it runs.
 
 ## Lost races are retried
 
@@ -83,7 +83,6 @@ Sometimes Postgres aborts a transaction because it lost a race with another one:
 - Up to **3 attempts**, with a short random pause between them.
 - **Even when a caller caught it.** A nested mutation that lost the race dooms the transaction, so the whole mutation runs again, even if its caller went on and Postgres then failed the next statement (`25P02`).
 - **Safe**, because mutations have no side effects and their events are rebuilt on each attempt.
-- **Familiar**: Laravel does the same with `DB::transaction(fn, attempts)`, and Convex re-runs conflicting mutations automatically.
 - **Not a job retry**: a listener's `attempts` decide how often a job runs. Each of those runs can retry its own transactions.
 
 It goes in `createRegistry`, next to the database adapter:

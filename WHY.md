@@ -55,7 +55,7 @@ The bugs every hand-rolled service layer eventually ships, made impossible or lo
 - ✅ **Runs on Node, Bun and Cloudflare Workers.** No `node:` imports, no AsyncLocalStorage.
 - ✅ **Adapters:** fetch handler, oRPC v2 (typed client, OpenAPI and MCP through oRPC).
 - ✅ **Database adapter seam:** Drizzle today.
-- ✅ **Jobs adapters:** in-process, your Postgres as the queue, Cloudflare Queues (alone or behind an outbox) and pg-boss, with no changes to mutations or listeners.
+- ✅ **Jobs adapters:** in-process, your Postgres as the queue, Cloudflare Queues (alone or behind an outbox), with a worker for Node, and no changes to mutations or listeners.
 
 ## 6. One way to call your logic, from anywhere
 

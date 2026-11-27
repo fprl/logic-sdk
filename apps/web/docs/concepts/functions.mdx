@@ -72,7 +72,7 @@ Time comes from `ctx.now()`, never `new Date()`, so tests can freeze it.
 
 ## Helpers take ctx
 
-Shared logic lives in plain functions that take the whole `ctx`, the way Convex recommends. They read `ctx.db` and `ctx.scope`, so tenancy filters can't be forgotten.
+Shared logic lives in plain functions that take the whole `ctx`. They read `ctx.db` and `ctx.scope`, so tenancy filters can't be forgotten.
 
 ```ts
 export async function findBooking(ctx: QueryCtx, id: string) {
@@ -104,7 +104,7 @@ Inside a module, you can call your own functions two ways. They aren't the same:
 | Traced by `wrap` | Yes | No |
 | What it is | A call through the registry | Plain TypeScript |
 
-**Within a module, prefer helpers.** Use `run` on your own module's function when you want its policy and validation, for example to reuse a mutation whose rules you'd otherwise copy. Convex gives the same advice: use `ctx.runQuery` and `ctx.runMutation` sparingly, and prefer plain TypeScript functions.
+**Within a module, prefer helpers.** Use `run` on your own module's function when you want its policy and validation, for example to reuse a mutation whose rules you'd otherwise copy.
 
 **Across modules, always `run`**, through the other module's index. Never import its `data.ts` or `schema.ts`.
 

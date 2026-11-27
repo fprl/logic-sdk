@@ -13,8 +13,9 @@ export interface QueueBatch {
 
 /**
  * Your Worker's `queue` handler: runs each message's job, then acknowledges it (`done`, `failed`, `discarded`) or
- * retries it with a backoff (it threw and the listener has tries left). One message at a time, each acknowledged on
- * its own, so one failure doesn't redeliver the batch.
+ * retries it with a backoff (it threw). One message at a time, each acknowledged on its own, so one failure doesn't
+ * redeliver the batch. Alone, a throw means the listener has tries left. Behind an outbox, a message is a signal: the
+ * job runs from its row (with a `key`, the key's next jobs, in order), and a throw means the table couldn't be reached.
  *
  * ```ts
  * async queue(batch, env, ctx) {
@@ -35,8 +36,8 @@ export async function handleQueue(registry: { jobs: Pick<Jobs, "run"> }, batch: 
 }
 
 /**
- * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (databaseQueue's retries,
- * delayed jobs, and sends a crash left behind). Use `"* * * * *"`, or one trigger per cron: Cloudflare numbers weekdays
+ * Your Worker's `scheduled` handler: runs the crons due at the trigger's time, then sweeps (the jobs table's retries,
+ * delayed jobs, and what a lost signal or a crash left behind). Use `"* * * * *"`, or one trigger per cron: Cloudflare numbers weekdays
  * 1 = Sunday, so write them as names (`MON`) in both places.
  *
  * ```ts

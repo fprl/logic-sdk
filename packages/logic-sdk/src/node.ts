@@ -1,1 +1,1 @@
-export { startTicking, type StopOptions, type TickingOptions } from "./hosts/node.ts";
+export { work, type StopOptions, type WorkOptions } from "./hosts/node.ts";

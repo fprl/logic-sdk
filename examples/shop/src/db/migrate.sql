@@ -25,11 +25,14 @@ create table if not exists logic_jobs (
   claimed_at timestamptz,
   last_error text,
   failed_at timestamptz,
-  replace_key text,
+  unique_key text,
+  order_key text,
+  seq bigserial not null,
   created_at timestamptz not null default now()
 );
 create index if not exists logic_jobs_due on logic_jobs (available_at) where status = 'pending';
-create unique index if not exists logic_jobs_replace on logic_jobs (replace_key) where status = 'pending' and attempts = 0;
+create unique index if not exists logic_jobs_unique on logic_jobs (unique_key) where status = 'pending' and attempts = 0;
+create index if not exists logic_jobs_order on logic_jobs (order_key, seq) where status = 'pending';
 create index if not exists logic_jobs_failed on logic_jobs (failed_at, id) where status = 'failed';
 
 create table if not exists logic_cron_runs (

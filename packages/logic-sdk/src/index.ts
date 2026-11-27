@@ -1,6 +1,7 @@
 export type {
   ActionCtx,
   AdapterSetup,
+  LocalWorker,
   Call,
   CallJob,
   Caller,
@@ -66,9 +67,10 @@ export type {
   Schema,
   ScopeMatch,
   SqlDatabase,
+  SweepOptions,
   SweepResult,
 } from "./core/types.ts";
 export { DomainError, isDomainError, unauthenticated, type ErrorKind } from "./core/errors.ts";
 export { inProcess } from "./core/in-process.ts";
-export { defaultBackoff, storedReplaceKey } from "./core/jobs.ts";
+export { defaultBackoff, storedUniqueKey } from "./core/jobs.ts";
 export { createRegistry, describeModules, init } from "./core/registry.ts";

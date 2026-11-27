@@ -44,4 +44,3 @@ export const staffOrSystem = (s: Scope) => staff(s) || system(s);
 - **It has no actor,** so `signedIn` and `staff` still say no: every grant to the system is explicit.
 - **A request never builds it.** Only your crons and scripts do.
 - **If you set `jobs.scope`, `store` and `load` must handle it.** A cron's own run doesn't use them (its scope comes from your code), but an event its mutation emits, or a call it schedules, stores the system scope like any other: keep the `system` field in `store` and rebuild it in `load`.
-- **Phoenix does the same:** its scope is your own struct, with `user: nil` and extra fields for a scope "not tied to a user". Convex passes no auth to scheduled functions at all.

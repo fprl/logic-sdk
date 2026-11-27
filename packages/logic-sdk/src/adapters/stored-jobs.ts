@@ -1,8 +1,8 @@
 // Jobs in the registry's database, written in the mutation's transaction: run from there (databaseQueue), or kept
 // until a queue has them (outbox). The table's statements are SQL, one set per database (postgres.ts, sqlite.ts), and run through
 // the database adapter's `query`, so this file knows no ORM and no driver.
-import { defaultBackoff, storedReplaceKey } from "../core/jobs.ts";
-import type { AdapterSetup, FailedJobs, FailedQuery, FailedRow, Job, JobOutcome, JobsAdapter, Runner, SqlDatabase, SweepResult } from "../core/types.ts";
+import { defaultBackoff, storedUniqueKey } from "../core/jobs.ts";
+import type { AdapterSetup, FailedJobs, FailedQuery, FailedRow, Job, JobOutcome, JobsAdapter, Runner, SqlDatabase, SweepOptions, SweepResult } from "../core/types.ts";
 
 /**
  * The table's statements for one database. Parameters are strings and numbers only, so no driver has to guess a type:
@@ -10,23 +10,33 @@ import type { AdapterSetup, FailedJobs, FailedQuery, FailedRow, Job, JobOutcome,
  * the order written here, so a database with positional `?` works too. Each returns the columns named, lowercase.
  */
 export interface JobsSql {
-  /** `(pickup, rows)`: rows is JSON `[{ id, job, at, key }]`, `at` in epoch ms or null (due now, a sweep's after `pickup` seconds). A waiting row with the same `key` becomes the new one. */
+  /**
+   * `(pickup, rows)`: rows is JSON `[{ id, job, at, unique, order }]`, `at` in epoch ms or null (due now, a sweep's
+   * after `pickup` seconds). A waiting row with the same `unique` is replaced by a call, and kept over a delivery.
+   */
   insert: string;
   /** `(ids)`: records cron ticks nobody recorded yet. Returns `id`. */
   recordTicks: string;
   /** `()`: forgets ticks older than a day. */
   pruneTicks: string;
-  /** `(receipt, lease, ids)`: the first claim, of rows nobody claimed. Returns `id`. */
+  /** `(receipt, lease, id)`: the first claim, of a row nobody claimed. Returns `id`. */
   claimNew: string;
-  /** `(receipt, lease)`: claims the one row due first. Returns `job` (JSON text) and `attempts`. */
+  /**
+   * `(receipt, lease, grace, queue)`: claims the one row due first (`grace` seconds ago) in `queue` (`''`: any; a job
+   * without one is in `"default"`), the first open one of its key. Returns `job` (JSON text) and `attempts`.
+   */
   claimDue: string;
-  /** `(lease, ids, receipt)`, on rows this receipt still owns, like the three below. */
+  /** `(receipt, lease, id)`: claims the row a signal names, if it's due. Returns `job` and `attempts`. */
+  claimOne: string;
+  /** `(receipt, lease, order)`: claims the next row of a key, due or waiting only for its turn. Returns `job` and `attempts`. */
+  claimNext: string;
+  /** `(lease, id, receipt)`, on a row this receipt still owns, like the three below. */
   extend: string;
-  /** `(seconds, error, ids, receipt)` */
+  /** `(seconds, error, id, receipt)` */
   backOff: string;
-  /** `(error, ids, receipt)` */
+  /** `(error, id, receipt)` */
   markFailed: string;
-  /** `(ids, receipt)` */
+  /** `(id, receipt)` */
   remove: string;
   /** `(id)`: a failed row back in line. Returns `id`. */
   retry: string;
@@ -44,14 +54,29 @@ export interface JobsSql {
   take: string;
 }
 
-/** Seconds a job due now waits for the request that queued it, before a sweep may take it: how soon a crash after commit is noticed. */
+/**
+ * Seconds a job due now waits for the request that queued it before a sweep may take it (how soon a crash after
+ * commit is noticed). Behind an outbox, also how long past due a sweep leaves a row to its signal.
+ */
 const PICKUP = 30;
 
+/** A signal for a later time goes out this much later, so a clock ahead of the database's doesn't land it early. */
+const SLACK = 1000;
+
 /**
- * Seconds a runner keeps extending a job's lease: the limit of a Workers cron or queue consumer, and pg-boss's default
- * expiry. Past it, a job that hangs is taken over like a crashed one. A longer job needs a `lease` that long.
+ * Seconds a runner keeps extending a job's lease: the limit of a Workers cron or queue consumer. Past it, a job that
+ * hangs is taken over like a crashed one. A longer job needs a `lease` that long.
  */
 const MAX_EXTEND = 15 * 60;
+
+/**
+ * Seconds a queue consumer keeps running one key's jobs before it hands the rest to the next message: one busy key
+ * can't hold a consumer, and the messages behind it, until the platform stops it.
+ */
+const DRAIN = 60;
+
+/** A delivery's `key`: its jobs run one at a time, in insert order. */
+const keyOf = (job: Job) => (job.kind === "delivery" ? job.key : undefined);
 
 /** Who owns a job while it runs. */
 interface Claim {
@@ -59,7 +84,7 @@ interface Claim {
   attempt: number;
 }
 
-export interface DatabaseQueueOptions {
+export interface OutboxOptions {
   /**
    * Seconds a runner owns a job before a sweep may take it over: how soon a crash is noticed. Default 300. A running
    * job extends it every third of it, for 15 minutes, so it needn't cover your slowest listener, unless one takes
@@ -70,19 +95,19 @@ export interface DatabaseQueueOptions {
   backoff?: (attempt: number) => number;
 }
 
-/** `lease` is how long a send owns its jobs, and `backoff` the wait after a failed send. */
-export interface OutboxOptions extends DatabaseQueueOptions {
+export interface DatabaseQueueOptions extends OutboxOptions {
   /**
-   * Failed sends before the row is marked failed. Default 10: about 3.5 hours of backoff in all. A listener's own tries
-   * are its `attempts`.
+   * Who runs a job due now. `"request"` (default): the request that committed it, right after commit (after the
+   * response, with `waitUntil`), unless `work(registry)` runs in this process: then that loop takes it, and the request
+   * answers at once. `"worker"`: workers in other processes run every job, and requests only write rows.
    */
-  maxAttempts?: number;
+  runIn?: "request" | "worker";
 }
 
 /** What `databaseQueue` and `outbox` return. You call it through the registry: `registry.jobs.sweep()`, `registry.jobs.retry(id)`. */
 export interface StoredJobs extends JobsAdapter {
   /** What's due (retries, delayed jobs, what a crash left behind), claimed one at a time. */
-  sweep(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
+  sweep(runner: Runner, options?: SweepOptions): Promise<SweepResult>;
   /** Put a failed row back in line, with a fresh set of attempts. `false` when no failed row has that id. */
   retry(id: string): Promise<boolean>;
   /** A page of failed rows, newest first. */
@@ -98,12 +123,17 @@ export interface StoredJobs extends JobsAdapter {
  */
 function registryDatabase(name: string) {
   let database: SqlDatabase | undefined;
+  let workers: AdapterSetup["workers"] = { takes: () => false, wake: () => {} };
   return {
-    connect({ sql }: AdapterSetup) {
+    connect(setup: AdapterSetup) {
+      const { sql } = setup;
       if (database && sql && database.db !== sql.db)
         throw new Error(`[logic-sdk] ${name} is already connected to another registry's database: call it once per registry.`);
       database = sql;
+      workers = setup.workers;
     },
+    /** The loops running jobs in this process (`work()`). */
+    workers: () => workers,
     get(): SqlDatabase {
       if (!database) throw new Error(`[logic-sdk] ${name} isn't connected: pass it to createRegistry.`);
       return database;
@@ -111,24 +141,31 @@ function registryDatabase(name: string) {
   };
 }
 
-/** Both: rows in `logic_jobs`, claimed by receipt. Without `via` they run here; with it they're sent. */
-export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapter): StoredJobs {
+/** Both: rows in `logic_jobs`, claimed by receipt. Without `via` they run here; with it, the queue carries signals. */
+export function storedJobs(sql: JobsSql, options: DatabaseQueueOptions, via?: JobsAdapter): StoredJobs {
   const name = via ? "outbox(queue)" : "databaseQueue()";
+  // its jobs would be signalled to a `deliver` that has nothing to do
+  if (via?.enqueue)
+    throw new Error(`[logic-sdk] outbox(queue) got a queue that writes its jobs in your transaction itself (it has \`enqueue\`): use it on its own, without an outbox.`);
   const database = registryDatabase(name);
   const lease = options.lease ?? 300;
-  const maxAttempts = options.maxAttempts ?? 10;
   const backoff = options.backoff ?? defaultBackoff;
+  const inWorker = options.runIn === "worker";
+  /**
+   * Whether this request leaves its jobs due now to workers: always with `runIn: "worker"`, and when a loop in this
+   * process takes every one of them. Asked the same way at insert and after commit, so the row is free for it at once.
+   */
+  const leaves = (jobs: Job[]) => inWorker || jobs.filter((j) => !j.runAt).every((j) => database.workers().takes(j));
   /** Outside a mutation: on the database itself. */
   const query = (text: string, params: unknown[]) => database.get().query(database.get().db, text, params);
   const list = (ids: string[]) => JSON.stringify(ids);
 
   // These three only land on rows still pending under this claim (each statement says so): a slow runner can't undo a
-  // newer runner's work, and a handoff that finishes late can't delete the failure a consumer already recorded. By
-  // receipt, not attempt number: `retry(id)` starts those again at 1.
+  // newer runner's work. By receipt, not attempt number: `retry(id)` starts those again at 1.
   const failedRows = rowsOfFailed(sql, query);
-  const markFailed = (ids: string[], claim: Claim, error: unknown) => query(sql.markFailed, [describe(error), list(ids), claim.receipt]);
-  const backOff = (ids: string[], claim: Claim, error: unknown) => query(sql.backOff, [backoff(claim.attempt), describe(error), list(ids), claim.receipt]);
-  const remove = (ids: string[], claim: Claim) => query(sql.remove, [list(ids), claim.receipt]);
+  const markFailed = (job: Job, claim: Claim, error: unknown) => query(sql.markFailed, [describe(error), job.id, claim.receipt]);
+  const backOff = (job: Job, claim: Claim, seconds: number, error: unknown) => query(sql.backOff, [seconds, describe(error), job.id, claim.receipt]);
+  const remove = (job: Job, claim: Claim) => query(sql.remove, [job.id, claim.receipt]);
 
   /**
    * While a job runs, its lease is extended, as Laravel Cloud does on SQS: a slow job stays its runner's, and a dead
@@ -142,7 +179,7 @@ export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapt
       () => {
         if (Date.now() >= until) return clearInterval(timer);
         extending = extending
-          .then(() => query(sql.extend, [lease, list([job.id]), claim.receipt]))
+          .then(() => query(sql.extend, [lease, job.id, claim.receipt]))
           .catch((e) => runner.report(e, job, claim.attempt));
       },
       (lease * 1000) / 3,
@@ -155,7 +192,7 @@ export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapt
 
   /**
    * Run one claimed job here and record how it went. The core decides: `failed` (its `fail` wrote the row), a throw
-   * (tries left: back off), or done and discarded (delete the row).
+   * (tries left: back off, and behind an outbox signal the retry), or done and discarded (delete the row).
    */
   async function run(job: Job, claim: Claim, runner: Runner): Promise<keyof SweepResult> {
     const stopExtending = keepExtending(job, claim, runner);
@@ -165,34 +202,77 @@ export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapt
         .run(job, {
           attempt: claim.attempt,
           fail: async (error) => {
-            await markFailed([job.id], claim, error);
+            await markFailed(job, claim, error);
           },
         })
         .finally(stopExtending);
     } catch (e) {
-      await backOff([job.id], claim, e);
+      const seconds = backoff(claim.attempt);
+      await backOff(job, claim, seconds, e);
+      if (via) await signal([{ ...job, runAt: new Date(Date.now() + seconds * 1000).toISOString() }], runner);
       return "retrying";
     }
-    if (outcome !== "failed") await remove([job.id], claim);
+    if (outcome !== "failed") await remove(job, claim);
     return outcome;
   }
 
-  /** Hand claimed jobs to `via` in one send. Done once the queue has them; a failed send keeps them all for a retry. */
-  async function handOff(queue: JobsAdapter, jobs: Job[], claim: Claim, runner: Runner): Promise<keyof SweepResult> {
-    const ids = jobs.map((j) => j.id);
-    try {
-      await queue.deliver(jobs, runner);
-    } catch (e) {
-      for (const job of jobs) runner.report(e, job, claim.attempt); // the queue's failure, not the listener's: run never saw it
-      if (claim.attempt >= maxAttempts) {
-        await markFailed(ids, claim, e);
-        return "failed";
-      }
-      await backOff(ids, claim, e);
-      return "retrying";
+  /**
+   * Run a key's next jobs here, one by one, as they come free: after a job in the request, rather than leave them to a
+   * sweep (which runs them as they're due, one per claim), and for a consumer's signal behind an outbox. There, after
+   * `DRAIN` seconds the rest get one more signal.
+   */
+  async function runKey(key: string, runner: Runner) {
+    const until = Date.now() + DRAIN * 1000;
+    for (;;) {
+      const receipt = crypto.randomUUID();
+      const [row] = await query(sql.claimNext, [receipt, lease, key]);
+      if (!row) return;
+      const job: Job = JSON.parse(String(row.job));
+      await run(job, { receipt, attempt: Number(row.attempts) }, runner);
+      if (via && Date.now() >= until) return signal([job], runner);
     }
-    await remove(ids, claim);
-    return "done";
+  }
+
+  /**
+   * Behind an outbox, a consumer got a signal: run the row it names (with a `key`, the key's next jobs). The row is the
+   * truth, so a duplicate, a late one, or one whose row is gone or taken has nothing to do.
+   */
+  async function consume(job: Job, runner: Runner) {
+    const key = keyOf(job);
+    if (key) return runKey(key, runner);
+    const receipt = crypto.randomUUID();
+    const [row] = await query(sql.claimOne, [receipt, lease, job.id]);
+    if (row) await run(JSON.parse(String(row.job)), { receipt, attempt: Number(row.attempts) }, runner);
+  }
+
+  /** Can `via` hold a signal until `at`? */
+  const canHold = (at: number) => via?.holds === true || (!!via?.holds && (at - Date.now()) / 1000 <= via.holds.max);
+
+  /**
+   * Behind an outbox, every job stays a row and the queue gets a signal: whoever gets one runs the row from the table
+   * (`consume`). One for a later time goes out only if the queue can hold it; a sweep runs the rest. A signal that
+   * doesn't go out is reported and the rows wait for a sweep. The runner the queue gets runs signals too, for a queue
+   * that runs what it's sent itself.
+   */
+  async function signal(jobs: Job[], runner: Runner) {
+    const signals: Job[] = [];
+    for (const job of jobs) {
+      if (!job.runAt) signals.push(job);
+      else if (canHold(Date.parse(job.runAt))) signals.push({ ...job, runAt: new Date(Date.parse(job.runAt) + SLACK).toISOString() });
+    }
+    if (!signals.length) return;
+    const consumer: Runner = {
+      ...runner,
+      run: async (job) => {
+        await consume(job, runner);
+        return "done";
+      },
+    };
+    try {
+      await via!.deliver(signals, consumer);
+    } catch (e) {
+      for (const job of signals) runner.report(e, job);
+    }
   }
 
   /** A cron's minute runs once: records the ticks no one recorded yet and returns their ids. Prunes old ones. */
@@ -203,69 +283,90 @@ export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapt
     return new Set(first.map((row) => row.id));
   }
 
-  const settle = (job: Job, claim: Claim, runner: Runner) => (via ? handOff(via, [job], claim, runner) : run(job, claim, runner));
-
-  /** The first claim of jobs just committed, by the request that queued them: the ones no sweep took meanwhile. */
-  async function claimNew(jobs: Job[]): Promise<{ claim: Claim; won: Job[] }> {
+  /** The first claim of a job just committed, by the request that queued it, unless a sweep took it meanwhile. */
+  async function claimNew(job: Job): Promise<Claim | undefined> {
     const claim = { receipt: crypto.randomUUID(), attempt: 1 };
-    const rows = await query(sql.claimNew, [claim.receipt, lease, list(jobs.map((j) => j.id))]);
-    const ids = new Set(rows.map((row) => row.id));
-    return { claim, won: jobs.filter((j) => ids.has(j.id)) }; // in emit order: RETURNING has none
+    const rows = await query(sql.claimNew, [claim.receipt, lease, job.id]);
+    return rows.length ? claim : undefined;
   }
 
   return {
     name,
     retries: true, // a failed try backs off as a row
     holds: true, // rows wait until they're due, however long, so `via`'s limits on delays don't apply
-    replaces: true, // a waiting row is replaced in place; under `via` too, since rows wait here until they're due
+    replaces: true, // a waiting row is replaced in place; behind an outbox too, since every job stays a row
+    orders: true, // a key's jobs run from the table, in order; behind an outbox the queue only signals
+    queues: true, // a row's queue is in its job: a sweep takes the ones it's asked for, in that order
     /** Takes the registry's database: it writes in the mutation's transaction. */
     sql: true,
     connect: (setup) => database.connect(setup),
     /**
      * Inside the mutation's transaction: one unclaimed row per job. Due now: a sweep leaves it `PICKUP` seconds to this
-     * request. Delayed: available from `runAt`, for a sweep. A cron's minute runs once: only ticks nobody recorded yet.
+     * request, or none when the request runs nothing (workers take it, or a signal, which the sweep's grace covers). Delayed:
+     * available from `runAt`. A cron's minute runs once: only ticks nobody recorded yet.
      */
     async enqueue(tx, jobs) {
       const firstTicks = await recordTicks(tx, jobs.filter((j) => j.kind === "cron"));
       const kept = jobs.filter((j) => j.kind !== "cron" || firstTicks.has(j.id));
-      const rows = (await Promise.all(kept.map(async (j) => ({ id: j.id, job: j, at: j.runAt ? Date.parse(j.runAt) : null, key: (await storedReplaceKey(j)) ?? null }))))
-        // in key order, so two transactions replacing the same keys lock them in the same order and can't deadlock
-        .sort((a, b) => byText(a.key ?? "", b.key ?? ""));
-      if (rows.length) await database.get().query(tx, sql.insert, [PICKUP, JSON.stringify(rows)]);
+      const rows = (await Promise.all(kept.map(async (j) => ({ id: j.id, job: j, at: j.runAt ? Date.parse(j.runAt) : null, unique: (await storedUniqueKey(j)) ?? null, order: (j.kind === "delivery" && j.key) || null }))))
+        // in key order, so two transactions with the same unique keys lock them in the same order and can't deadlock
+        .sort((a, b) => byText(a.unique ?? "", b.unique ?? ""));
+      if (rows.length) await database.get().query(tx, sql.insert, [via || leaves(kept) ? 0 : PICKUP, JSON.stringify(rows)]);
     },
     /**
-     * After commit, in this request: each job is claimed just before it runs, so a slow or dead one doesn't spend the
-     * others' attempt. Under `via` they're claimed together, for one send. What isn't claimed yet when the process dies
-     * is a sweep's, as a first try.
+     * After commit, in this request. Behind an outbox: one signal per job, and one per key. Left to workers: wake this
+     * process's, if any (others poll). Otherwise each job due now is claimed just before it runs, so a slow or dead one
+     * doesn't spend the others' attempt; what isn't claimed yet when the process dies is a sweep's, as a first try.
      */
     async deliver(jobs, runner) {
-      const due = jobs.filter((j) => !j.runAt);
-      if (!due.length) return;
       if (via) {
-        const { claim, won } = await claimNew(due);
-        if (won.length) await handOff(via, won, claim, runner);
+        const keys = new Set<string>();
+        const firsts = jobs.filter((job) => {
+          const key = keyOf(job);
+          if (!key) return true;
+          if (keys.has(key)) return false;
+          keys.add(key);
+          return true;
+        });
+        return signal(firsts, runner);
+      }
+      const due = jobs.filter((j) => !j.runAt);
+      if (leaves(jobs)) {
+        if (due.length) database.workers().wake(due.length);
         return;
       }
       for (const job of due) {
         try {
-          const { claim, won } = await claimNew([job]);
-          if (won.length) await run(job, claim, runner);
+          const claim = await claimNew(job);
+          if (!claim) continue;
+          await run(job, claim, runner);
+          const key = keyOf(job);
+          if (key) await runKey(key, runner); // its key's next ones, rather than leave them to a sweep
         } catch (e) {
           runner.report(e, job, 1); // its bookkeeping failed (a lost connection): a sweep sorts it out, and the others still run
         }
       }
     },
-    /** One at a time, so every claim gets a full lease and a job the queue rejects (too big) can't hold back the others. */
-    async sweep(runner, { limit = 100 } = {}) {
+    /**
+     * What's due (retries, delayed jobs, what a crash left behind), claimed one at a time, so every claim gets a full
+     * lease. Behind an outbox, only rows `PICKUP` seconds past due: until then they're their signal's.
+     */
+    async sweep(runner, { limit = 100, queues } = {}) {
       const result: SweepResult = { done: 0, failed: 0, discarded: 0, retrying: 0 };
+      // in the order given: each claim takes the first queue with a job due, as a worker listing queues does
+      const order = queues?.length ? queues : [""];
       for (let i = 0; i < limit; i++) {
         const receipt = crypto.randomUUID();
-        const [row] = await query(sql.claimDue, [receipt, lease]);
+        let row: Record<string, unknown> | undefined;
+        for (const queue of order) {
+          [row] = await query(sql.claimDue, [receipt, lease, via ? PICKUP : 0, queue]);
+          if (row) break;
+        }
         if (!row) break;
         const job: Job = JSON.parse(String(row.job)); // claimDue returns it as JSON text, on every driver
         const attempt = Number(row.attempts);
         try {
-          result[await settle(job, { receipt, attempt }, runner)]++;
+          result[await run(job, { receipt, attempt }, runner)]++;
         } catch (e) {
           runner.report(e, job, attempt); // its bookkeeping failed (a lost connection): its lease brings it back
         }
@@ -276,8 +377,7 @@ export function storedJobs(sql: JobsSql, options: OutboxOptions, via?: JobsAdapt
     async retry(id) {
       return (await query(sql.retry, [id])).length > 0;
     },
-    /** A job that failed for good in a queue consumer: kept as a failed row, so you can list it and `retry` it. */
-    fail: failedRows.fail,
+    ...(via ? { consume } : {}),
     failed: failedRows.failed,
     forget: failedRows.forget,
   };
