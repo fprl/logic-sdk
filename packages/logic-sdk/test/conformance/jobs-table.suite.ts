@@ -1,12 +1,12 @@
 // What the jobs table promises on any database, whatever runs its SQL: adapters/postgres.test.ts and adapters/sqlite.test.ts
 // run this one list on every database and driver.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { z } from "zod";
-import { init, type JobsAdapter, type Job, type SqlDatabase } from "../../src/index.ts";
-import type { StoredJobs } from "../../src/postgres.ts";
+import { inProcess, init, type JobsAdapter, type Job, type SqlDatabase } from "../../src/index.ts";
+import type { DatabaseQueueOptions, StoredJobs } from "../../src/postgres.ts";
 
 export interface Target {
-  databaseQueue(): StoredJobs;
+  databaseQueue(options?: DatabaseQueueOptions): StoredJobs;
   outbox(queue: JobsAdapter): StoredJobs;
   /** `$1` on Postgres, `?` on SQLite. */
   param: string;
@@ -80,8 +80,185 @@ export function jobsTableSuite(name: string, target: Target) {
       });
       return { registry, as: registry.as({ who: "ana" }), add, book, nightly, ran, state };
     }
+    /** A chat (a listener with a `key`) and a search index (one with `unique`), on `databaseQueue()` or `adapter`. */
+    async function keyedApp(adapter: () => JobsAdapter = target.databaseQueue) {
+      const { database } = running;
+      await run("delete from logic_jobs");
+      const { mutation, event, listener, createRegistry } = init<{ scope: { who: string }; db: any }>();
+      const ran: string[] = [];
+      const failing = new Set<string>();
+      const holds = new Map<string, Promise<void>>();
+      const opens = new Map<string, () => void>();
+      /** `text`'s job waits in its handler until `open(text)`. */
+      const hold = (text: string) => holds.set(text, new Promise((resolve) => opens.set(text, resolve)));
+      const open = (text: string) => opens.get(text)?.();
+      /** What `text`'s job does as it runs. */
+      const does = new Map<string, () => void>();
+      const said = event({ payload: z.object({ conversation: z.string(), text: z.string() }) });
+      const say = mutation({ input: said.payload, async handler(ctx, message) { ctx.emit(said, message); } });
+      const sayAll = mutation({
+        input: z.object({ conversation: z.string(), texts: z.array(z.string()) }),
+        async handler(ctx, { conversation, texts }) {
+          for (const text of texts) ctx.emit(said, { conversation, text });
+        },
+      });
+      const reply = listener({
+        event: () => said,
+        key: (m) => m.conversation,
+        attempts: 2,
+        async handler(ctx, { text }) {
+          ran.push(`${text}#${ctx.event.attempt}`);
+          does.get(text)?.();
+          await holds.get(text);
+          if (failing.has(text)) throw new Error("try again");
+        },
+      });
+      const changed = event({ payload: z.object({ product: z.string() }) });
+      const change = mutation({ input: changed.payload, async handler(ctx, p) { ctx.emit(changed, p); } });
+      const reindex = listener({
+        event: () => changed,
+        unique: (p) => p.product,
+        delay: 60,
+        async handler(_ctx, { product }) {
+          ran.push(`reindex ${product}`);
+          await holds.get(product);
+        },
+      });
+      const registry = createRegistry({
+        modules: { x: { said, say, sayAll, reply, changed, change, reindex } },
+        database: { adapter: database },
+        jobs: { adapter: adapter(), scope: { load: (saved) => saved } },
+        onError: () => {},
+      });
+      return { registry, as: registry.as({ who: "ana" }), say, sayAll, change, ran, failing, hold, open, does };
+    }
+    /** Resolves once `ready()` holds: for a job that's started in another request. */
+    async function until(ready: () => boolean) {
+      for (let i = 0; i < 400 && !ready(); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(ready()).toBe(true);
+    }
     const rows = () => run("select id, status from logic_jobs");
     const makeDue = () => run(`update logic_jobs set available_at = ${target.past} where status = 'pending'`);
+
+    test("key: one job at a time per key, in order; the next waits without spending an attempt and runs right after", async () => {
+      const { as, say, ran, hold, open } = await keyedApp();
+      hold("hi");
+      const first = as.run(say, { conversation: "c1", text: "hi" });
+      await until(() => ran.includes("hi#1"));
+      await as.run(say, { conversation: "c1", text: "there" }); // committed, and waits for "hi"
+      await as.run(say, { conversation: "c2", text: "yo" }); // another key: runs now
+      expect(ran).toEqual(["hi#1", "yo#1"]);
+      open("hi");
+      await first; // its runner runs the key's next job, as a first try
+      expect(ran).toEqual(["hi#1", "yo#1", "there#1"]);
+      expect(await rows()).toEqual([]);
+    });
+
+    test("key: a try backing off holds its key; a job that failed for good frees it", async () => {
+      const { registry, as, say, ran, failing } = await keyedApp();
+      failing.add("hi");
+      await as.run(say, { conversation: "c1", text: "hi" }); // try 1 fails: backing off
+      await as.run(say, { conversation: "c1", text: "there" });
+      expect(ran).toEqual(["hi#1"]);
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ failed: 1 }); // "hi" is out of tries, so "there" runs
+      expect(ran).toEqual(["hi#1", "hi#2", "there#1"]);
+      expect(await rows()).toMatchObject([{ status: "failed" }]);
+    });
+
+    test("key: a failed job put back with retry(id) waits behind the one that started after it, then runs", async () => {
+      const { registry, as, say, ran, failing } = await keyedApp();
+      failing.add("hi");
+      await as.run(say, { conversation: "c1", text: "hi" });
+      await makeDue();
+      await registry.jobs.sweep(); // "hi" fails for good
+      failing.add("there");
+      await as.run(say, { conversation: "c1", text: "there" }); // starts, fails once: backing off, holding the key
+      const { jobs: [hi] } = await registry.jobs.failed();
+      failing.clear();
+      expect(await registry.jobs.retry(hi!.id)).toBe(true);
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 2 }); // "there" first (it started), then "hi"
+      expect(ran).toEqual(["hi#1", "hi#2", "there#1", "there#2", "hi#1"]);
+    });
+
+    /** A queue that keeps what it's sent, and can hold it until its `runAt`, for a test to deliver as a consumer would: in any order, more than once. */
+    function heldQueue() {
+      const sent: Job[] = [];
+      return { sent, queue: { holds: true as const, async deliver(jobs: Job[]) { sent.push(...structuredClone(jobs)); } } };
+    }
+
+    test("outbox and key: the queue gets one signal per key and the rows stay; signals in any order, twice, run each job once, in order", async () => {
+      const { sent, queue } = heldQueue();
+      const { registry, as, say, sayAll, ran } = await keyedApp(() => target.outbox(queue));
+      await as.run(sayAll, { conversation: "c1", texts: ["hi", "there"] });
+      await as.run(say, { conversation: "c1", text: "again" });
+      await as.run(say, { conversation: "c2", text: "yo" });
+      expect(ran).toEqual([]);
+      expect(sent.map((j) => j.kind === "delivery" && j.envelope.payload)).toEqual([
+        { conversation: "c1", text: "hi" },
+        { conversation: "c1", text: "again" },
+        { conversation: "c2", text: "yo" },
+      ]);
+      expect(await rows()).toHaveLength(4);
+      for (const signal of [...sent].reverse().concat(sent)) expect(await registry.jobs.run(signal)).toBe("done");
+      expect(ran).toEqual(["yo#1", "hi#1", "there#1", "again#1"]); // "again"'s signal came first, and ran its key from the top
+      expect(await rows()).toEqual([]);
+    });
+
+    test("outbox and key: with the signal lost, the sweep runs the key here, in order; a try backing off holds it", async () => {
+      const { registry, as, say, ran, failing } = await keyedApp(() => target.outbox({ async deliver() {} }));
+      failing.add("hi");
+      await as.run(say, { conversation: "c1", text: "hi" });
+      await as.run(say, { conversation: "c1", text: "there" });
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ retrying: 1, done: 0 }); // "there" waits behind "hi"'s backoff
+      failing.clear();
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 2 });
+      expect(ran).toEqual(["hi#1", "hi#2", "there#1"]);
+    });
+
+    test("outbox and key: a consumer runs one key for a minute at most, then sends the rest on as one more signal", async () => {
+      const { sent, queue } = heldQueue();
+      const { registry, as, say, ran, does } = await keyedApp(() => target.outbox(queue));
+      does.set("hi", () => setSystemTime(new Date(Date.now() + 61_000)));
+      try {
+        for (const text of ["hi", "there", "again"]) await as.run(say, { conversation: "c1", text });
+        await registry.jobs.run(sent[0]!);
+      } finally {
+        setSystemTime();
+      }
+      expect(ran).toEqual(["hi#1"]);
+      expect(sent).toHaveLength(4);
+      await registry.jobs.run(sent[3]!);
+      expect(ran).toEqual(["hi#1", "there#1", "again#1"]);
+    });
+
+    test("outbox and key: a queue that runs what it's sent itself runs the key from the table too", async () => {
+      const { as, say, sayAll, ran } = await keyedApp(() => target.outbox(inProcess()));
+      await as.run(sayAll, { conversation: "c1", texts: ["hi", "there"] });
+      await as.run(say, { conversation: "c1", text: "again" });
+      expect(ran).toEqual(["hi#1", "there#1", "again#1"]);
+      expect(await rows()).toEqual([]);
+    });
+
+    test("unique: while a job with the value hasn't started, later ones are dropped; once it starts, the next is queued", async () => {
+      const { registry, as, change, ran, hold, open } = await keyedApp();
+      await as.run(change, { product: "p1" });
+      await as.run(change, { product: "p1" });
+      await as.run(change, { product: "p2" });
+      expect(await rows()).toHaveLength(2); // one waiting per product
+      await makeDue();
+      hold("p1");
+      const sweeping = registry.jobs.sweep();
+      await until(() => ran.includes("reindex p1"));
+      await as.run(change, { product: "p1" }); // the running one may have read the old data: a new job waits
+      open("p1");
+      expect(await sweeping).toMatchObject({ done: 2 });
+      expect(ran.toSorted()).toEqual(["reindex p1", "reindex p2"]);
+      expect(await rows()).toHaveLength(1);
+    });
 
     test("a commit runs its job and deletes the row; a rollback leaves neither", async () => {
       const { as, add, ran } = await app();
@@ -105,6 +282,68 @@ export function jobsTableSuite(name: string, target: Target) {
       expect(await registry.jobs.retry(failed!.id)).toBe(true);
       expect(await registry.jobs.sweep()).toMatchObject({ done: 1 });
       expect(ran).toEqual(["lamp#1 as ana", "lamp#2 as ana", "lamp#1 as ana"]);
+    });
+
+    test("runIn worker: the request only writes the row, and a worker's claim takes it at once", async () => {
+      const { registry, as, add, ran } = await app(() => target.databaseQueue({ runIn: "worker" }));
+      await as.run(add, { name: "desk" });
+      expect(ran).toEqual([]);
+      expect(await registry.jobs.sweep({ limit: 1 })).toMatchObject({ done: 1 });
+      expect(ran).toEqual(["desk#1 as ana"]);
+    });
+
+    test("a worker in this process: the request leaves its job to it and wakes it, and the row is free at once", async () => {
+      const { registry, as, add, ran } = await app();
+      const wakes: number[] = [];
+      const detach = registry.jobs.attach({ wake: (count) => wakes.push(count) });
+      await as.run(add, { name: "desk" });
+      expect(ran).toEqual([]);
+      expect(wakes).toEqual([1]);
+      expect(await registry.jobs.sweep({ limit: 1 })).toMatchObject({ done: 1 });
+      detach();
+      await as.run(add, { name: "lamp" }); // no worker here anymore: the request runs it
+      expect(ran).toEqual(["desk#1 as ana", "lamp#1 as ana"]);
+      expect(wakes).toEqual([1]);
+    });
+
+    test("a worker in this process for other queues: the request runs the rest itself", async () => {
+      const { database } = running;
+      await run("delete from logic_jobs");
+      const { mutation, event, listener, createRegistry } = init<{ scope: { who: string }; db: any }>();
+      const ran: string[] = [];
+      const sent = event({ payload: z.object({ to: z.string() }) });
+      const send = mutation({ input: sent.payload, async handler(ctx, input) { ctx.emit(sent, input); } });
+      const mail = listener({ event: () => sent, queue: "mail", async handler(_ctx, { to }) { ran.push(`mail ${to}`); } });
+      const index = listener({ event: () => sent, async handler(_ctx, { to }) { ran.push(`index ${to}`); } });
+      const registry = createRegistry({ modules: { x: { sent, send, mail, index } }, database: { adapter: database }, jobs: { adapter: target.databaseQueue(), queues: ["mail"], scope: { load: (s) => s } }, onError: () => {} });
+      const detach = registry.jobs.attach({ wake: () => {}, queues: ["mail"] });
+      await registry.as({ who: "ana" }).run(send, { to: "bo" }); // one of its jobs isn't the worker's: all run here
+      detach();
+      expect(ran.sort()).toEqual(["index bo", "mail bo"]);
+    });
+
+    test("queues: a sweep takes the queues it's asked for, first queue first, and a job without one is default's", async () => {
+      const { database } = running;
+      await run("delete from logic_jobs");
+      const { mutation, event, listener, createRegistry } = init<{ scope: { who: string }; db: any }>();
+      const ran: string[] = [];
+      const sent = event({ payload: z.object({ to: z.string() }) });
+      const send = mutation({ input: sent.payload, async handler(ctx, input) { ctx.emit(sent, input); } });
+      const index = listener({ event: () => sent, async handler(_ctx, { to }) { ran.push(`index ${to}`); } });
+      const mail = listener({ event: () => sent, queue: "mail", async handler(_ctx, { to }) { ran.push(`mail ${to}`); } });
+      const report = listener({ event: () => sent, queue: "reports", async handler(_ctx, { to }) { ran.push(`report ${to}`); } });
+      const registry = createRegistry({
+        modules: { x: { sent, send, index, mail, report } },
+        database: { adapter: database },
+        jobs: { adapter: target.databaseQueue({ runIn: "worker" }), queues: ["mail", "reports"], scope: { load: (s) => s } },
+        onError: () => {},
+      });
+      await registry.as({ who: "ana" }).run(send, { to: "bo" });
+      await registry.as({ who: "ana" }).run(send, { to: "cy" });
+      expect(await registry.jobs.sweep({ queues: ["mail", "default"] })).toMatchObject({ done: 4 });
+      expect(ran).toEqual(["mail bo", "mail cy", "index bo", "index cy"]); // mail first, then default: reports wait
+      expect(await registry.jobs.sweep({ queues: ["reports"] })).toMatchObject({ done: 2 });
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 0 });
     });
 
     test("a crash after commit: a sweep runs it once, as a first try", async () => {
@@ -214,16 +453,50 @@ export function jobsTableSuite(name: string, target: Target) {
       expect(ran).toEqual(["tidy"]);
     });
 
-    test("outbox: the queue gets it and the row goes; what the consumer fails comes back", async () => {
-      const sent: Job[] = [];
-      const queue = { async deliver(jobs: Job[]) { sent.push(...jobs); } };
-      const { registry, as, add, state } = await app(() => target.outbox(queue));
+    test("outbox: every job stays a row and the commit sends one signal each; the consumer runs the row once", async () => {
+      const { sent, queue } = heldQueue();
+      const { registry, as, add, ran } = await app(() => target.outbox(queue));
       await as.run(add, { name: "desk" });
-      expect(sent).toHaveLength(1);
+      expect(ran).toEqual([]);
+      expect(await rows()).toMatchObject([{ status: "pending" }]);
+      expect(await registry.jobs.run(sent[0]!)).toBe("done");
+      expect(await registry.jobs.run(sent[0]!)).toBe("done"); // delivered twice: the row is gone, nothing to do
+      expect(ran).toEqual(["desk#1 as ana"]);
       expect(await rows()).toEqual([]);
+    });
+
+    test("outbox: a failed try backs off as a row and its retry is signalled for when the backoff ends; out of tries it's failed", async () => {
+      const { sent, queue } = heldQueue();
+      const { registry, as, add, ran, state } = await app(() => target.outbox(queue));
       state.down = true;
-      expect(await registry.jobs.run(sent[0]!, { attempt: 2 })).toBe("failed");
-      expect((await registry.jobs.failed()).jobs).toMatchObject([{ id: sent[0]!.id, error: expect.stringContaining(AWKWARD) }]);
+      await as.run(add, { name: "lamp" });
+      expect(await registry.jobs.run(sent[0]!)).toBe("done");
+      expect(Date.parse(sent[1]!.runAt!)).toBeGreaterThan(Date.now()); // the retry's signal waits for the backoff
+      expect(await registry.jobs.run(sent[1]!)).toBe("done"); // early: still backing off, so nothing runs
+      await makeDue();
+      await registry.jobs.run(sent[1]!);
+      expect(ran).toEqual(["lamp#1 as ana", "lamp#2 as ana"]);
+      expect(await rows()).toMatchObject([{ status: "failed" }]);
+    });
+
+    test("outbox: a delay longer than the queue holds gets no signal, and the sweep runs it when it's due", async () => {
+      const sent: Job[] = [];
+      const { registry, as, book, ran } = await app(() => target.outbox({ holds: { max: 60 }, async deliver(jobs) { sent.push(...jobs); } }));
+      await as.run(book, { at: "soon", delay: 30 });
+      await as.run(book, { at: "later", delay: 3600 });
+      expect(sent.map((job) => job.kind === "call" && job.input)).toEqual([{ at: "soon" }]);
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 2 });
+      expect(ran.toSorted()).toEqual(["later", "soon"]);
+    });
+
+    test("outbox: with the signal lost, the sweep runs the row here, once it's well past due", async () => {
+      const { registry, as, add, ran } = await app(() => target.outbox({ async deliver() { throw new Error("queue down"); } }));
+      await as.run(add, { name: "rug" });
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 0 }); // still its signal's
+      await makeDue();
+      expect(await registry.jobs.sweep()).toMatchObject({ done: 1 });
+      expect(ran).toEqual(["rug#1 as ana"]);
     });
   });
 }

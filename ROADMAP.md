@@ -87,18 +87,19 @@ What the 2026-11-26 audit against the layers (AGENTS.md, DESIGN.md) found, with 
    - **Done: `jobs: { adapter, scope }`,** optional `id` on every definer, scope at rest applied by the core (`store`/`load`, a `discarded` outcome), `kind` on every job.
    - **Done: `logic-sdk/cloudflare`:** `cloudflareQueue(env.JOBS)` alone or as `outbox(queue)`, `handleQueue(registry, batch)` for the consumer. Adapters get a `Runner` (`run`, `report`).
    - **Done: `attempts` and `delay` on listeners,** enforced by the core; adapters get `check` (refuse at startup) and `fail` (keep what a consumer failed). Tests: `begin`/`rollback` hooks, `jobs: "inline" | "manual"`, `t.jobs.drain()` and `perform()`.
-   - **Done: pg-boss** (`logic-sdk/pg-boss`: `pgBoss(boss)`, `work(registry, boss)`, a queue per listener and cron). Per-key order (`key_strict_fifo`) waits for `key`.
-   - **Next: `key`, `dedupe` and `timeout` on listeners** (the owner: important, 2026-11-26), refused in `connect` where an adapter can't honour them. Drizzle 1.0 (RC) only, like the rest of the library. Inngest (one Inngest function per listener, from `registry.definitions`) is in Later: not now (the owner, 2026-11-26).
+   - **pg-boss: built, then removed (2026-11-27)** for `work()` on the jobs table (DESIGN.md, "Workers, one path behind the outbox, no pg-boss").
+   - **Done: workers on Node** (2026-11-27): `work(registry, { concurrency })` from `logic-sdk/node` replaces `startTicking`, and `databaseQueue({ runIn: "worker" })` leaves jobs to it. Behind an outbox every job stays a row and the queue carries signals.
+   - **Done: `key`, `unique` and `timeout` on listeners** (2026-11-26; `unique` in place of `dedupe`, DESIGN.md "`key`, `unique`, `timeout`"). `key` behind the outbox (2026-11-27): the queue gets a signal per key (DESIGN.md, "The order lives where the jobs wait"). Drizzle 1.0 (RC) only, like the rest of the library. Inngest (one Inngest function per listener, from `registry.definitions`) is in Later: not now (the owner, 2026-11-26).
    - **Done:** the database queue's claim tested with concurrent sweepers on real Postgres (CI sets `DATABASE_URL` for every workspace).
    - **SQLite and other ORMs:** see "Before 0.5.0".
    - **Then `vercelQueue`,** like `cloudflareQueue`: alone (after commit, lossy, documented) or inside `outbox(...)`. Subpaths per provider.
-   - **Listener options:** `attempts`, `delay`, `when` (done), `key`, `dedupe`, `timeout` in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
-   - **Done: crons.** `cron({ schedule, handler, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with `databaseQueue` or `outbox` (`logic_cron_runs`) and pg-boss (`work()` ticks them; ids dedupe).
+   - **Listener options:** `attempts`, `delay`, `when`, `key`, `unique`, `timeout` (done) in code; concurrency, backoff, DLQ in infra. An option an adapter can't honour fails at startup, in its `check`.
+   - **Done: crons.** `cron({ schedule, handler, scope })` exported from a module, `registry.jobs.tick(at)` from a timer or any platform trigger (`handleScheduled` on Cloudflare), once per minute across servers with `databaseQueue` or `outbox` (`logic_cron_runs`); `work()` ticks them on Node.
 
    Until per-listener options exist, one event per listener, and listeners with several causes recompute from current state instead of applying payloads as deltas.
    - **From 2026-11-26, open:**
-     - **Several events on one listener,** as every reference stack allows (asked 2026-11-26). It waits on the listener options above, since `key` and `dedupe` decide what one delivery is.
-     - **A stored jobs adapter with nothing ticking is silent:** jobs due now run after commit, but retries, delays and crons wait until something calls `sweep()`/`tick()` (`startTicking`, `handleScheduled`, a Vercel cron route). Laravel's database queue is the same without `queue:work`; pg-boss runs its own timers once started. Decide how it's loud.
+     - **Several events on one listener,** as every reference stack allows (asked 2026-11-26). `key` and `unique` now exist, so it's unblocked: each takes either payload.
+     - **A stored jobs adapter with nothing ticking is silent:** jobs due now run after commit, but retries, delays and crons wait until something calls `sweep()`/`tick()` (`work()`, `handleScheduled`, a Vercel cron route). Laravel's database queue is the same without `queue:work`; with `runIn: "worker"`, nothing runs at all without a worker. Decide how it's loud.
      - **Upgrades for apps without Drizzle:** `jobsSchema` is one string, so a column added later (`claimed_at` in this release) is an `ALTER` written by hand from the changeset. Oban ships versioned migrations (`Oban.Migrations.up(version: N)`), Solid Queue copies a migration per release.
      - **The conformance suites for other people's adapters,** as better-auth publishes `testAdapter`: a public API (`logic-sdk/testing`), so its own decision.
 3. **CLI v0.2:** `run bookings.confirm '{…}' --as agent`, rolled back by default (`--commit` to keep it); follow `run` calls inside helpers; warn on event cycles.
@@ -141,7 +142,7 @@ Skipped: model callbacks and observers (we chose explicit), notifications, cachi
 ## Open
 
 - **Tenancy sugar (maybe):** a typed `owned(table)` condition in `logic-sdk/drizzle/pg`, bound to the scope, that fails to compile on tables without `accountId`. Sugar only.
-- **Top-level queries** read outside a transaction, so a query with several selects can see different snapshots. A `READ ONLY` transaction flag on the adapter would fix it.
+- **Top-level queries** read outside a transaction, so a query with several selects can see different snapshots. `READ ONLY` alone doesn't fix it: under Postgres' default `READ COMMITTED` each statement still takes a fresh snapshot, so it needs `REPEATABLE READ READ ONLY` ([isolation](https://www.postgresql.org/docs/current/transaction-iso.html)). On SQLite, the kept reader connection is shared by concurrent queries, so a snapshot needs a connection per query, as transactions already have.
 - **A typed proxy** (`caller.bookings.confirm(input)`) as sugar over `run`, after a type-cost prototype.
 
 ## Sources

@@ -2,7 +2,6 @@
 import type { AIMeta } from "../../src/ai.ts";
 import { databaseQueue, drizzleAdapter, outbox, type DrizzleDb, type DrizzleTx } from "../../src/drizzle/pg.ts";
 import * as sqlite from "../../src/drizzle/sqlite.ts";
-import type { PgBossMeta } from "../../src/pg-boss.ts";
 import { Database } from "bun:sqlite";
 import { drizzle as bunSqlite } from "drizzle-orm/bun-sqlite";
 import type { PgliteDatabase } from "drizzle-orm/pglite";
@@ -132,6 +131,17 @@ mutation({ input: z.object({}), handler: async ({ emit }) => {
   emit(transforming, { at: new Date() });
 } });
 listener({ event: () => transforming, handler: async (_, { at }) => { const d: Date = at; void d; } });
+// key and unique get the payload the handler gets; a timeout is seconds
+listener({ event: () => ev, key: (p) => p.id, unique: (p) => p.id, timeout: 30, handler: async () => {} });
+listener({ event: () => transforming, key: (p) => p.at.toISOString(), handler: async () => {} });
+// failed: the handler's ctx and payload (parsed), then the error
+listener({ event: () => transforming, queue: "mail", handler: async () => {}, failed: async (ctx, { at }, error) => { const d: Date = at; const n: number = ctx.event.attempt; void d; void n; void error; } });
+// @ts-expect-error a queue is a name
+listener({ event: () => ev, queue: 1, handler: async () => {} });
+// @ts-expect-error a key is a string
+listener({ event: () => ev, key: (p) => p.id.length, handler: async () => {} });
+// @ts-expect-error only fields the payload has
+listener({ event: () => ev, unique: (p) => p.missing, handler: async () => {} });
 import { createTestRegistry } from "../../src/testing.ts";
 {
   const t = createTestRegistry(registry);
@@ -311,20 +321,20 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
 {
   type AppMeta = { area: "shop" | "orders" };
   type QueueMeta = ForListeners<{ queue?: { priority: number } }>; // someone else's adapter
-  const shop = init<{ scope: Scope; meta: AppMeta & AIMeta & PgBossMeta & QueueMeta }>();
+  const shop = init<{ scope: Scope; meta: AppMeta & AIMeta & QueueMeta }>();
   const happened = shop.event({ payload: z.object({}) });
   shop.action({ meta: { area: "shop", ai: { description: "Ship it" } }, handler: async () => 1 });
-  shop.listener({ event: () => happened, meta: { area: "orders", pgBoss: {}, queue: { priority: 1 } }, handler: async () => 1 });
+  shop.listener({ event: () => happened, meta: { area: "orders", queue: { priority: 1 } }, handler: async () => 1 });
   shop.createRegistry({
     modules: {},
     wrap: async (call, next) => {
-      const seen: [AppMeta["area"] | undefined, string | undefined, object | undefined] = [call.meta?.area, call.meta?.ai?.description, call.meta?.pgBoss];
+      const seen: [AppMeta["area"] | undefined, string | undefined, object | undefined] = [call.meta?.area, call.meta?.ai?.description, call.meta?.queue];
       void seen;
       return next();
     },
   });
-  // @ts-expect-error pg-boss only reads listeners
-  shop.action({ meta: { area: "shop", pgBoss: {} }, handler: async () => 1 });
+  // @ts-expect-error the queue only reads listeners
+  shop.action({ meta: { area: "shop", queue: { priority: 1 } }, handler: async () => 1 });
   // @ts-expect-error AI only reads functions
   shop.listener({ event: () => happened, meta: { area: "shop", ai: {} }, handler: async () => 1 });
   // @ts-expect-error a typo inside an adapter's options
@@ -335,8 +345,8 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const admin = init<{ scope: Scope; meta: AIMeta }>();
   const changed = admin.event({ payload: z.object({}) });
   admin.action({ meta: { ai: {} }, handler: async () => 1 });
-  // @ts-expect-error this init didn't add pg-boss
-  admin.action({ meta: { pgBoss: {} }, handler: async () => 1 });
+  // @ts-expect-error this init didn't add the queue
+  admin.action({ meta: { queue: { priority: 1 } }, handler: async () => 1 });
   // @ts-expect-error nothing here is read on listeners, so there's no meta to set
   admin.listener({ event: () => changed, meta: { anything: 1 }, handler: async () => 1 });
 }
@@ -347,8 +357,10 @@ drizzleAdapter(bunSqlite({ client: new Database(":memory:") }));
   const queue = { async deliver() {} };
   // @ts-expect-error it takes the registry's database: nothing to pass
   databaseQueue(database);
-  databaseQueue({ lease: 60 });
-  outbox(queue, { maxAttempts: 3 });
+  databaseQueue({ lease: 60, runIn: "worker" });
+  outbox(queue, { lease: 60 });
+  // @ts-expect-error behind an outbox, the queue's consumers run the jobs
+  outbox(queue, { runIn: "worker" });
   // @ts-expect-error an outbox is in front of a queue
   outbox(database);
   // @ts-expect-error maxAttempts counts sends, and a database queue sends nothing

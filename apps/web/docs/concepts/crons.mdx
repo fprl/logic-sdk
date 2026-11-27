@@ -23,26 +23,26 @@ export const sendDigest = cron({
 - **`scope` is required:** policies and data helpers read `ctx.scope`, and a cron has no caller to take it from. Use a [system scope](/docs/concepts/scope#the-system), a variant of your own `Scope` like `{ kind: "system", job: "orders.sendDigest" }`, not a fake user, and grant it in policies (`staffOrSystem`). In the handler, `ctx.scope` is typed as the scope you declared.
 - **`ctx.cron`** says which run this is: `id`, `scheduledAt` (the minute it's for, even when it runs late or again: which day a digest covers) and `attempt`.
 - **`attempts`** works like a listener's: default 1. A retry runs the whole handler again, so make it idempotent, like a listener. Work that must be all or nothing goes in one `ctx.run(mutation)`; each mutation it runs commits on its own, so a `try`/`catch` per row lets one row fail without the rest.
-- **`meta`** works like a listener's: `wrap` and plugins see the run as `kind: "cron"`, and pg-boss reads `meta.pgBoss`.
+- **`meta`** works like a listener's: `wrap` and plugins see the run as `kind: "cron"`.
 - **Its `scope` comes from your code each time it runs,** never stored, so `jobs.scope.store` and `load` don't apply to the cron itself, and a deploy that changes it applies to runs already queued. What it emits or schedules is stored as usual, so a [system scope](/docs/concepts/scope#the-system) must survive your `store` and `load`.
 
 ## Ticking
 
 Your crons live in code. Something calls `registry.jobs.tick()`, which runs every cron due in that minute:
 
-**Node:** a long-running process is its own trigger, like Laravel's `schedule:work`:
+**Node:** the [worker](/docs/concepts/jobs#workers-on-node) is the trigger: it ticks your crons and runs your jobs in one process:
 
 ```ts
-import { startTicking } from "logic-sdk/node";
+import { work } from "logic-sdk/node";
 
-const stop = startTicking(registry); // ticks every minute, sweeps every 60 s: { sweepEvery }
+const stop = work(registry); // ticks every minute, and runs the jobs that are due
 process.on("SIGTERM", async () => {
-  await stop(); // waits for the running ticks and sweep, 30 s at most: { timeout }
+  await stop(); // waits for the running jobs and ticks, 30 s at most: { timeout }
   process.exit(0);
 });
 ```
 
-- **It ticks on the minute and sweeps every `sweepEvery` seconds, without waiting for the last,** so a slow cron or a hung job doesn't hold back the rest. Ten of either still running means something's stuck: the next is skipped and reported to `onError`.
+- **It ticks on the minute, without waiting for the last,** so a slow cron doesn't hold back the next. Run as many workers as you like: with a stored jobs adapter, each minute runs once.
 - **Ticks don't pile up:** with ten still running (stuck on an unreachable database, or ten slow crons overlapping), the next minute is skipped and reported to `onError`, so a backlog of stale minutes doesn't all run when the database comes back.
 
 **Cloudflare:** `"* * * * *"` for all of them, or one trigger per cron. Cloudflare numbers weekdays 1 = Sunday (we use classic cron's 1 = Monday), so write weekdays as names, in your code and in the trigger:
@@ -86,37 +86,35 @@ export async function POST(request: Request) {
 
 - **A trigger only says when to tick;** `tick` matches the time, not which trigger fired. So one trigger per cron and one every minute both work.
 - **With `databaseQueue`, you need a regular trigger anyway:** the request runs a commit's jobs itself, but retries, delayed jobs and what a crash left behind wait for a sweep, and the trigger's interval is how long they wait. That trigger ticks your crons too, so per-cron triggers only make sense without it, where a trigger delivered twice runs the cron twice.
-- **Every minute never needs touching,** and it's Laravel's setup: one system cron entry, `* * * * * php artisan schedule:run`. It costs about 43,000 calls a month: nothing on Cloudflare's paid plan, cents on Vercel Pro.
+- **Every minute never needs touching:** one `* * * * *` trigger covers every cron you add. It costs about 43,000 calls a month: nothing on Cloudflare's paid plan, cents on Vercel Pro.
 - **One trigger per cron calls less,** but keep the lists in step: a cron with no trigger never runs, and nothing can tell you, since logic-sdk doesn't read `wrangler.jsonc` or `vercel.json`.
 - **The platform's own limits apply:**
   - Cloudflare's triggers are UTC, so a cron with a `timezone` needs a trigger that covers it: every minute, or every hour when its time falls on the hour in UTC too (Madrid yes, India's half-hour offset no).
   - Vercel refuses names in its schedules, and a day-of-month together with a day-of-week, so copy those crons as numbers or use one every-minute schedule. Vercel Hobby fires at most every 15 minutes.
-- **pg-boss** needs no trigger: `work(registry, boss)` ticks your crons every minute in each worker process. See [pg-boss](/docs/adapters/pg-boss).
 
 ## Once, on several servers
 
-**`databaseQueue`, `outbox` and pg-boss run a cron once when several servers tick it.** With `inProcess()`, each server runs it. `cloudflareQueue` alone runs it once per tick: a trigger delivered twice runs it twice.
+**`databaseQueue` and `outbox` run a cron once when several servers tick it.** With `inProcess()`, each server runs it. `cloudflareQueue` alone runs it once per tick: a trigger delivered twice runs it twice.
 
 Each tick is a job with the id `<cron id>@<minute>`, through your [jobs adapter](/docs/concepts/jobs):
 
-- **With `databaseQueue` or `outbox`, a minute runs once,** however many servers tick it, and a trigger delivered twice runs once too. Re-export the runs table next to the jobs table, like Solid Queue's recurring executions:
+- **With `databaseQueue` or `outbox`, a minute runs once,** however many servers tick it, and a trigger delivered twice runs once too. Re-export the runs table next to the jobs table:
 
 ```ts
 // db/schema.ts
 export { jobsTable, cronRunsTable } from "logic-sdk/drizzle/pg";
 ```
 
-- **With `pgBoss(boss)`, a minute runs once** too: its pg-boss id is derived from `<cron id>@<minute>`, and pg-boss skips an insert whose id it already has (finished jobs are kept 7 days).
-- **With `inProcess()`, every server that ticks runs it,** like Laravel without `onOneServer()`. Fine for one server, or for a platform trigger; use `databaseQueue` for more.
-- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by `databaseQueue`, `outbox`, pg-boss or a `failedJobs` store, reported to `onError` with the cron's id.
+- **With `inProcess()`, every server that ticks runs it.** Fine for one server, or for a platform trigger; use `databaseQueue` for more.
+- **Failures** are the same as a listener's: retried while `attempts` are left, kept as `failed` by `databaseQueue`, `outbox` or a `failedJobs` store, reported to `onError` with the cron's id.
 
 ## Schedules
 
 Five fields, `minute hour day-of-month month day-of-week`: lists, ranges and steps (`1,15`, `9-17`, `*/5`, `1-30/5`), names (`JAN`, `MON`) and `7` for Sunday. When both day fields are set (`0 0 13 * 5`), either one matching is enough, like classic cron.
 
 - **Not supported:** seconds, `@daily`-style aliases, and `L`, `W`, `#`. `createRegistry` fails with what to write instead.
-- **Time zones:** an IANA name, matched on the clock there. Like Laravel, a time skipped when clocks go forward doesn't run that day, and one that happens twice when they go back runs twice. Avoid 1:00 to 3:00 in a time zone with DST, or use UTC.
-- **A tick runs what's due now.** A minute nobody ticked (the server was down, a deploy) is skipped, not caught up, like Laravel and pg-boss's default (`missed: 'skip'`). Rerun one with `invoke` (below). Runs may overlap, like Laravel, Oban and Vercel.
+- **Time zones:** an IANA name, matched on the clock there. A time skipped when clocks go forward doesn't run that day, and one that happens twice when they go back runs twice. Avoid 1:00 to 3:00 in a time zone with DST, or use UTC.
+- **A tick runs what's due now.** A minute nobody ticked (the server was down, a deploy) is skipped, not caught up. Rerun one with `invoke` (below). Runs may overlap.
 
 ## Running one now
 
@@ -125,7 +123,7 @@ await registry.jobs.invoke(orders.sendDigest);                                  
 await registry.jobs.invoke("orders.sendDigest", { at: new Date("2026-11-24T07:00Z") }); // a minute a deploy missed, from a script
 ```
 
-- **Through your jobs adapter, like a tick,** with the cron's scope and `attempts`: Vercel's `Schedules.invoke`, Mission Control's "Run now" (`task.enqueue`), Oban Web's "Run Now". Its schedule and the next tick don't change.
+- **Through your jobs adapter, like a tick,** with the cron's scope and `attempts`. Its schedule and the next tick don't change.
 - **Its own job id,** `orders.sendDigest@20261124T0700Z-<uuid>`, so the real tick for that minute still runs, and so does a second invoke. It resolves the id; a failure is kept under it, for `failed`, `retry` and `forget` ([Jobs](/docs/concepts/jobs#failed-jobs-and-running-a-cron-now)).
 - **`at` is the minute the run is for,** what the handler reads as `ctx.cron.scheduledAt`. Default now. It isn't checked against the schedule.
 - **The cron, or its id** from a script: an id that isn't registered throws, naming the ones that are.

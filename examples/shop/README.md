@@ -24,7 +24,7 @@ src/
   orders/        orders: place, cancel, ship, mine, the receipt
   registry.ts    createShop(): the registry. settingsFrom(): env in, config out
   http.ts        the JSON API on Hono, shared by Node and Workers
-  node.ts        host 1: Node or Bun, self-hosted. One pool, jobs in Postgres, startTicking for crons and sweeps
+  node.ts        host 1: Node or Bun, self-hosted. One pool, jobs in Postgres, work() for crons, retries and delays
   worker.ts      host 2: Cloudflare Workers. Hyperdrive per request, jobs in Queues behind an outbox, a Cron Trigger
   app/           host 3: Next.js, on Vercel or anywhere. Server Actions and an AI assistant, jobs in Postgres, /tick
 ```

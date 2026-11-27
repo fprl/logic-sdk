@@ -33,7 +33,7 @@ test("confirm holds the dates and emails the guest", async () => {
 ```
 
 - **Real database, no mocks.** Each test is a transaction that's rolled back. Every top-level mutation inside it becomes a savepoint, so a failing mutation rolls back only its own writes, as in production.
-- **Set up once, with hooks:** in a setup file for every test (like Rails, which wraps every test by default) or at the top of each file (like Phoenix's `use MyApp.DataCase`). Without `begin`, `t` throws and says so, instead of writing to your database.
+- **Set up once, with hooks:** in a setup file for every test, or at the top of each file. Without `begin`, `t` throws and says so, instead of writing to your database.
 - **Arrange with real functions**, not inserts, so test data goes through the same rules.
 - **Swap services** for in-memory ones, and reset them in `beforeEach`. Freeze time with `now`.
 - **Change settings** with `config: { orders: { maxItems: 1 } }`. It merges section by section over the registry's [config](/docs/concepts/config). A test registry with other settings gets its own file.
@@ -51,7 +51,7 @@ t.stub(availability.hold, async () => {
 
 ## Jobs in tests
 
-Your app's adapter (a database queue, an outbox, Cloudflare) is never used in tests. Like Oban's `testing: :inline | :manual`, you pick one of two modes:
+Your app's adapter (a database queue, an outbox, Cloudflare) is never used in tests. You pick one of two modes:
 
 ```ts
 const t = createTestRegistry(registry, { jobs: "manual" }); // default: "inline"
@@ -76,8 +76,8 @@ test("the receipt email", async () => {
 - **Inline** runs listeners right after each mutation, inside the test, one try.
 - **Manual** keeps jobs in `t.jobs.queued` until `drain()`, to test one module without the others reacting.
 - **`tick(at)`** runs the [crons](/docs/concepts/crons) due at that minute, inline in both modes.
-- **`perform`** runs one listener by hand, as if its event had been emitted as `scope`: Oban's `perform_job`, Rails' `perform_now`.
-- **What waits, waits for `drain()`,** in both modes: a listener's `delay` (in `t.jobs.queued`) and `ctx.schedule` (in `t.jobs.scheduled`). `drain()` runs what's due at the test's `now`; `drain({ until })` runs what's due by then, each job at the time it was due (that's what its `ctx.now()` reads), like Rails' `perform_enqueued_jobs(at:)` and Oban's `with_scheduled`.
+- **`perform`** runs one listener by hand, as if its event had been emitted as `scope`.
+- **What waits, waits for `drain()`,** in both modes: a listener's `delay` (in `t.jobs.queued`) and `ctx.schedule` (in `t.jobs.scheduled`). `drain()` runs what's due at the test's `now`; `drain({ until })` runs what's due by then, each job at the time it was due (that's what its `ctx.now()` reads).
 - **The test registry holds what your app's adapter holds:** on `inProcess()`, `ctx.schedule` throws in tests too, as it would in production. Build it from the registry your app runs, so `createRegistry`'s checks (like `jobs.scope.load` for a database queue) run in tests too.
 - **A failing listener fails the test.** `run`, `drain` and `perform` throw its error, so a test can't pass over it; one that ran through `t.registry` (an adapter's call) makes `rollback` throw. The mutation still committed, as in production. A job `jobs.scope.load` discards doesn't throw.
 

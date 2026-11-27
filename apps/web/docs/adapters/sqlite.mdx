@@ -22,7 +22,7 @@ createRegistry({
 });
 ```
 
-You give one function that opens the file. The adapter does what Rails does: WAL, `BEGIN IMMEDIATE`, and a 5 second wait for the lock.
+You give one function that opens the file. The adapter sets it up for you: WAL, `BEGIN IMMEDIATE`, and a 5 second wait for the lock.
 
 - **It opens the connections itself.** One stays open to read, so a query never waits for a mutation or sees what it hasn't committed. Each transaction gets its own, closed when it ends, so a write that arrives late (a branch of a `Promise.all` that failed) is refused, as on Postgres. That costs under a millisecond with a small schema, about one with 500 tables.
 - **Per-connection settings go in the function,** so every connection has them. `bun:sqlite` starts with foreign keys off:
@@ -44,7 +44,7 @@ You give one function that opens the file. The adapter does what Rails does: WAL
 
 ## Jobs
 
-`databaseQueue`, `outbox`, crons and `startTicking` work as [on Postgres](/docs/adapters/drizzle#database-queue). Several processes on one file can sweep at once.
+`databaseQueue`, `outbox`, crons and `work()` work as [on Postgres](/docs/adapters/drizzle#database-queue). Several processes on one file can sweep at once.
 
 ```ts
 // db/schema.ts: drizzle-kit adds the tables to your migrations

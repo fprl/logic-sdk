@@ -15,8 +15,8 @@ bun run --filter web dev   # docs site
 - `packages/logic-sdk`: the core and subpath adapters (`ai`, `orpc`, `fetch`, `drizzle`, `cloudflare`, `node`, `testing`). `src/` is by layer:
   - `src/*.ts`, `src/drizzle/*.ts`: one entry per `exports` subpath, re-exports only.
   - `src/core/`: `registry.ts` (`init`, `createRegistry`: calls, transactions, ctx), `types.ts` (the public types, plus the brand and internal symbols), `jobs.ts` (running jobs, crons, `registry.jobs`), `in-process.ts` (`inProcess()`, the default adapter), `errors.ts`, `schedule.ts` (cron matching), `testing.ts`.
-  - `src/adapters/`: `stored-jobs.ts` (the jobs table, any SQL database), `postgres.ts`, `sqlite.ts`, `drizzle-pg.ts`, `drizzle-sqlite.ts`, `pg-boss.ts`, `cloudflare-queue.ts`.
-  - `src/hosts/`: `node.ts` (`startTicking`), `cloudflare.ts` (`handleQueue`, `handleScheduled`), `pg-boss.ts` (`work`).
+  - `src/adapters/`: `stored-jobs.ts` (the jobs table, any SQL database), `postgres.ts`, `sqlite.ts`, `drizzle-pg.ts`, `drizzle-sqlite.ts`, `cloudflare-queue.ts`.
+  - `src/hosts/`: `node.ts` (`work`), `cloudflare.ts` (`handleQueue`, `handleScheduled`).
   - `src/integrations/`: `ai.ts`, `orpc.ts`, `fetch.ts`.
   - `test/` mirrors it: `core/`, `testing/`, `adapters/`, `hosts/`, `integrations/`, plus `conformance/` (`*.suite.ts`: the jobs table's and every jobs adapter's guarantees, run from `adapters/`), `support/` (shared fixtures) and `types/` (`types.check.ts`, checked by `tsc`).
   - `skills/logic-sdk/SKILL.md` ships in the tarball.
@@ -32,7 +32,7 @@ bun run --filter web dev   # docs site
 - **Decisions go in DESIGN.md with the reason and what would change it.** Claims about other libraries cite a source; inference is labelled.
 - **Reference stacks, in order:** Vercel, TanStack, Convex, then Rails, Laravel, Phoenix.
 - **Before designing a mechanism, check what the stacks do.** Retries, claims, scheduling, failure handling, test helpers: read how Rails, Laravel and Phoenix (Oban) do it, and the TS stacks where they have one, from their source or docs, not memory. Then say what we take from them: all of it, some, or nothing, and why. Designing first and checking after is how fixes kept needing fixes (see DESIGN.md, "Jobs").
-- **A queued job's life follows one model: Laravel on SQS** (DESIGN.md, "The jobs model"). Claim, extend, retry, fail and order don't mix in pieces from other stacks. Those are for what surrounds it: enqueue, crons, names.
+- **A queued job's life follows one model: a lease the runner extends** (DESIGN.md, "The jobs model", which names the source of each part: SQS's visibility timeout and receipt, Laravel Cloud's and the Vercel Queues SDK's extension, Laravel's worker for retry and fail). Claim, extend, retry, fail and order don't mix in pieces from other stacks. Those are for what surrounds it: enqueue, crons, workers, names.
 - **Keep the core small:** every change names its layer and passes that layer's test (below).
 
 ## Layers
@@ -44,9 +44,9 @@ Something that fits no layer, or two, is a design question before it's code. Why
 | **Userland** | the app: its rows and their status, its scope's shape, policies, events, handlers, routes, UI | it needs to know what the app's data means |
 | **Extensions** | plugins, dashboards, the CLI, and the integrations `ai`, `orpc`, `fetch` (your functions as AI tools, oRPC procedures, an HTTP handler) | it uses the public API and its own `meta.<name>`, nothing else |
 | **Core** | `logic-sdk`, plus `logic-sdk/testing` (the only code allowed `INTERNAL`) | it means the same on every adapter, and correctness depends on it |
-| **Adapters** | `inProcess`, `drizzle/*`, `postgres`, `sqlite`, `pg-boss`, `cloudflareQueue` | one core contract on one technology: it does what the contract says, or refuses at `createRegistry` |
-| **Hosts** | `startTicking`, `handleQueue`, `handleScheduled`, `work` | it turns one platform signal into one public call |
-| **Platforms** | Postgres, SQLite and D1, Workers and Queues, Vercel, Node, pg-boss's server | capacity and operations, set in their own config, which the library never reads |
+| **Adapters** | `inProcess`, `drizzle/*`, `postgres`, `sqlite`, `cloudflareQueue` | one core contract on one technology: it does what the contract says, or refuses at `createRegistry` |
+| **Hosts** | `work`, `handleQueue`, `handleScheduled` | it turns one platform signal into one public call |
+| **Platforms** | Postgres, SQLite and D1, Workers and Queues, Vercel, Node | capacity and operations, set in their own config, which the library never reads |
 
 - **The core never names an adapter or a provider,** in code or in messages. It names the capability ("can't hold jobs"), and the adapter names itself.
 - **Capabilities are declared** (`holds`, `replaces`, `retry`…) and the core refuses what's missing: at `createRegistry` when it can, at the call otherwise. Never silently.

@@ -1,6 +1,6 @@
 import { CaughtNestedFailure, describeIssues, DomainError, errorsFor, forbiddenOf, moduleOf, PRIVATE } from "./errors.ts";
 import { inProcess, runsNow } from "./in-process.ts";
-import { ADAPTERS, isPlainObject, makeJobs, replaceKeyOf } from "./jobs.ts";
+import { ADAPTERS, isPlainObject, makeJobs, replaceKeyOf, workersOf } from "./jobs.ts";
 import { assertTimeZone, parseSchedule } from "./schedule.ts";
 import { BRAND, INTERNAL } from "./types.ts";
 import type {
@@ -105,12 +105,12 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
      * `cron({ schedule: "0 9 * * MON", scope: { kind: "system", job: "reports.weekly" }, async handler(ctx) { await ctx.run(send) } })`.
      */
     cron: <const Sc extends ScopeOf<C>>(def: CronDef<C, Sc>): Cron<C> => {
-      const { id, schedule, timezone, scope, attempts, meta, handler } = def;
+      const { id, schedule, timezone, scope, attempts, queue, meta, handler, failed } = def;
       parseSchedule(schedule);
       if (timezone !== undefined) assertTimeZone(timezone);
       checkAttempts("cron", attempts);
       // meta is checked against ListenerMetaOf<C> above and stored loose, like a listener's, for wrap and adapters
-      return Object.freeze({ [BRAND]: "cron" as const, kind: "cron" as const, id, schedule, timezone, scope, attempts, meta: meta as Cron["meta"], handler });
+      return Object.freeze({ [BRAND]: "cron" as const, kind: "cron" as const, id, schedule, timezone, scope, attempts, queue, meta: meta as Cron["meta"], handler, failed });
     },
     /**
      * React to an event after commit, like an action. Must be idempotent.
@@ -126,7 +126,7 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
       event: () => EventDef<unknown, O>;
       /**
        * Tries in total, the first included, like Laravel's `$tries`. Default 1: a retry repeats side effects, so opt in.
-       * Once they're used, the job is `failed` (kept by `databaseQueue`, `outbox` and pg-boss, retried with `registry.jobs.retry(id)`).
+       * Once they're used, the job is `failed` (kept by `databaseQueue` and `outbox`, retried with `registry.jobs.retry(id)`).
        */
       attempts?: number;
       /** Seconds after the event before the first try. Needs an adapter that holds jobs: `inProcess()` is refused. */
@@ -138,15 +138,51 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
        * mutation, as a bad payload does.
        */
       when?: (payload: O) => boolean;
+      /**
+       * Jobs with the same key run one at a time, in the order their events were emitted, like Laravel's message groups
+       * on SQS FIFO: `key: (m) => m.conversationId`. Waiting spends no attempt; a try backing off holds the key, a job
+       * that failed for good frees it. Per listener. Needs an adapter that runs a key's jobs in order: others are refused.
+       * Inside its handler, run functions with `ctx.run`: calling the registry directly for the same key waits on itself.
+       */
+      key?: (payload: O) => string;
+      /**
+       * While a job with the same value hasn't started, later ones are dropped, like Laravel's
+       * `ShouldBeUniqueUntilProcessing`: `unique: (p) => p.productId`. **It drops events, so the handler must read
+       * current state, never the payload's data**: for "X changed, recompute X". Once the job starts, the next event
+       * queues a new one.
+       */
+      unique?: (payload: O) => string;
+      /**
+       * Seconds a try may run, like Laravel's `$timeout`. Past it, `ctx.signal` aborts, no new `ctx.run` starts, and
+       * the try counts as failed (retried while `attempts` are left). JavaScript can't stop code mid-flight: a mutation
+       * already running still commits.
+       */
+      timeout?: number;
+      /**
+       * Its queue, one of `jobs.queues`: `queue: "mail"`. Default `"default"`. A worker takes its queues in the order it
+       * lists them: `work(registry, { queues: ["mail", "default"] })`.
+       */
+      queue?: string;
       meta?: ListenerMetaOf<C>;
       handler: (ctx: ListenerCtx<C, O>, payload: O) => Promise<unknown>;
+      /**
+       * Runs once its last try has failed, with the handler's ctx and payload, and the error: undo or flag what the
+       * handler started (`await ctx.run(orders.flagReceipt, { orderId })`). Not in a transaction: run mutations. At most
+       * once (a crash right after the failure skips it), and not for a job that can't run anymore (its payload or event
+       * changed, or `scope.load` returned null). A throw is reported to `onError`; the job stays failed.
+       */
+      failed?: (ctx: ListenerCtx<C, O>, payload: O, error: unknown) => Promise<unknown>;
     }): Listener<O, C> => {
-      const { id, event, attempts, delay, when, meta, handler } = def;
+      const { id, event, attempts, delay, when, key, unique, timeout, queue, meta, handler, failed } = def;
       checkAttempts("listener", attempts);
       if (delay !== undefined && !(Number.isFinite(delay) && delay >= 0))
         throw new Error(`[logic-sdk] listener delay must be seconds, 0 or more (got ${delay}).`);
+      if (timeout !== undefined && !(Number.isFinite(timeout) && timeout > 0))
+        throw new Error(`[logic-sdk] listener timeout must be seconds, more than 0 (got ${timeout}).`);
+      // two jobs of one key with different values would be inserted in `unique` order (the lock order), not emit order
+      if (key && unique) throw new Error("[logic-sdk] a listener takes key or unique, not both: key runs every job in order, unique drops the ones waiting.");
       // meta is checked against ListenerMetaOf<C> above and stored loose, like Fn.meta, for wrap and adapters
-      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, when, meta: meta as Listener["meta"], handler });
+      return Object.freeze({ [BRAND]: "listener" as const, kind: "listener" as const, id, event, attempts, delay, when, key, unique, timeout, queue, meta: meta as Listener["meta"], handler, failed });
     },
   };
 }
@@ -154,8 +190,8 @@ export function init<C extends Config & OnlyKnownKeys<C>>() {
 /** `cron({...})`: its handler's `ctx.scope` is the scope it declares, so a policy-free read of it is typed. */
 type CronDef<C extends Config, Sc> = {
   /**
-   * Stable id, local to its module, like every definer's. Defaults to the export name. Jobs and pg-boss's queue store it,
-   * so set it before you rename the export.
+   * Stable id, local to its module, like every definer's. Defaults to the export name. Jobs store it, so set it before you
+   * rename the export.
    */
   id?: string;
   /** Five fields: minute hour day-of-month month day-of-week. `"*\/15 * * * *"`, `"0 9 * * MON"`. */
@@ -166,9 +202,13 @@ type CronDef<C extends Config, Sc> = {
   scope: Sc;
   /** Tries in total, like a listener's. Default 1: a retry runs the whole handler again. */
   attempts?: number;
+  /** Its queue, one of `jobs.queues`, like a listener's. Default `"default"`. */
+  queue?: string;
   meta?: ListenerMetaOf<C>;
   /** The work, like a listener's handler: an action's ctx, plus `ctx.cron` (`scheduledAt`, `attempt`). */
   handler: (ctx: CronCtx<C, Sc>) => Promise<unknown>;
+  /** Runs once its last try has failed, like a listener's `failed`: the handler's ctx, and the error. */
+  failed?: (ctx: CronCtx<C, Sc>, error: unknown) => Promise<unknown>;
 };
 
 /** How deep `ctx.run` calls may nest. Past it, a function is running itself without end. */
@@ -206,6 +246,8 @@ interface Frame {
   signal?: AbortSignal;
   /** Passed to this very call: checked before it starts. */
   abortOn?: AbortSignal;
+  /** A listener's `timeout`: once it's aborted, no call from here starts. */
+  stop?: AbortSignal;
   /** Hops in the chain of events and calls due now that led here: 0 for a call from outside. */
   eventDepth: number;
   /** Inside a job: where the jobs it queues wait until it's settled. */
@@ -373,8 +415,9 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         `[logic-sdk] ${adapter.name ?? "Your jobs adapter"} writes in your mutation's transaction with SQL, so it needs ` +
           "createRegistry({ database: { adapter } }) with an adapter that runs SQL (`query`). See Adapters, Other ORMs in the docs.",
       );
-  jobsAdapter.connect?.({ listeners, crons, database, sql });
-  failedStore?.connect?.({ listeners, crons, database, sql });
+  const setup = { sql, workers: workersOf(jobsAdapter) };
+  jobsAdapter.connect?.(setup);
+  failedStore?.connect?.(setup);
 
   const idOf = (x: object) => {
     const id = ids.get(x);
@@ -440,7 +483,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
         // a copy: changing it can't change what's delivered
         return Object.freeze({ id: envelope.id, name: envelope.name, payload: structuredClone(envelope.payload) as typeof payload, occurredAt: envelope.occurredAt });
       },
-      schedule: (fn, input, { at, delay, attempts = 1, replace, scope }) => {
+      schedule: (fn, input, { at, delay, attempts = 1, replace, scope, queue }) => {
         const fnId = ids.get(fn);
         if (!fnId)
           throw new Error(
@@ -452,6 +495,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           throw new Error(`[logic-sdk] ctx.schedule(${fnId}) needs an \`at\` date or a \`delay\` in seconds, 0 or more.`);
         checkAttempts(`ctx.schedule(${fnId})`, attempts);
         checkRetries(`ctx.schedule(${fnId})`, attempts);
+        checkQueue(`ctx.schedule(${fnId})`, queue);
         if (replace !== undefined) {
           if (!jobsAdapter.replaces)
             throw new Error(`[logic-sdk] ctx.schedule(${fnId}) replaces a waiting call, but ${yours} can't replace one it already has. Use one that can (${ADAPTERS}).`);
@@ -470,6 +514,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
           depth: waits ? 0 : frame.eventDepth + 1, // due now, it's the next hop of this chain; a real wait starts a new one
         };
         if (waits) job.runAt = new Date(now().getTime() + seconds * 1000).toISOString();
+        if (queue) job.queue = queue;
         if (replace) {
           job.replace = true;
           // scheduled twice in this transaction: the later one wins here too (the dropped one's input is still checked:
@@ -503,7 +548,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     services,
   });
 
-  const { toJobs, deliver, jobs, due, checkHold, checkRetries, yours } = makeJobs({
+  const { toJobs, deliver, jobs, due, checkHold, checkRetries, checkQueue, yours } = makeJobs({
     listeners,
     crons,
     functions,
@@ -513,11 +558,12 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     jobScope,
     failedStore,
     maxEventDepth,
+    queues: options.jobs?.queues ?? [],
     now,
     wrap,
     report,
     runAs: (fn, input, scope, eventDepth, queued, job) => invoke(fn, input, enter({ scope, trail: [], eventDepth, queued, job }, undefined), ["query", "mutation", "action"]),
-    handlerCtx: (scope, eventDepth, id, queued) => actionCtx({ scope, trail: [id], eventDepth, queued }, id),
+    handlerCtx: (scope, eventDepth, id, queued, stop) => actionCtx({ scope, trail: [id], eventDepth, queued, signal: stop, stop }, id),
   });
 
   // ── invoke ───────────────────────────────────────────────────────────────
@@ -542,6 +588,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     /** Authorize, then validate, before any transaction opens: denied or bad calls never touch the database. */
     const prepare = async () => {
       frame.abortOn?.throwIfAborted();
+      frame.stop?.throwIfAborted();
       if (fn.authorize) {
         // SAFETY: the registry erases each policy's scope type; the caller's scope is the app's Scope by construction
         if (fn.authorize(frame.scope as never) !== true) throw new DomainError("forbidden", forbiddenOf(id));
@@ -583,7 +630,8 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
       const committed = await commitWithRetries(database, frame, id, (tx) => execute(input, mutationCtx({ ...frame, tx }, tx, id)));
 
       // committed. Nothing below may fail the caller.
-      await afterCommit(committed.events, committed.jobs, frame.queued);
+      // a try past its timeout is settled already: what it still commits is delivered now, not after it
+      await afterCommit(committed.events, committed.jobs, frame.stop?.aborted ? undefined : frame.queued);
       return committed.out;
     });
   }

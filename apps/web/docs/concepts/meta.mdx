@@ -3,7 +3,7 @@ title: Meta
 description: Your own typed data about each function, read by wrap and adapters.
 ---
 
-Tags, rate limits, whether an AI agent may call it: anything you want to know about a function from the outside. The shape is declared once, in your config. The values are set per function. Meta is yours: the library reserves no key in it. Adapters that read meta export their part of the shape, under their own name, for you to add. Yours goes on functions and listeners. An adapter's goes only where it reads it: `AIMeta` on queries, mutations and actions, `PgBossMeta` on listeners. Each `init` has only what its own config adds.
+Tags, rate limits, whether an AI agent may call it: anything you want to know about a function from the outside. The shape is declared once, in your config. The values are set per function. Meta is yours: the library reserves no key in it. Adapters that read meta export their part of the shape, under their own name, for you to add. Yours goes on functions and listeners. An adapter's goes only where it reads it: `AIMeta` on queries, mutations and actions, a queue's own on listeners (`ForListeners`). Each `init` has only what its own config adds.
 
 ```ts
 // logic.ts
@@ -56,4 +56,4 @@ export type RateLimitMeta = ForFunctions<{ rateLimit?: { max: number } }>;
 export type QueueMeta = ForListeners<{ queue?: { priority: number } }>;
 ```
 
-Adapters read it from the function (`fn.meta`), each from its own key, the way trpc-to-openapi reads `meta.openapi`. A function can't set `meta` unless your config declares its shape. That's the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
+Adapters read it from the function (`fn.meta`), each from its own key. A function can't set `meta` unless your config declares its shape.

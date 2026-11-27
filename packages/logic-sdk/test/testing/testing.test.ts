@@ -204,3 +204,20 @@ test("inProcess() refuses attempts above 1, as it refuses a delay; inline tests 
   expect(tries).toBe(1);
   expect(outcomes).toEqual(["failed"]);
 });
+
+test("testing: a unique listener's job is dropped while one with its value waits, as in production", async () => {
+  const { mutation, event, listener, createRegistry } = init<{ scope: { who: string }; db: Store }>();
+  const changed = event({ payload: z.object({ product: z.string() }) });
+  const change = mutation({ input: changed.payload, async handler(ctx, p) { ctx.emit(changed, p); } });
+  const ran: string[] = [];
+  const reindex = listener({ event: () => changed, unique: (p) => p.product, async handler(_ctx, { product }) { ran.push(product); } });
+  const t = createTestRegistry(createRegistry({ modules: { shop: { changed, change, reindex } }, database: { adapter: memoryDatabase() } }), { jobs: "manual" });
+  await t.begin();
+  const app = t.as({ who: "ana" });
+  await app.run(change, { product: "p1" });
+  await app.run(change, { product: "p1" });
+  await app.run(change, { product: "p2" });
+  await t.jobs.drain();
+  expect(ran).toEqual(["p1", "p2"]);
+  await t.rollback();
+});

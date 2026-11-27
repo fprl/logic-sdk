@@ -27,8 +27,6 @@ A **job** is one piece of work that runs after your transaction commits. It come
 | A scheduled call | `ctx.schedule(fn, input, { at })` in a mutation: run this function once, later | today |
 | A cron's run | `cron({ schedule, scope, handler })`: a handler on a schedule, like a listener for the clock ([Crons](/docs/concepts/crons)) | today |
 
-If you've used Rails, Laravel or Oban, a listener is what you'd write as a job class, and the `jobs` slot is their queue adapter.
-
 ## Adapters
 
 The adapter decides where a job waits and what survives a crash.
@@ -36,45 +34,43 @@ The adapter decides where a job waits and what survives a crash.
 ```txt
 inProcess()  default, zero infra
   mutation ─ commit ─► run the listeners in this process
+                       without waitUntil: the call waits for them
+                       with waitUntil: the response goes first, they finish after
   lost if the process dies after commit
 
-databaseQueue()  durable, Postgres or SQLite: your database is the queue (Laravel's database driver)
-  mutation ─ insert a row ─ commit ─► your app runs it, deletes the row
+databaseQueue()  durable, Postgres or SQLite: your database is the queue
+  mutation ─ insert a row ─ commit ─► the request runs it, deletes the row
                                    └► failed or crashed: registry.jobs.sweep() runs it again
+  with work(registry) in this process: the request answers first, and the loop runs it at once (Node, Bun)
 
-cloudflareQueue(env.JOBS)  a queue alone (Laravel's SQS driver, after commit)
+cloudflareQueue(env.JOBS)  a queue alone, sent after commit
   mutation ─ commit ─► send it ─► your consumer ─► registry.jobs.run(job)
                     └► the process died before the send: lost
 
 outbox(cloudflareQueue(env.JOBS))  durable, a table in front of a queue (the outbox pattern)
-  mutation ─ insert a row ─ commit ─► send it, delete the row ─► your consumer ─► registry.jobs.run(job)
-                                   └► the send failed or crashed: registry.jobs.sweep() sends it again
-  after the handoff, the queue owns retries, concurrency and its dead-letter queue
-  planned behind an outbox: Vercel Queues, Redis (BullMQ), Inngest
-
-pgBoss(boss)  durable, Postgres: pg-boss inserts inside your transaction
-  mutation ─ pg-boss insert ─ commit ─► work(registry, boss) ─► registry.jobs.run(job)
-                                     └► a throw: pg-boss retries it with backoff; failed for good: kept as failed
+  mutation ─ insert a row ─ commit ─► send a signal ─► your consumer ─► registry.jobs.run(signal) runs the row
+                                   └► the signal was lost or the consumer crashed: registry.jobs.sweep() runs it
+  every job stays a row: the table owns tries, failures and order; the queue adds consumers
 ```
 
+- **Jobs off the web process:** `databaseQueue({ runIn: "worker" })` and `work()` in a process of its own, and a crash keeps them. Tests use [`logic-sdk/testing`](/docs/testing), not an adapter that drops jobs.
 - **Which one:** `databaseQueue` unless you need what a queue gives you (its own consumers, more throughput). Then the queue alone if losing a job on a crash is fine, and behind an `outbox` if it isn't.
-- **Why an outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between, which is the Rails and Laravel `after_commit` default. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
-- **A job is done before the jobs it queued run,** as in Laravel: a listener whose mutation emits an event has its row deleted before that event's listeners start, after the jobs queued alongside it. A crash in one of them can't run the first again.
-- **`databaseQueue` and pg-boss need no outbox:** each lives in your database, so its insert commits or rolls back with your writes, like Oban.
-- **One page per adapter:** [database queue](/docs/adapters/drizzle#database-queue) (or [with another ORM](/docs/adapters/other-orms)), [outbox](/docs/adapters/drizzle#outbox), [pg-boss](/docs/adapters/pg-boss), [Cloudflare](/docs/adapters/cloudflare).
-- **The adapter's own options go in its factory:** `databaseQueue({ lease, backoff })`, `outbox(queue, { maxAttempts })`. What every adapter honours goes in `jobs`: `scope`, and `failed` for a queue that keeps none.
+- **Why an outbox goes first:** a queue that isn't your database can't join your transaction. Sending after commit loses the job if the process dies in between. Writing a row in the transaction closes that gap, and the queue then adds what it's good at.
+- **A job is done before the jobs it queued run:** a listener whose mutation emits an event has its row deleted before that event's listeners start, after the jobs queued alongside it. A crash in one of them can't run the first again.
+- **`databaseQueue` needs no outbox:** it lives in your database, so its insert commits or rolls back with your writes.
+- **One page per adapter:** [database queue](/docs/adapters/drizzle#database-queue) (or [with another ORM](/docs/adapters/other-orms)), [outbox](/docs/adapters/drizzle#outbox), [Cloudflare](/docs/adapters/cloudflare).
+- **The adapter's own options go in its factory:** `databaseQueue({ lease, backoff, runIn })`, `outbox(queue, { lease, backoff })`. What every adapter honours goes in `jobs`: `scope`, `queues`, and `failed` for a queue that keeps none.
 
 ## What each one guarantees
 
-| | Crash right after commit | Job failed for good | `delay`, `ctx.schedule` | `replace` | A cron ticked twice |
-|---|---|---|---|---|---|
-| `inProcess()` | lost | only `onError` | refused (one try) | no | runs twice |
-| `databaseQueue` | kept | kept as `failed` | yes | yes | runs once |
-| `cloudflareQueue` alone | lost, if not sent yet | only `onError`, or kept with `failedJobs()` | up to 24 hours | no | runs twice |
-| `outbox` + Cloudflare | kept | kept as `failed` | yes | yes | runs once |
-| `pgBoss` | kept | kept for 7 days | yes | yes | runs once |
+| | Crash right after commit | Job failed for good | `delay`, `ctx.schedule` | `replace`, `unique` | `key` | A cron ticked twice |
+|---|---|---|---|---|---|---|
+| `inProcess()` | lost | only `onError` | refused (one try) | `replace` no; `unique` has nothing to drop | yes, in the process | runs twice |
+| `databaseQueue` | kept | kept as `failed` | yes | yes | yes | runs once |
+| `cloudflareQueue` alone | lost, if not sent yet | only `onError`, or kept with `failedJobs()` | up to 24 hours | no | no | runs twice |
+| `outbox` + Cloudflare | kept | kept as `failed` | yes | yes | yes, from the table | runs once |
 
-All but `inProcess()` can run a job twice. On Cloudflare, "failed for good" needs [`max_retries`](/docs/adapters/cloudflare#set-max_retries-to-at-least-your-largest-attempts) at least your largest `attempts`. These are tested on Postgres and against a fake Cloudflare queue. Deployed Workers, Queues and Vercel aren't tested yet.
+All but `inProcess()` can run a job twice. On Cloudflare alone, "failed for good" needs [`max_retries`](/docs/adapters/cloudflare#alone-set-max_retries-to-at-least-your-largest-attempts) at least your largest `attempts`; behind an outbox the table counts. These are tested on Postgres and against a fake Cloudflare queue. Deployed Workers, Queues and Vercel aren't tested yet.
 
 ## Running, sweeping, retrying
 
@@ -85,12 +81,56 @@ await registry.jobs.retry(id);                                        // put a f
 ```
 
 - **`run` resolves `"done"`, `"failed"` or `"discarded"`: acknowledge all three.** `failed` means it's over: the listener is out of `attempts`, or retrying can't help (a domain error other than `conflict`, or a payload that no longer matches its schema). It throws when the listener has tries left and a retry might help. Every failure goes to `onError` with `source` (the listener, cron or function), the `job` itself, the attempt, and `outcome`: `"retry"`, `"failed"` or `"discarded"`, so you can alert on the last one only.
-- **`sweep` runs what's due:** retries whose backoff is over, and jobs whose runner crashed. Adapters that store nothing resolve zeros, and so does pg-boss, which maintains itself, so one cron handler works with any of them.
+- **`sweep` runs what's due:** retries whose backoff is over, delayed jobs, and jobs whose runner crashed. Adapters that store nothing resolve zeros, so one cron handler works with any of them.
 - **`retry` only revives failed jobs** and returns whether it did. A pending one belongs to its runner, and resetting it could run it twice at once. It throws on `inProcess()`, which stores none.
+
+## Workers on Node
+
+On a long-running server, `work(registry)` runs your jobs in a loop. Call it in your server's entry, and a request answers right after commit while the loop starts its jobs at once. Or run it in processes of its own, to keep slow jobs off the web process:
+
+| `work()` runs | requests | `work()` |
+|---|---|---|
+| nowhere | run their own jobs before they answer | nothing: sweep from a cron |
+| in the web process | answer at once, and wake it | every job, right away |
+| in its own processes, with `databaseQueue({ runIn: "worker" })` | only write the rows | every job, within `pollEvery` |
+
+```ts
+// server.ts: one process, the web server and the loop
+import { work } from "logic-sdk/node";
+
+const stop = work(registry, { concurrency: 5 });
+process.on("SIGTERM", async () => {
+  await stop(); // waits for the running jobs, 30 s at most: { timeout }
+  process.exit(0);
+});
+
+// apart: registry.ts says requests only write the rows, and worker.ts calls work(registry)
+jobs: { adapter: databaseQueue({ runIn: "worker" }), scope: { store, load } },
+```
+
+- **No `waitUntil` on Node or Bun:** `work()` in the process is what lets a request answer first. Without it, a request runs its jobs and then answers.
+- **`concurrency` slots** (default 1), each claiming the next due job as soon as the last one is done. A slot that finds none waits `pollEvery` seconds (default 2); in the web process, a commit wakes it, so a new job never waits for the poll. Give the database pool at least `concurrency` + 1 connections: a running job extends its lease on its own.
+- **`queues`:** `work(registry, { queues: ["mail", "default"] })` runs only those, in that order. See [Queues](#queues).
+- **It ticks your [crons](/docs/concepts/crons) too:** every worker ticks, and each minute runs once.
+- **Run as many as you like.** A job is claimed by one of them, a `key`'s jobs still run one at a time in order, and a worker that dies leaves its job to the others once the lease runs out.
+- **While the database is down,** each slot reports the error and waits twice as long each time, up to 30 seconds.
+- **A job runs on one of the slots until it's done.** Over 15 minutes it counts as crashed, as on Workers: give `databaseQueue({ lease })` that long for a slower one, and listeners a `timeout`.
+
+## How a job's time works
+
+A runner that dies mid-job never says so. A queue tells a slow job from a dead one in one of three ways:
+
+| | How | Catch |
+|---|---|---|
+| A fixed window | taken until a time passes, then anyone takes it again | the window must outlast your slowest job, or it runs twice |
+| A process owns it | a supervisor watches each worker's heartbeat | needs long-lived processes, which Workers and Vercel don't have |
+| **A lease the runner extends (this one)** | a short lease, renewed while the job runs | none of the above: a slow job keeps it, a dead one stops renewing |
+
+So a job here is claimed for `lease` seconds (default 300), renewed every third of that while it runs, for up to 15 minutes. A crash is noticed a lease later, and a slow job is never taken from a runner that's alive. Where each part comes from: DESIGN.md, "The jobs model".
 
 ## Failed jobs, and running a cron now
 
-What an operator does: a script after an incident, or a staff page. These are outside your functions, like Laravel's `queue:failed`, `queue:retry` and `queue:forget`, so the route that calls them checks who may, with the same policy your functions use:
+What an operator does: a script after an incident, or a staff page. These are outside your functions, so the route that calls them checks who may, with the same policy your functions use:
 
 ```ts
 // an incident script: retry one organization's failed emails, a page at a time
@@ -107,9 +147,9 @@ app.post("/staff/jobs/:id/forget", staffOnly, async (c) => c.json(await registry
 app.post("/staff/digest", staffOnly, async (c) => c.json(await registry.jobs.invoke(orders.sendDigest)));
 ```
 
-- **`failed` lists failed jobs, newest first,** with `id`, `kind`, `source` (the listener, cron or function), `scope`, `error` (with its stack) and `failedAt`. `source` takes one id; `scope` matches what `jobs.scope.store` saved, nested fields too (`{ organization: { id } }`), with strings, numbers, booleans and null. A cron run stores no scope, so a scope filter never returns one. Pass your stored scope's type to check the filter: `failed<StoredScope>({ scope })`. Pages go by `cursor`, not offset, so a script that retries as it reads skips nothing. `databaseQueue` and `outbox` list them; pg-boss keeps them in its own tables (`boss.findJobs`). A queue on its own keeps none: give it a store, below.
-- **A queue on its own keeps failed jobs in `failedJobs()`,** like Laravel's `failed` driver next to SQS: `jobs: { adapter: cloudflareQueue(env.JOBS), failed: failedJobs(), scope }`. A job out of attempts is acked by the queue and kept as a row; `failed`, `retry` (back to the queue) and `forget` work on it. `databaseQueue`, `outbox` and pg-boss keep their own, so `createRegistry` refuses a store next to them.
-- **`forget(id)` deletes a failed job,** Laravel's `queue:forget`: `false` when there's no failed job with that id. A waiting or running one is never touched.
+- **`failed` lists failed jobs, newest first,** with `id`, `kind`, `source` (the listener, cron or function), `scope`, `error` (with its stack) and `failedAt`. `source` takes one id; `scope` matches what `jobs.scope.store` saved, nested fields too (`{ organization: { id } }`), with strings, numbers, booleans and null. A cron run stores no scope, so a scope filter never returns one. Pass your stored scope's type to check the filter: `failed<StoredScope>({ scope })`. Pages go by `cursor`, not offset, so a script that retries as it reads skips nothing. `databaseQueue` and `outbox` list them. A queue on its own keeps none: give it a store, below.
+- **A queue on its own keeps failed jobs in `failedJobs()`:** `jobs: { adapter: cloudflareQueue(env.JOBS), failed: failedJobs(), scope }`. A job out of attempts is acked by the queue and kept as a row; `failed`, `retry` (back to the queue) and `forget` work on it. `databaseQueue` and `outbox` keep their own, so `createRegistry` refuses a store next to them.
+- **`forget(id)` deletes a failed job:** `false` when there's no failed job with that id. A waiting or running one is never touched.
 - **`invoke(cron)` runs a cron now,** outside its schedule: the cron, or its id from a script (`"orders.sendDigest"`). It goes through your adapter like a tick, under its own id (`orders.sendDigest@20261123T0900Z-<uuid>`), so the real tick for that minute still runs, and so does a second invoke. `{ at }` is the minute it's for (`ctx.cron.scheduledAt`), to redo a missed one. It resolves the job id, so a failure shows up in `failed` under it. Unlike a tick, it throws when the hand-off to a queue fails.
 - **A user doesn't retry a job.** What they want again is a mutation that checks your row and emits again, under its policy. Job ids stay with operators.
 
@@ -124,12 +164,32 @@ export const sendReceipt = listener({
 });
 ```
 
-- **`attempts` defaults to 1,** like Rails (no `retry_on`), Laravel (`--tries=1`) and Solid Queue. A retry repeats side effects, so you opt in per listener, like Laravel's `$tries`. Oban defaults to 20 and pg-boss to 3. `inProcess()` runs each job once, so it refuses `attempts` above 1 at `createRegistry`, as it refuses a delay, instead of ignoring them (Rails' inline adapter refuses what it can't do too).
-- **Out of attempts, the job is `failed`:** kept by `databaseQueue`, `outbox`, pg-boss or a `failedJobs` store, retried with `registry.jobs.retry(id)` (see [Failed jobs](#failed-jobs-and-running-a-cron-now)).
-- **A last try that never finished** (the process crashed, or the job ran past the time `databaseQueue` keeps extending its lease) is `failed` without running again, as Laravel's worker does.
-- **Stamped on the job when it's queued,** like Laravel and Oban: a deploy that changes `attempts` applies to jobs queued after it.
-- **`delay`** is stamped on the job as `runAt`. `databaseQueue` and `outbox` keep the row until then, pg-boss gets it as `startAfter`, and Cloudflare as `delaySeconds`.
-- **`inProcess()` tries once and can't hold a job.** What throws is `failed`. `createRegistry` refuses `attempts` above 1 there, and a listener with a `delay`, rather than run it early (Laravel's sync queue drops the delay) or lose it on a restart. Use `databaseQueue()`. Cloudflare alone holds up to 24 hours.
+- **`attempts` defaults to 1.** A retry repeats side effects, so you opt in per listener. `inProcess()` runs each job once, so it refuses `attempts` above 1 at `createRegistry`, as it refuses a delay, instead of ignoring them.
+- **Out of attempts, the job is `failed`:** kept by `databaseQueue`, `outbox` or a `failedJobs` store, retried with `registry.jobs.retry(id)` (see [Failed jobs](#failed-jobs-and-running-a-cron-now)).
+- **A last try that never finished** (the process crashed, or the job ran past the time `databaseQueue` keeps extending its lease) is `failed` without running again.
+- **Stamped on the job when it's queued:** a deploy that changes `attempts` applies to jobs queued after it.
+- **`delay`** is stamped on the job as `runAt`. `databaseQueue` and `outbox` keep the row until then, and Cloudflare alone gets it as `delaySeconds`.
+- **`inProcess()` tries once and can't hold a job.** What throws is `failed`. `createRegistry` refuses `attempts` above 1 there, and a listener with a `delay`, rather than run it early or lose it on a restart. Use `databaseQueue()`. Cloudflare alone holds up to 24 hours.
+
+## When the last try fails: `failed`
+
+```ts
+export const sendReceipt = listener({
+  event: () => orders.placed,
+  attempts: 5,
+  async handler(ctx, { orderId }) { ... },
+  async failed(ctx, { orderId }, error) {
+    await ctx.run(orders.flagReceipt, { orderId }); // the order page shows "receipt not sent"
+  },
+});
+```
+
+- **Runs once the job is `failed`:** out of attempts, or a failure a retry can't help. Not on a retry, not on a discard.
+- **The handler's ctx and payload, and the error,** as the scope `jobs.scope.load` rebuilds. Not in a transaction: run mutations, each commits on its own.
+- **At most once:** a crash right after the failure skips it. `onError` has heard of the failure either way.
+- **Not for a job that can't run anymore:** its payload no longer matches the schema, its listener moved to another event, or `load` returned `null`.
+- **A throw is reported to `onError`** with `source: "<listener> (failed)"`, and the job stays failed.
+- **Crons too:** `failed(ctx, error)`, as the cron's scope, with `ctx.cron`. Scheduled calls have none: `onError` hears them.
 
 ## Only some events: `when`
 
@@ -141,10 +201,84 @@ export const flagFraud = listener({
 });
 ```
 
-- **False, and that event gets no job for this listener:** nothing stored, run or counted, with any adapter. Like Laravel's `shouldQueue($event)` and Inngest's trigger `if`. The emitter doesn't know who listens; the listener says what it wants.
+- **False, and that event gets no job for this listener:** nothing stored, run or counted, with any adapter. The emitter doesn't know who listens; the listener says what it wants.
 - **It gets the payload the handler gets,** parsed by the event's schema (defaults and transforms applied), at commit.
 - **Sync, from the event only.** A condition on the database belongs in the handler: the data can change before the job runs. If who emitted matters, the event says so (`placedBy: "admin"`).
 - **A throw fails the mutation,** as a bad payload does: it's a bug in your code. `t.jobs.perform(listener, payload)` skips `when`, since it names the listener.
+
+## One at a time, in order: `key`
+
+```ts
+export const reply = listener({
+  event: () => messages.received,
+  key: (m) => m.conversationId, // one job per conversation at a time, in the order the messages came
+  attempts: 3,
+  async handler(ctx, m) { ... },
+});
+```
+
+- **Same key, one at a time, in the order their events were emitted.** Another key runs alongside. Per listener.
+- **Waiting spends no attempt.** A job behind its key isn't claimed until the one before it is done.
+- **A try that's backing off holds the key;** the next waits for its retry. **A job that failed for good frees it:** one bad job doesn't stall the conversation.
+- **Order is the order the rows were written.** Two mutations for one key committing at the same instant have no order between them, as in any queue, and on Postgres their jobs can overlap in that instant.
+- **Inside the handler, run functions with `ctx.run`:** what they queue for the same key runs after this job. Calling the registry directly for the same key would wait on itself.
+- **With a `delay`,** jobs wait for it and still run in order: every job of a listener has the same delay.
+- **The order lives where the jobs wait:** `inProcess()` in that process, and the jobs table (`databaseQueue` and `outbox`) on every database. `createRegistry` refuses a `key` on Cloudflare Queues alone, which doesn't keep order.
+- **Behind an outbox, the queue gets one message per key per commit:** the consumer that gets it runs the key's next jobs from the table, in order, so the queue's order, a duplicate or a lost message can't break the key's. After a minute on one key, it sends the rest on as one more message.
+- **It's a string from the payload,** sync, at commit. A throw or an empty string fails the mutation.
+- **Not with `unique`:** a listener takes one or the other. `key` runs every job in order; `unique` drops the ones waiting.
+
+## A burst collapses: `unique`
+
+```ts
+export const reindex = listener({
+  event: () => products.changed,
+  unique: (p) => p.productId,
+  delay: 30, // the window: events in the next 30 seconds join this job
+  async handler(ctx, { productId }) {
+    const product = await ctx.run(products.get, { id: productId }); // read it now
+    await search.index(product);
+  },
+});
+```
+
+- **While a job with the same value hasn't started, later ones are dropped.** Once it starts, the next event queues a new job, since the running one may have read the data before the change.
+- **It drops events, so the handler must read current state, never the payload's data.** It's for "X changed, recompute X": a search index, a cache, a sync. When every event counts (messages, payments), use `key` instead.
+- **Without a `delay` the window is short:** the job is claimed right after commit. `delay` is what makes bursts collapse.
+- **The twin of `ctx.schedule`'s `replace`:** `replace` keeps the newest waiting call, `unique` the first waiting job.
+- **Needs an adapter that can drop a job it holds:** `databaseQueue` and `outbox`. `inProcess()` holds nothing (jobs waiting behind a `key` still run each), so there's nothing to drop. `cloudflareQueue` alone is refused.
+
+## A try's time limit: `timeout`
+
+```ts
+listener({ event: () => messages.received, timeout: 30, attempts: 3, async handler(ctx, m) {
+  await fetch(url, { signal: ctx.signal }); // aborted at 30 s
+} });
+```
+
+- **Past it, the try is stopped and counts as failed,** retried while `attempts` are left.
+- **`ctx.signal` aborts and no new `ctx.run` starts.** JavaScript can't stop code mid-flight, so pass the signal on: a `fetch` or AI call stops with it. A mutation already running still commits.
+- **No default:** `databaseQueue` keeps a try's claim for 15 minutes at most, and a try past that is taken as crashed. With `key`, a timeout keeps one hung job from holding its key that long.
+
+## Queues
+
+```ts
+createRegistry({ modules, database, jobs: { adapter: databaseQueue(), queues: ["mail", "reports"], scope } });
+
+export const sendReceipt = listener({ event: () => orders.placed, queue: "mail", async handler(ctx, order) { ... } });
+export const weekly = cron({ schedule: "0 9 * * MON", scope, queue: "reports", async handler(ctx) { ... } });
+ctx.schedule(reports.build, { id }, { delay: 60, queue: "reports" });
+
+work(registry, { queues: ["mail", "default"] }); // mail first, then the rest
+work(registry, { queues: ["reports"] });          // a process of its own for the slow ones
+```
+
+- **A job without one is in `"default"`.** Declare the others in `jobs.queues`. A name it doesn't declare is refused: a listener's or a cron's at `createRegistry`, `ctx.schedule`'s at the call, a worker's when `work()` starts. Names are checked at startup, not by TypeScript: your listeners are written before the registry that lists the queues.
+- **A worker takes its queues in the order it lists them:** each claim takes the first queue with a job due, so `["mail", "default"]` sends all the mail first. Without `queues`, a worker runs every queue, oldest due first.
+- **Only workers and sweeps read them.** A request that runs its own jobs runs them all, whatever their queue. A worker in the web process takes the jobs of its queues; when a commit has others, the request runs them all.
+- **On the jobs table, a job's queue is part of the job:** no column, no migration.
+- **Cloudflare: one binding per queue,** `"default"` included: `cloudflareQueue({ default: env.JOBS, mail: env.MAIL })`, each consumer calling `handleQueue`. A single binding is refused with `jobs.queues`. Behind an outbox, signals go to their queue's binding the same way.
+- **`inProcess()` runs every job at once,** whatever its queue.
 
 ## Scheduled calls
 
@@ -160,7 +294,7 @@ export const confirm = mutation({
 ```
 
 - **Run a mutation or action once, later,** at a time this mutation decides. A listener's `delay` is the same for every event; this one is yours per call.
-- **Only from mutations:** it's committed with the transaction, so a booking that rolls back never leaves a reminder behind, as in Convex. An action or listener that wants to schedule runs a mutation that does.
+- **Only from mutations:** it's committed with the transaction, so a booking that rolls back never leaves a reminder behind. An action or listener that wants to schedule runs a mutation that does.
 - **`{ at }` or `{ delay }`, not both:** a `Date` (from `ctx.now()`), or seconds like a listener's `delay`. It returns nothing: there's nothing to keep. Due now (`delay: 0`, an `at` already past) runs right after commit, like a listener.
 - **`replace: true` when it can change:** a newer call to the same function with the same input replaces the one still waiting, its time and tries. Move a booking's dates and the reminder moves with it, instead of two going out:
 
@@ -168,8 +302,8 @@ export const confirm = mutation({
   ctx.schedule(guests.remind, { bookingId }, { at: dayBefore(booking.checkIn), replace: true });
   ```
 
-  The function and its input are the identity, both checked by TypeScript, so there's no key to mistype. Keys in another order are the same input; array order and every value count; defaults aren't applied first. Keep the input to ids, so it names one thing: a call with no input is one call for every tenant. A call that already started isn't touched; the new one runs on its own. A call waiting out a retry's backoff has started too. With an `outbox`, started means handed to the queue. Like Oban's `replace` (by worker and args) and Laravel's unique jobs (by the job's own `uniqueId()`). It needs an adapter that can replace (`databaseQueue()`, `outbox(queue)` or `pgBoss(boss)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
-- **No cancel: your row is the truth.** Cancelling a booking is writing `status: "cancelled"`; the reminder checks it when it runs, in the same transaction as what it does, and returns. A cancel couldn't replace that check (a call that's retrying, or already handed to a queue, is out of reach, and Convex's own cancel lets a started call finish), and a cancel that finds nothing can't tell you that you named the wrong job. Laravel and Rails have none for a single job either.
+  The function and its input are the identity, both checked by TypeScript, so there's no key to mistype. Keys in another order are the same input; array order and every value count; defaults aren't applied first. Keep the input to ids, so it names one thing: a call with no input is one call for every tenant. A call that already started isn't touched; the new one runs on its own. A call waiting out a retry's backoff has started too. It needs an adapter that can replace (`databaseQueue()` or `outbox(queue)`); `cloudflareQueue` alone can't take back a message it sent, so it's refused.
+- **No cancel: your row is the truth.** Cancelling a booking is writing `status: "cancelled"`; the reminder checks it when it runs, in the same transaction as what it does, and returns. A cancel couldn't replace that check (a call that's retrying, or already handed to a queue, is out of reach), and a cancel that finds nothing can't tell you that you named the wrong job.
 
   ```ts
   const [due] = await ctx.db.update(bookings).set({ reminderSentAt: ctx.now() })
@@ -180,12 +314,12 @@ export const confirm = mutation({
 - **It runs as the scheduling mutation's scope,** through `jobs.scope` like a listener, or as the one you pass, whole, as `ctx.run` takes it: `{ scope: { kind: "system", job: "tasks.wake", organization } }`. The function's `authorize` and input schema check it when it runs (the input is also checked at commit).
 - **`attempts`: one try by default,** like a listener. Give an action that calls an API a few (`attempts: 3`); retries back off like a listener's.
 - **Due now, it's a hop in the chain:** a function that schedules itself with no delay stops at `jobs.maxEventDepth`, like a [listener loop](/docs/concepts/events). One that waits starts a new chain.
-- **It needs an adapter that holds jobs:** `databaseQueue()`, `outbox(queue)` or `pgBoss(boss)`. `ctx.schedule` throws on `inProcess()`.
+- **It needs an adapter that holds jobs:** `databaseQueue()` or `outbox(queue)`. `ctx.schedule` throws on `inProcess()`.
 - **Test it** with `t.jobs.scheduled` and `t.jobs.drain({ until })`: see [Testing](/docs/testing#jobs-in-tests).
 
 ## Ids
 
-A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: each try fails until their attempts are used, like a missing class in Laravel. Then they're failed, and where your adapter keeps them, `registry.jobs.retry(id)` runs them once the code is back. Give it an `id` before you rename, and queued jobs keep finding it:
+A job stores the id of the listener it runs and the event it carries. Rename the export while jobs are queued and they can't find their code: each try fails until their attempts are used. Then they're failed, and where your adapter keeps them, `registry.jobs.retry(id)` runs them once the code is back. Give it an `id` before you rename, and queued jobs keep finding it:
 
 ```ts
 // notifications/listeners.ts
@@ -211,7 +345,7 @@ A job runs as the scope that emitted or scheduled it, so policies check it again
 - **Keeping the scope as it was is a choice you write down:** `load: (saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
 - **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
-- **`load` returning `null` discards the job** (reported to `onError`, deleted from the table). Use it when what the job ran as is gone, like an offboarded account. Rails' `discard_on` and Laravel's `DeleteWhenMissingModels` do the same. Check membership here too: a user who left the account gets `null`.
+- **`load` returning `null` discards the job** (reported to `onError`, deleted from the table). Use it when what the job ran as is gone, like an offboarded account. Check membership here too: a user who left the account gets `null`.
 - **Keep the system:** a [system scope](/docs/concepts/scope#the-system) (a cron's) is stored like any other, so `store` keeps its `system` field and `load` rebuilds it.
 - **`load` throwing counts as a try,** like the listener throwing: with tries left it's retried, at the default of one it's `failed`. So does returning `undefined`, which is almost always a missing `return`.
 - **`store` needs `load`:** listeners run as a scope, not as what was saved. `createRegistry` throws otherwise.
@@ -223,12 +357,13 @@ The registry applies `scope` in every adapter, `inProcess()` and tests included,
 
 For writing an adapter:
 
-- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
-- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit (a no-op for a queue whose own workers pick jobs up, like pg-boss). Optional **`sweep(runner)`**, **`retry(id)`**, **`failed(query)`** and **`forget(id)`** for adapters that store jobs. **`name`** is how the core's messages name your adapter; **`retries: true`** says a job can get more than one try. Backing off yourself? `defaultBackoff(attempt)` is the core's curve.
-- **Three job kinds:** a delivery `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, a cron run `{ kind: "cron", id, cron, scheduledAt, attempts }` and a scheduled call `{ kind: "call", id, fn, input, scope, attempts, depth, runAt? }`. All are JSON; an adapter stores and sends them without looking inside, except `attempts` and `runAt` if its backend needs them at send time.
+- **One job per (event, listener):** `{ kind: "delivery", id, listener, envelope, attempts, runAt?, key?, unique? }`, where `id` is `<listener id>@<event id>`, the key queues dedupe on. In a listener, dedupe on `ctx.event.id`, in a record of that listener's own. A failing listener retries alone. `runAt` is set for a listener with a `delay`.
+- **`enqueue(tx, jobs)`** runs inside the transaction; **`deliver(jobs, runner)`** after commit. Optional **`sweep(runner)`**, **`retry(id)`**, **`failed(query)`** and **`forget(id)`** for adapters that store jobs. **`name`** is how the core's messages name your adapter; **`retries: true`** says a job can get more than one try. Backing off yourself? `defaultBackoff(attempt)` is the core's curve.
+- **Three job kinds:** a delivery `{ kind: "delivery", id, listener, envelope, attempts, runAt? }`, a cron run `{ kind: "cron", id, cron, scheduledAt, attempts }` and a scheduled call `{ kind: "call", id, fn, input, scope, attempts, depth, runAt? }`, each with `queue?` when it isn't `"default"`. All are JSON; an adapter stores and sends them without looking inside, except `attempts` and `runAt` if its backend needs them at send time.
 - **Every adapter but `inProcess()` needs `jobs.scope.load`:** the registry assumes yours keeps jobs, so `createRegistry` asks the app to rebuild the scope they run as.
-- **`replaces: true`** says `enqueue` replaces a waiting call with the same replace key (`storedReplaceKey(job)`: `<fn>@<sha-256 of the canonical input>`), one not started yet. Without it, `ctx.schedule` with `replace` is refused.
-- **`holds: true | { max }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`sql: true`** says it writes jobs with SQL in the mutation's transaction: `createRegistry` refuses a database adapter without `query`. **`connect({ listeners, crons, database, sql })`** runs once at `createRegistry`: take the registry's database (`sql`) and refuse what you can't honour. **`fail(job, error)`** keeps a job that failed for good in a queue consumer (`outbox` writes a `failed` row); a consumer can pass its own instead, `registry.jobs.run(job, { attempt, fail })`.
+- **`replaces: true`** says `enqueue` keeps one waiting job per key (`storedUniqueKey(job)`): a call with `replace` (`<fn>@<sha-256 of the canonical input>`) replaces the waiting one, a delivery with `unique` (`<listener>@<value>`) is dropped while one waits. Without it, `ctx.schedule` with `replace` is refused, and so is `unique` on an adapter that holds jobs.
+- **`orders: true`** says jobs with the same `key` (a delivery's `key`, `<listener>@<value>`) run one at a time, in the order they were queued; a failed one frees the key. Without it, a listener with a `key` is refused.
+- **`holds: true | { max }`** says the adapter can keep a job until its `runAt` (for at most `max` seconds). Without it, delayed listeners and `ctx.schedule` are refused. **`sql: true`** says it writes jobs with SQL in the mutation's transaction: `createRegistry` refuses a database adapter without `query`. **`connect({ sql, workers })`** runs once at `createRegistry`: take the registry's database (`sql`) and refuse what you can't honour. `workers.takes(job)` says a `work()` loop in this process runs that job, so `deliver` leaves it and calls `workers.wake(count)`. **`queues: true | names`** says it keeps queues apart (any name, or a binding per name); without it, `jobs.queues` is refused, and `sweep(runner, { queues })` takes them in order. **`consume(job, runner)`** is for an adapter that keeps its jobs as rows and sends a queue only signals (`outbox`): `registry.jobs.run` calls it in place of running the message, to run the row it names (with a `key`, the key's next jobs) and record how it went.
 - **The adapter contract isn't stable yet:** it can change before 1.0, until more adapters have used it.
 - **Attempts are the core's job:** `runner.run(job, { attempt })` resolves `failed` once the job is out of its `attempts`. An adapter only maps outcomes: `failed` is kept, a throw is retried later.
 - **Jobs are JSON.** Payloads and the stored scope are checked at emit, so a `Date` fails in tests instead of after a queue. Send an ISO string and let the schema turn it into a `Date`.

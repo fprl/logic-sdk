@@ -53,12 +53,12 @@ export const block = mutation({
 
 - **Runs on every call**: from HTTP, from an agent, from another function, from your own job. Nested calls too.
 - **Runs first**, before input validation, before any transaction opens.
-- **Must return exactly `true`.** Anything else is `forbidden` (403), even when nobody is signed in, like Laravel.
+- **Must return exactly `true`.** Anything else is `forbidden` (403), even when nobody is signed in.
 - **Sync, and reads only the scope.** No database, no input. A policy that returns a Promise throws.
 
 ## Publishing: your routes, not a flag
 
-A function is published by passing it to an adapter: your oRPC router, an AI tool, a route that calls it. That list is your API surface, in one file you review, like Rails' `routes.rb` or Laravel's `routes/api.php`:
+A function is published by passing it to an adapter: your oRPC router, an AI tool, a route that calls it. That list is your API surface, in one file you review:
 
 ```ts
 // src/rpc.ts
@@ -69,7 +69,7 @@ export const router = {
 
 The adapters need `authorize`: a published function says who may call it, and everyone is a decision too (`authorize: anyone`). Without one, `toORPCProcedure` and `toAITool` are a type error, and throw if a cast gets through. Add an [`output`](/docs/concepts/output) too: it decides what leaves.
 
-Next.js, TanStack Start and Convex do the opposite: a server function is an endpoint by definition, and their docs tell you to check auth inside each one. Here nothing is reachable until you list it.
+Nothing is reachable until you list it.
 
 ## Internal functions
 
@@ -109,16 +109,6 @@ export const list = query({
   },
 });
 ```
-
-This is how 37signals writes Fizzy. A controller says `before_action :ensure_permission_to_administer_card`, which does `head :forbidden unless Current.user.can_administer_card?(@card)`, and the predicate is a plain method:
-
-```ruby
-def can_administer_card?(card)
-  admin? || card.creator == self
-end
-```
-
-Laravel's policies are the same shape: boolean methods on a user and a record.
 
 `logic-sdk show bookings.cancel` lists the predicates a function calls under `checks:`, next to its policy.
 
@@ -160,13 +150,3 @@ const [row] = await ctx.db
 ```
 
 **Tenancy is yours.** The library guarantees the scope reaches every function and helper. Filtering by `ctx.scope.accountId`, reads and writes, is your helpers' job.
-
-## How other stacks do it
-
-| Stack | What it does |
-|---|---|
-| Rails (Fizzy) | `before_action` calls `Current.user.can_administer_card?(@card)` and answers `head :forbidden` |
-| Laravel | Policies are boolean methods on (user, record). A failed policy is a 403, signed in or not |
-| Phoenix 1.8 | Scopes: an explicit scope, secure by default, passed by hand to every function. Here it's bound once |
-| Next.js | Recommends a Data Access Layer that checks who's calling. This is that layer, as a library |
-| Convex | Functions are public unless `internal*`. Here they're internal unless an adapter publishes them |

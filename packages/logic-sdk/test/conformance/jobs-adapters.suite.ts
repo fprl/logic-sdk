@@ -1,15 +1,14 @@
 // One suite for every jobs adapter: the table in the docs ("What each one guarantees"), as tests. What only one adapter
-// does (leases, receipts, pg-boss's queues) is tested next to it. adapters/jobs-adapters.test.ts runs it per adapter and database.
+// does (leases, receipts, signals) is tested next to it. adapters/jobs-adapters.test.ts runs it per adapter and database.
 import { pgTable, text, type PgAsyncDatabase, type PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { drizzleAdapter, type DrizzleDb } from "../../src/drizzle/pg.ts";
 import { init, type JobsAdapter, type FailureInfo, type Registry } from "../../src/index.ts";
-import type { PgBossMeta } from "../../src/pg-boss.ts";
 
 export type Db = PgAsyncDatabase<PgQueryResultHKT>;
 export type Scope = { actor: string };
-const { mutation, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleDb<Db>; meta: PgBossMeta }>();
+const { mutation, event, listener, cron, createRegistry } = init<{ scope: Scope; db: DrizzleDb<Db> }>();
 
 const orders = pgTable("adapter_orders", { tag: text("tag").notNull() });
 const ran: string[] = [];
@@ -28,7 +27,6 @@ const place = mutation({
 const email = listener({
   event: () => placed,
   attempts: 3,
-  meta: { pgBoss: { worker: { pollingIntervalSeconds: 0.5 } } },
   async handler(ctx, { tag }) {
     ran.push(`${tag}#${ctx.event.attempt}`);
     if (failing.get(tag) === "throw") throw new Error("smtp down");
@@ -55,12 +53,11 @@ const tidy = mutation({
 const yearly = cron({
   schedule: "0 9 1 1 *", // only when a test ticks it
   scope: { actor: "system" },
-  meta: { pgBoss: { worker: { pollingIntervalSeconds: 0.5 } } }, // tuned like a listener
   handler: (ctx) => ctx.run(tidy),
 });
 const modules = { shop: { placed, place, email, remind, plan, tidy, yearly } };
 /** inProcess() runs each job once and refuses `attempts` above 1, so there its email listener tries once. */
-const once = { shop: { ...modules.shop, email: listener({ event: () => placed, meta: email.meta, handler: email.handler as never }) } };
+const once = { shop: { ...modules.shop, email: listener({ event: () => placed, handler: email.handler as never }) } };
 
 export interface Guarantees {
   /** A crash right after commit doesn't lose the job. */
@@ -75,14 +72,14 @@ export interface Guarantees {
   ticks: number;
   /** `failed()` lists what failed for good, and `forget(id)` deletes it. */
   lists: boolean;
+  /** A listener's `key` runs its jobs one at a time, in order. */
+  orders: boolean;
 }
 
 export interface Running {
   /** With the jobs tables and `adapter_orders (tag text)`. */
   db: Db;
   adapter: JobsAdapter;
-  /** A consumer, or pg-boss's worker, where the adapter needs one. */
-  start?(registry: Registry<Scope>): Promise<void>;
   /** Time passes, and everything runs: delays, backoffs, redeliveries. */
   settle(registry: Registry<Scope>): Promise<void>;
   close(): Promise<void>;
@@ -109,7 +106,6 @@ export function jobsAdapterSuite(name: string, open: () => Promise<Running>, gua
       running = await open();
       registry = build(running.adapter);
       app = registry.as({ actor: "ana" });
-      await running.start?.(registry);
     });
     afterAll(() => running.close());
 
@@ -221,8 +217,33 @@ export function jobsAdapterSuite(name: string, open: () => Promise<Running>, gua
       expect(runsOf(other)).toEqual([other]);
     });
 
+    test(guarantees.orders ? "key: a key's jobs run one at a time, in order; a try backing off holds it" : "key is refused at startup", async () => {
+      const key = tag();
+      const keyed: string[] = [];
+      const reply = listener({
+        event: () => placed,
+        key: (p) => p.tag.split(":")[0]!,
+        attempts: guarantees.tries > 1 ? 2 : 1,
+        async handler(ctx, { tag }) {
+          if (!tag.startsWith(key)) return;
+          keyed.push(`${tag.slice(key.length + 1)}#${ctx.event.attempt}`);
+          if (tag.endsWith(":a") && ctx.event.attempt === 1 && guarantees.tries > 1) throw new Error("try again");
+        },
+      });
+      const shop = { ...(running.adapter.retries ? modules : once).shop, reply };
+      const make = () => createRegistry({ modules: { shop }, database: { adapter: drizzleAdapter(running.db) }, jobs: { adapter: running.adapter, scope: { load: (saved) => saved } }, onError: () => {} });
+      if (!guarantees.orders) {
+        expect(make).toThrow(/shop\.reply has a key, but your jobs adapter, .+, can't run jobs one at a time by key/);
+        return;
+      }
+      const keyedRegistry = make();
+      for (const job of ["a", "b", "c"]) await keyedRegistry.as({ actor: "ana" }).run(place, { tag: `${key}:${job}` });
+      await running.settle(keyedRegistry as never);
+      expect(keyed).toEqual(guarantees.tries > 1 ? ["a#1", "a#2", "b#1", "c#1"] : ["a#1", "b#1", "c#1"]);
+    });
+
     test(`a cron's minute ticked twice runs ${guarantees.ticks === 1 ? "once" : "twice"}`, async () => {
-      // a year of its own: pg-boss remembers a minute for 7 days
+      // a year of its own: the minute isn't one another test ticked
       const minute = new Date(Date.UTC(3000 + Math.floor(Math.random() * 6000), 0, 1, 9));
       const before = runsOf("tidy").length;
       await registry.jobs.tick(minute);
