@@ -1,5 +1,89 @@
 # logic-sdk
 
+## 0.7.3
+
+### Patch Changes
+
+- 77d9ecd: Listeners get `key`, `unique` and `timeout`, with the meaning Laravel gives them on SQS.
+
+  ```ts
+  listener({
+    event: () => messages.received,
+    key: (m) => m.conversationId, // one job per conversation at a time, in order
+    timeout: 30,                  // a try past 30 s is stopped: ctx.signal aborts, and it counts as failed
+    attempts: 3,
+    handler: async (ctx, m) => { … },
+  });
+
+  listener({
+    event: () => products.changed,
+    unique: (p) => p.productId,   // while one waits, later ones are dropped: read current state in the handler
+    delay: 30,
+    handler: async (ctx, { productId }) => { … },
+  });
+  ```
+
+  - **`key`**: jobs with the same key run one at a time, in the order their events were emitted (SQS FIFO message groups). Waiting spends no attempt, a retry holds the key, a failed job frees it. On `inProcess()`, `databaseQueue()` and `outbox(queue)`, on every database: behind an outbox the queue gets one signal per key, and `handleQueue` runs the key's next jobs from the table, in order. Refused at `createRegistry` by `cloudflareQueue` alone.
+  - **`unique`**: while a job with the same value hasn't started, later ones are dropped (Laravel's `ShouldBeUniqueUntilProcessing`). It drops events, so the handler must read current state. On `databaseQueue()` and the outbox; `cloudflareQueue` alone refuses it.
+  - **`timeout`**: a try past it is stopped and counts as failed. `ctx.signal` aborts (listeners get one now) and no new `ctx.run` starts.
+  - **Fix:** `outbox(queue)` refuses a queue that writes in your transaction itself (one with `enqueue`): its jobs were handed to an empty `deliver` and lost. Use such a queue on its own.
+  - Adapters declare `orders: true` when they run a key's jobs in order. `storedReplaceKey` is now `storedUniqueKey`, and also returns a delivery's `unique`.
+
+  Migrating the jobs table (Drizzle: re-run drizzle-kit generate):
+
+  ```sql
+  ALTER TABLE logic_jobs RENAME COLUMN replace_key TO unique_key;
+  ALTER INDEX logic_jobs_replace RENAME TO logic_jobs_unique;
+  ALTER TABLE logic_jobs ADD COLUMN order_key text, ADD COLUMN seq bigserial NOT NULL;
+  CREATE INDEX logic_jobs_order ON logic_jobs (order_key, seq) WHERE status = 'pending';
+  ```
+
+  Adding `seq` rewrites the table under a lock: run it when the jobs table is quiet. drizzle-kit asks whether `unique_key` is a rename of `replace_key`: it is (a drop would lose waiting `replace` keys).
+
+  SQLite: rename the column, then `ALTER TABLE logic_jobs ADD COLUMN order_key text;` and `CREATE INDEX logic_jobs_order ON logic_jobs (order_key) WHERE status = 'pending';` (it orders by `rowid`; drop and recreate `logic_jobs_unique` under its new name).
+
+- 77d9ecd: `work()` in the web process takes the request's jobs, queues, and a `failed` hook on listeners and crons.
+
+  ```ts
+  // server.ts on Node or Bun: no waitUntil. Requests answer after commit, and the loop starts their jobs at once
+  const stop = work(registry, { concurrency: 5 });
+
+  // queues: declared once, named on the job, taken in a worker's order
+  createRegistry({ modules, database, jobs: { adapter: databaseQueue(), queues: ["mail", "reports"], scope } });
+  listener({ event: () => orders.placed, queue: "mail", async handler(ctx, order) { ... } });
+  work(registry, { queues: ["mail", "default"] });
+
+  // failed: once the last try failed, with the handler's ctx, the payload and the error
+  listener({ event: () => orders.placed, attempts: 5, async handler(ctx, order) { ... }, async failed(ctx, { orderId }, error) { await ctx.run(orders.flagReceipt, { orderId }); } });
+  ```
+
+  - **`work(registry)` in the web process takes the jobs its requests commit:** the request answers right after commit and wakes the loop, which claims them at once instead of waiting `pollEvery`. Drop `waitUntil: () => {}` on Node if you had it. `databaseQueue({ runIn: "worker" })` is now only for workers in other processes.
+  - **Queues:** `jobs.queues` declares the names besides `"default"`; `queue` on a listener, a cron or `ctx.schedule` puts the job there; `work(registry, { queues })` and `registry.jobs.sweep({ queues })` take them in order, first queue first. An undeclared name is refused at `createRegistry`, at the call, or when `work()` starts. On the jobs table the queue is part of the job: no migration. `cloudflareQueue({ default: env.JOBS, mail: env.MAIL })` takes a binding per queue.
+  - **`failed` on listeners and crons** runs once the job is `failed`, at most once, with the handler's ctx (and the listener's payload) and the error. A throw is reported to `onError` as `"<id> (failed)"`. Not for a stale payload, a moved listener or a `null` `scope.load`.
+  - Adapter contract: `connect` gets `{ sql, workers }` (`workers.takes(job)`, `workers.wake(count)`); `queues: true | names` is a capability; `sweep(runner, { limit, queues })`; the table's `claimDue` takes `(receipt, lease, grace, queue)`. New: `registry.jobs.attach({ wake, queues })` for hosts.
+  - The docs no longer compare with other stacks; that lives in DESIGN.md and RESEARCH.md.
+
+- 77d9ecd: Workers on Node, one path behind the outbox, and no pg-boss.
+
+  ```ts
+  // registry.ts: web requests only write the rows
+  jobs: { adapter: databaseQueue({ runIn: "worker" }), scope: { store, load } },
+
+  // worker.ts: as many processes as you like
+  import { work } from "logic-sdk/node";
+  const stop = work(registry, { concurrency: 5 });
+  process.on("SIGTERM", async () => { await stop(); process.exit(0); });
+  ```
+
+  - **`work(registry, { concurrency, pollEvery })`** from `logic-sdk/node` replaces `startTicking`: `concurrency` slots (default 1) each claim the next due job, a free one waits `pollEvery` seconds (default 2), and your crons tick every minute, once across workers. While the database is down a slot waits longer each time, up to 30 s. Rename `startTicking(registry)` to `work(registry)`; `sweepEvery` is gone, since the slots are the sweep.
+  - **`databaseQueue({ runIn: "worker" })`** leaves every job to workers in other processes: requests only write rows, and a job is available to workers as soon as it's committed. The default, `"request"`, is unchanged.
+  - **Behind an outbox, every job stays a row** and the queue carries signals: one per job, one per `key`. The consumer runs the row it names and records how it went in the table, so tries, `failed()`, `retry(id)`, `key`, `unique` and `replace` behave as with `databaseQueue`. A failed try backs off as a row and gets a new message for when the backoff ends. The sweep runs what a signal didn't cover, 30 seconds past due. `outbox(queue, { maxAttempts })` is gone, and Cloudflare's `max_retries` no longer matters behind an outbox (keep `max_batch_size: 1`, so each job gets a whole invocation). **Before upgrading, let the queue drain** (backed-off retries can wait up to about 6 hours): a message sent by the old version names a row that's already gone, and is acknowledged without running.
+  - **`logic-sdk/pg-boss` is removed** (`pgBoss`, `work(registry, boss)`, `meta.pgBoss`, the peer dependency). Use `databaseQueue()` with `work()` on the same Postgres.
+  - **A listener with both `key` and `unique` is refused:** a key's jobs could run out of order.
+  - Adapter contract: `consume(job, runner)` replaces `runKey` and `fail`; `registry.jobs.run(job, { attempt })` takes no `fail`; `connect` gets `{ sql }` only.
+
+- @logic-sdk/cli@0.6.6
+
 ## 0.7.2
 
 ### Patch Changes
