@@ -15,11 +15,14 @@ CREATE TABLE logic_jobs (
   claimed_at timestamptz,
   last_error text,
   failed_at timestamptz,
-  replace_key text,
+  unique_key text,
+  order_key text,
+  seq bigserial NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX logic_jobs_due ON logic_jobs (available_at) WHERE status = 'pending';
-CREATE UNIQUE INDEX logic_jobs_replace ON logic_jobs (replace_key) WHERE status = 'pending' and attempts = 0;
+CREATE UNIQUE INDEX logic_jobs_unique ON logic_jobs (unique_key) WHERE status = 'pending' and attempts = 0;
+CREATE INDEX logic_jobs_order ON logic_jobs (order_key, seq) WHERE status = 'pending';
 CREATE INDEX logic_jobs_failed ON logic_jobs (failed_at, id) WHERE status = 'failed';
 CREATE TABLE logic_cron_runs (
   id text PRIMARY KEY,
@@ -29,27 +32,47 @@ CREATE INDEX logic_cron_runs_ran_at ON logic_cron_runs (ran_at);
 `;
 
 // `$n::text::jsonb`, not `$n::jsonb`: a driver that sees a jsonb parameter encodes our JSON string a second time.
-const ids = (n: number) => `(SELECT jsonb_array_elements_text($${n}::text::jsonb))`;
-const mine = (n: number) => `id IN ${ids(n)} AND receipt = $${n + 1} AND status = 'pending'`;
+const mine = (n: number) => `id = $${n} AND receipt = $${n + 1} AND status = 'pending'`;
 const inSeconds = (n: number) => `now() + make_interval(secs => $${n}::float8)`;
+/**
+ * A row may run when it has started already (one per key: a retry backing off), or when no other open row of its key
+ * started or came before it (`seq`, the insert order). A failed row put back by `retry(id)` waits behind one that started.
+ */
+const firstOfKey = `(order_key IS NULL OR attempts > 0 OR NOT EXISTS (
+  SELECT 1 FROM logic_jobs o WHERE o.order_key = logic_jobs.order_key AND o.status = 'pending' AND o.id <> logic_jobs.id AND (o.seq < logic_jobs.seq OR o.attempts > 0)))`;
 
 const statements: JobsSql = {
-  // the waiting call with this key becomes the new one: its id, job and time (Oban's `replace`)
+  // a waiting row with this key: a call replaces it (its id, job and time: Oban's `replace`), a unique delivery is
+  // dropped. Postgres locks the row either way, so it can't start before this transaction ends and miss its change
   insert: `
-    INSERT INTO logic_jobs (id, job, available_at, replace_key)
-    SELECT r->>'id', r->'job', coalesce(to_timestamp((r->>'at')::float8 / 1000), ${inSeconds(1)}), r->>'key'
+    INSERT INTO logic_jobs (id, job, available_at, unique_key, order_key)
+    SELECT r->>'id', r->'job', coalesce(to_timestamp((r->>'at')::float8 / 1000), ${inSeconds(1)}), r->>'unique', r->>'order'
     FROM jsonb_array_elements($2::text::jsonb) WITH ORDINALITY AS rows(r, n) ORDER BY n
-    ON CONFLICT (replace_key) WHERE status = 'pending' and attempts = 0
-    DO UPDATE SET id = excluded.id, job = excluded.job, available_at = excluded.available_at, last_error = NULL`,
+    ON CONFLICT (unique_key) WHERE status = 'pending' and attempts = 0
+    DO UPDATE SET id = excluded.id, job = excluded.job, available_at = excluded.available_at, last_error = NULL
+    WHERE excluded.job->>'kind' = 'call'`,
   recordTicks: `INSERT INTO logic_cron_runs (id) SELECT jsonb_array_elements_text($1::text::jsonb) ON CONFLICT DO NOTHING RETURNING id`,
   pruneTicks: `DELETE FROM logic_cron_runs WHERE ran_at < now() - interval '1 day'`,
   claimNew: `
     UPDATE logic_jobs SET attempts = 1, receipt = $1, claimed_at = now(), available_at = ${inSeconds(2)}
-    WHERE id IN ${ids(3)} AND attempts = 0 AND status = 'pending' RETURNING id`,
+    WHERE id = $3 AND attempts = 0 AND status = 'pending' AND ${firstOfKey} RETURNING id`,
   // `=`, not `IN`: Postgres may run an IN subquery once per row, and lock a new row each time
   claimDue: `
     UPDATE logic_jobs SET attempts = attempts + 1, receipt = $1, claimed_at = now(), available_at = ${inSeconds(2)}
-    WHERE id = (SELECT id FROM logic_jobs WHERE status = 'pending' AND available_at <= now() ORDER BY available_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+    WHERE id = (SELECT id FROM logic_jobs WHERE status = 'pending' AND available_at <= now() - make_interval(secs => $3::float8) AND ${firstOfKey}
+      AND coalesce(nullif($4::text, ''), coalesce(job ->> 'queue', 'default')) = coalesce(job ->> 'queue', 'default') ORDER BY available_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+    RETURNING job::text AS job, attempts`,
+  // the row a queue's signal names, if it's due. It waits for a transaction holding the row (a replace) rather than
+  // skip it: there's no other row to take
+  claimOne: `
+    UPDATE logic_jobs SET attempts = attempts + 1, receipt = $1, claimed_at = now(), available_at = ${inSeconds(2)}
+    WHERE id = $3 AND status = 'pending' AND available_at <= now()
+    RETURNING job::text AS job, attempts`,
+  // due, or never tried and waiting only for its turn (not for a `delay`): no need to wait for a sweep
+  claimNext: `
+    UPDATE logic_jobs SET attempts = attempts + 1, receipt = $1, claimed_at = now(), available_at = ${inSeconds(2)}
+    WHERE id = (SELECT id FROM logic_jobs WHERE status = 'pending' AND order_key = $3 AND (available_at <= now() OR (attempts = 0 AND job->>'runAt' IS NULL))
+      AND ${firstOfKey} ORDER BY seq LIMIT 1 FOR UPDATE SKIP LOCKED)
     RETURNING job::text AS job, attempts`,
   extend: `UPDATE logic_jobs SET available_at = ${inSeconds(1)} WHERE ${mine(2)}`,
   backOff: `UPDATE logic_jobs SET available_at = ${inSeconds(1)}, last_error = $2, claimed_at = NULL WHERE ${mine(3)}`,
@@ -58,7 +81,7 @@ const statements: JobsSql = {
   // its receipt goes, so the runner that lost it can't finish the new run. Its key goes: it has run, so it's no longer
   // a call a newer one replaces (and one may be waiting with it)
   retry: `
-    UPDATE logic_jobs SET status = 'pending', attempts = 0, receipt = NULL, claimed_at = NULL, available_at = now(), last_error = NULL, failed_at = NULL, replace_key = NULL
+    UPDATE logic_jobs SET status = 'pending', attempts = 0, receipt = NULL, claimed_at = NULL, available_at = now(), last_error = NULL, failed_at = NULL, unique_key = NULL
     WHERE id = $1 AND status = 'failed' RETURNING id`,
   fail: `
     INSERT INTO logic_jobs (id, job, status, last_error, failed_at) VALUES ($1, $2::text::jsonb, 'failed', $3, now())
@@ -83,21 +106,22 @@ const statements: JobsSql = {
 /**
  * Your database as the queue, like Laravel's `database` driver: jobs are rows written in the mutation's transaction, so
  * a committed one is never lost. After commit the request runs them (through `waitUntil` on serverless), so no worker
- * is needed; `sweep` picks up what a crash or a failure left behind. At least once: a crash between a job finishing and
- * its row being deleted runs it again.
+ * is needed, or `work(registry)` in the same process takes them; `sweep` picks up what a crash, a retry or a delay left
+ * behind. With `runIn: "worker"`, requests only write rows and workers in other processes run them. At least once: a crash between a job finishing and its row being deleted runs it again.
  *
  * ```ts
  * const registry = createRegistry({ modules, database, jobs: { adapter: databaseQueue(), scope: { store, load } } });
- * startTicking(registry); // from logic-sdk/node, or registry.jobs.sweep() from a platform's cron trigger
+ * work(registry); // from logic-sdk/node, or registry.jobs.sweep() from a platform's cron trigger
  * ```
  */
 export const databaseQueue = (options: DatabaseQueueOptions = {}): StoredJobs => storedJobs(statements, options);
 
 /**
- * The outbox pattern: a table in front of another queue. Jobs are rows written in the mutation's transaction, kept only
- * until `queue` has them: the jobs of one commit go in one send. Then the queue runs them and redelivers what throws;
- * one that fails for good comes back here as a failed row. A send that lands but whose row isn't deleted is sent again,
- * so a job can run twice, even at once.
+ * The outbox pattern: a table in front of another queue. Jobs are rows written in the mutation's transaction, and stay
+ * rows until they're done: the queue gets a signal per job (per key, for a listener's `key`), and the consumer that gets
+ * one runs the row from the table and records how it went there. So tries, failed rows and a key's order are the
+ * table's, as with `databaseQueue`. A failed try gets a new signal for when its backoff ends; what no signal covers, the
+ * sweep runs 30 seconds past due. At least once: a consumer that dies after the work leaves the row to run again.
  *
  * ```ts
  * jobs: { adapter: outbox(cloudflareQueue(env.JOBS)), scope: { store, load } }

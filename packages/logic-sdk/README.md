@@ -94,7 +94,7 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 
 - **One transaction across modules.** A failure anywhere rolls back everything, even if someone catches it.
 - **Side effects after commit.** Mutations emit events; listeners send the email once the data is safe.
-- **Jobs, four ways.** Your Postgres as the queue (`databaseQueue`), Cloudflare Queues alone, an outbox in front of a queue, or pg-boss. All but in-process can run a job twice, so make them idempotent.
+- **Jobs, three ways.** Your Postgres or SQLite as the queue (`databaseQueue`, with `work()` as the worker on Node), Cloudflare Queues alone, or an outbox in front of a queue. All but in-process can run a job twice, so make them idempotent.
 - **Lost races retried.** Deadlocks and serialization failures re-run the mutation in a fresh transaction: three tries, or `database: { adapter, transactionAttempts }`.
 - **Who is calling, everywhere.** The scope reaches every nested call and listener, and policies narrow its type.
 - **Authorization on every call.** `authorize` runs whoever calls: HTTP, an agent, a job or another function. Record rules are sync `can*` predicates the CLI checks.
@@ -114,8 +114,7 @@ ctx.schedule(remindGuest, { bookingId }, { at: dayBefore(booking.checkIn) });
 | `logic-sdk/drizzle/sqlite` | The same on SQLite: `drizzleAdapter(() => drizzle("app.db"))` |
 | `logic-sdk/sqlite` | `databaseQueue`, `outbox` and `failedJobs` on SQLite with any ORM |
 | `logic-sdk/cloudflare` | Cloudflare Queues and Cron Triggers |
-| `logic-sdk/pg-boss` | Jobs in pg-boss |
-| `logic-sdk/node` | `startTicking`: crons and sweeps in a long-running process |
+| `logic-sdk/node` | `work(registry)`: a worker for jobs and crons in a long-running process |
 | `logic-sdk/fetch` | `toResponse`: a domain error as an HTTP response, for your own routes |
 | `logic-sdk/orpc` | `toORPCProcedure`: a function as an oRPC v2 procedure, for your router |
 | `logic-sdk/ai` | AI SDK tools: agents run your functions with the same rules |

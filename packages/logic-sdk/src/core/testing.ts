@@ -15,6 +15,7 @@ import {
   type Listener,
   type Registry,
 } from "./types.ts";
+import { inProcess } from "./in-process.ts";
 import { deliveryOf, replaceKeyOf } from "./jobs.ts";
 import { INTERNAL } from "./types.ts";
 
@@ -99,6 +100,7 @@ const testJobs = (mode: TestOptions["jobs"], app: JobsAdapter | undefined, queue
   holds: app?.holds,
   replaces: app?.replaces,
   retries: app?.retries,
+  orders: (app ?? inProcess()).orders, // inline, jobs run one by one: in order
   async deliver(jobs, runner) {
     for (const job of jobs) {
       const key = replaceKeyOf(job);
@@ -109,7 +111,7 @@ const testJobs = (mode: TestOptions["jobs"], app: JobsAdapter | undefined, queue
       const waits = job.runAt !== undefined || (mode === "manual" && job.kind !== "cron");
       if (!waits) await runner.run({ ...job, attempts: 1 }); // one try, like inProcess(): reported, so the test sees it
       else if (job.kind === "call") scheduled.push(job);
-      else if (job.kind === "delivery") queued.push(job);
+      else if (job.kind === "delivery" && !(job.unique && queued.some((q) => q.unique === job.unique))) queued.push(job);
     }
   },
 });

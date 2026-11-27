@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigserial, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { Job, ReadWrite, SqlDatabase } from "../core/types.ts";
 import { causes } from "../core/errors.ts";
 
@@ -84,14 +84,23 @@ export const jobsTable = pgTable(
     /** The last failure, with its stack. */
     lastError: text("last_error"),
     failedAt: timestamp("failed_at", { withTimezone: true }),
-    /** A scheduled call's `replace` key, `<function id>@<sha-256 of its input>`: a newer call with it replaces this row while it waits. */
-    replaceKey: text("replace_key"),
+    /**
+     * One waiting row per key: a scheduled call's `replace` key (`<function id>@<sha-256 of its input>`), which a newer
+     * call replaces, or a listener's `unique` value (`<listener id>@<value>`), which drops later ones.
+     */
+    uniqueKey: text("unique_key"),
+    /** Its listener's `key`, `<listener id>@<key>`: rows with the same one run one at a time, by `seq`. */
+    orderKey: text("order_key"),
+    /** The insert order, for `orderKey`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("logic_jobs_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
-    // one waiting call per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
-    uniqueIndex("logic_jobs_replace").on(t.replaceKey).where(sql`status = 'pending' and attempts = 0`),
+    // one waiting row per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
+    uniqueIndex("logic_jobs_unique").on(t.uniqueKey).where(sql`status = 'pending' and attempts = 0`),
+    // a key's open rows, for the first of each
+    index("logic_jobs_order").on(t.orderKey, t.seq).where(sql`status = 'pending'`),
     // `registry.jobs.failed()` pages newest first by (failed_at, id)
     index("logic_jobs_failed").on(t.failedAt, t.id).where(sql`status = 'failed'`),
   ],

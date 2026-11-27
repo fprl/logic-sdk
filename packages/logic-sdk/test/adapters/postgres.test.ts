@@ -9,7 +9,7 @@ import type { SqlDatabase } from "../../src/index.ts";
 import { databaseQueue, jobsSchema, outbox } from "../../src/postgres.ts";
 import { jobsTableSuite } from "../conformance/jobs-table.suite.ts";
 
-const postgresTarget = { databaseQueue, outbox, param: "$1", past: "now() - interval '1 second'" };
+const postgresTarget = { databaseQueue, outbox, param: "$1", past: "now() - interval '1 day'" };
 const tables = `${jobsSchema} CREATE TABLE seam_items (name text NOT NULL);`;
 
 async function openPglite() {
@@ -81,7 +81,8 @@ test("jobsSchema is the table Drizzle users re-export", async () => {
       [name],
     );
     expect(real.rows).toEqual(
-      columns.map((c) => ({ name: c.name, type: c.getSQLType(), required: c.notNull, defaulted: c.hasDefault })),
+      // a serial is its integer type with a sequence as its default: Postgres reports the type
+      columns.map((c) => ({ name: c.name, type: c.getSQLType().replace("bigserial", "bigint"), required: c.notNull, defaulted: c.hasDefault })),
     );
     const made = await client.query<{ name: string; unique: boolean }>(
       `select c.relname as name, i.indisunique as unique from pg_index i join pg_class c on c.oid = i.indexrelid

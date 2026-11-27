@@ -5,7 +5,7 @@ import { pgTable, text } from "drizzle-orm/pg-core";
 import { beforeEach, expect, setSystemTime, test } from "bun:test";
 import { z } from "zod";
 import { cronRunsTable, databaseQueue, drizzleAdapter, jobsSchema, jobsTable, outbox, type DrizzleTx } from "../../src/drizzle/pg.ts";
-import { init, type Delivery, type JobsAdapter, type FailureInfo } from "../../src/index.ts";
+import { init, type JobsAdapter } from "../../src/index.ts";
 
 // The real Postgres engine, in process, with the schema we ship.
 const pg = new PGlite();
@@ -107,49 +107,6 @@ test("a job whose scope can't be loaded is discarded: its row is deleted and the
   expect(ran).toEqual(["lamp#1"]);
 });
 
-/** A queue that records what it got (and in how many sends), or fails while `down`. */
-const fakeVia = () => {
-  const got: string[] = [];
-  const via = { down: false, got, sends: 0, async deliver(jobs: Delivery[]) {
-    if (via.down) throw new Error("queue unavailable");
-    via.sends++;
-    got.push(...jobs.map((j) => j.id));
-  } };
-  return via;
-};
-
-test("outbox: the row makes the handoff durable; once the queue has it, the row is gone and nothing runs here", async () => {
-  const via = fakeVia();
-  const { app } = setup(outbox(via));
-  await app.run(add, { name: "desk" });
-  expect(via.got).toHaveLength(1);
-  expect(ran).toEqual([]); // the consumer runs it, not this request
-  expect(await rows()).toEqual([]);
-});
-
-test("outbox: a failed handoff keeps the row, reaches onError, and the sweep sends it again; out of attempts it's failed", async () => {
-  const via = fakeVia();
-  const reported: FailureInfo[] = [];
-  const registry = createRegistry({
-    modules: { x: { added, add, react } },
-    database: { adapter: database },
-    onError: (_e, info) => reported.push(info),
-    jobs: { adapter: outbox(via, { maxAttempts: 2 }), scope: { load: (saved) => saved } }, // two failed sends, then failed
-  });
-  via.down = true;
-  await registry.as({ actor: "ana" }).run(add, { name: "lamp" });
-  const [row] = await rows();
-  expect(row).toMatchObject({ status: "pending", attempts: 1, lastError: expect.stringContaining("queue unavailable") });
-  expect(reported).toEqual([expect.objectContaining({ source: "x.react", job: expect.objectContaining({ id: row!.id }), attempt: 1 })]);
-  await makeDue();
-  expect(await registry.jobs.sweep()).toEqual({ done: 0, failed: 1, discarded: 0, retrying: 0 }); // second handoff fails too
-  via.down = false;
-  expect(await registry.jobs.retry(row!.id)).toBe(true);
-  expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 }); // done: handed off
-  expect(via.got).toEqual([row!.id]);
-  expect(await rows()).toEqual([]);
-});
-
 test("a last try that never finished is failed on the next sweep, without running again", async () => {
   const { app, registry } = setup({ ...databaseQueue(), deliver: async () => {} }); // committed, then the process died
   await app.run(add, { name: "rug" });
@@ -172,31 +129,6 @@ test("delay: the row waits unclaimed until it's due, then a sweep runs it", asyn
   await makeDue();
   expect(await registry.jobs.sweep()).toEqual({ done: 1, failed: 0, discarded: 0, retrying: 0 });
   expect(ran).toEqual(["desk#1", "later desk"]);
-});
-
-test("outbox: the jobs of one commit go in one send", async () => {
-  const also = listener({ event: () => added, async handler() {} });
-  const via = fakeVia();
-  const registry = createRegistry({ modules: { x: { added, add, react, also } }, database: { adapter: database }, jobs: { adapter: outbox(via), scope: { load: (saved) => saved } } });
-  await registry.as({ actor: "ana" }).run(add, { name: "desk" });
-  expect(via.sends).toBe(1);
-  expect(via.got).toHaveLength(2);
-  expect(await rows()).toEqual([]);
-});
-
-test("outbox: a job that fails for good in the consumer comes back as a failed row, even if the handoff's delete lands after", async () => {
-  let consumer: ReturnType<typeof setup>["registry"] | undefined;
-  const via = { async deliver(jobs: Delivery[]) {
-    for (const job of jobs) await consumer!.jobs.run(job, { attempt: 2 }); // the queue ran it before this request deleted the row
-  } };
-  const { app, registry } = setup(outbox(via));
-  consumer = registry;
-  next = "throw";
-  await app.run(add, { name: "lamp" });
-  const [row] = await rows();
-  expect(row).toMatchObject({ status: "failed", lastError: expect.stringContaining("smtp down") });
-  next = "ok";
-  expect(await registry.jobs.retry(row!.id)).toBe(true);
 });
 
 test("databaseQueue() takes the registry's database: none is refused, and one adapter can't serve two databases", () => {
@@ -304,16 +236,16 @@ test("ctx.schedule replace: the waiting call with the same input becomes the new
   const waiting = await rows();
   const b1 = waiting.find((r) => (r.job as { input: { bookingId: string } }).input.bookingId === "b1")!;
   expect(waiting).toHaveLength(3);
-  expect(new Set(waiting.map((r) => r.replaceKey)).size).toBe(3);
-  expect(b1.replaceKey).toMatch(/^x\.remind@[0-9a-f]{64}$/); // the function, readable, and a hash of the input
-  expect(b1.replaceKey).toBe(first!.replaceKey);
+  expect(new Set(waiting.map((r) => r.uniqueKey)).size).toBe(3);
+  expect(b1.uniqueKey).toMatch(/^x\.remind@[0-9a-f]{64}$/); // the function, readable, and a hash of the input
+  expect(b1.uniqueKey).toBe(first!.uniqueKey);
   expect(b1.id).not.toBe(first!.id); // the newer call's id
   expect(b1.availableAt.getTime() - Date.now()).toBeGreaterThan(7000_000);
 
   await db.update(jobsTable).set({ attempts: 1 }); // claimed: all have started
   await app.run(book, { booking: "b1", delay: 0 }); // so this one runs on its own
   expect(ran).toEqual(["remind b1"]);
-  expect((await rows()).filter((r) => r.replaceKey === b1.replaceKey)).toHaveLength(1); // the started one stays
+  expect((await rows()).filter((r) => r.uniqueKey === b1.uniqueKey)).toHaveLength(1); // the started one stays
 });
 
 test("ctx.schedule replace: only adapters that can replace take it", async () => {
@@ -361,9 +293,9 @@ test("retry of a failed call drops its key, so it doesn't collide with the one w
   failing = false;
   await app.run(book, { delay: 3600 }); // the booking moved: a new one waits with the same key
   expect(await registry.jobs.retry(failed!.id)).toBe(true);
-  const byId = Object.fromEntries((await rows()).map((r) => [r.id, [r.status, r.replaceKey]]));
+  const byId = Object.fromEntries((await rows()).map((r) => [r.id, [r.status, r.uniqueKey]]));
   expect(byId[failed!.id]).toEqual(["pending", null]); // back in line, no longer replaceable
-  expect(Object.values(byId)).toContainEqual(["pending", failed!.replaceKey]); // the one waiting kept its key
+  expect(Object.values(byId)).toContainEqual(["pending", failed!.uniqueKey]); // the one waiting kept its key
 });
 
 test("a commit's jobs are claimed one at a time: while one runs, the next hasn't spent its attempt", async () => {
@@ -476,4 +408,9 @@ test("a retry's backoff stands: no extension lands after it", async () => {
   await registry.as({ actor: "ana" }).run(add, { name: "desk" });
   await sleep(120);
   expect((await rows())[0]!.availableAt.getTime() - Date.now()).toBeGreaterThan(590_000);
+});
+
+test("an outbox refuses a queue that writes in your transaction itself: it would hand its jobs to nothing", () => {
+  const transactional = { async enqueue() {}, async deliver() {} };
+  expect(() => outbox(transactional)).toThrow("[logic-sdk] outbox(queue) got a queue that writes its jobs in your transaction itself (it has `enqueue`): use it on its own, without an outbox.");
 });

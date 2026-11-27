@@ -12,9 +12,8 @@
     "consumers": [
       {
         "queue": "logic-shop-jobs",
-        "max_batch_size": 1, // a job per invocation
-        "max_batch_timeout": 1, // don't hold one back
-        "max_retries": 10 // at least the largest attempts
+        "max_batch_size": 1, // a job per invocation, so each gets the whole 15 minutes
+        "max_batch_timeout": 1 // don't hold a signal back
       }
     ]
   },

@@ -163,3 +163,43 @@ A job may run hours later, after retries. None of these stacks carry the caller'
 - Platforms: [Cloudflare Queues JS APIs](https://developers.cloudflare.com/queues/configuration/javascript-apis/), [configure queues](https://developers.cloudflare.com/queues/configuration/configure-queues/), [delivery guarantees](https://developers.cloudflare.com/queues/reference/delivery-guarantees/), [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/), [Vercel Queues](https://vercel.com/docs/queues), [Vercel Queues SDK](https://vercel.com/docs/queues/sdk), [Vercel Schedules](https://vercel.com/docs/schedules/configuration)
 - JS: [pg-boss](https://github.com/timgit/pg-boss), [Graphile Worker](https://worker.graphile.org/), [Convex scheduling](https://docs.convex.dev/scheduling/scheduled-functions), [Convex crons](https://docs.convex.dev/scheduling/cron-jobs), [Inngest createFunction](https://www.inngest.com/docs/reference/functions/create), [Vercel Workflow](https://github.com/vercel/workflow), [Upstash Workflow](https://upstash.com/docs/workflow), [Nitro tasks](https://nitro.build/docs/tasks)
 - Middleware: [TanStack Start middleware](https://tanstack.com/start/latest/docs/framework/react/guide/middleware), [TanStack/router](https://github.com/TanStack/router) at `ce46b21`, [TanStack/query](https://github.com/TanStack/query) at `f6689e0`
+
+## Moved from the user docs (2026-11-27)
+
+The user docs stopped naming other stacks. Comparisons they carried that weren't already here or in DESIGN.md are kept below, as the docs stated them. Unless a link is given, they weren't rechecked when moved.
+
+**Authorization** (was `concepts/authorization.mdx`, "How other stacks do it"):
+
+| Stack | What it does |
+|---|---|
+| Rails (Fizzy) | `before_action` calls `Current.user.can_administer_card?(@card)` and answers `head :forbidden` |
+| Laravel | Policies are boolean methods on (user, record). A failed policy is a 403, signed in or not |
+| Phoenix 1.8 | Scopes: an explicit scope, secure by default, passed by hand to every function. Here it's bound once |
+| Next.js | Recommends a Data Access Layer that checks who's calling. This is that layer, as a library |
+| Convex | Functions are public unless `internal*`. Here they're internal unless an adapter publishes them |
+
+- **Fizzy's record rules:** a controller says `before_action :ensure_permission_to_administer_card`, which does `head :forbidden unless Current.user.can_administer_card?(@card)`, and the predicate is a plain method:
+
+  ```ruby
+  def can_administer_card?(card)
+    admin? || card.creator == self
+  end
+  ```
+
+  Our `can*` predicates are that shape. Laravel's policies are too: boolean methods on a user and a record.
+- **A failed policy is a 403 even when nobody is signed in,** like Laravel. The docs said the same of a public mount's functions.
+
+**Crons** (was `concepts/crons.mdx`): a minute nobody ticked is skipped, not caught up, like Laravel. Runs may overlap in Laravel, Oban and Vercel.
+
+**Errors and transactions:**
+
+- Rails warns against catching database errors inside a transaction block, for the reason Postgres aborts a transaction after a failed statement (was `concepts/errors.mdx`).
+- Convex draws our action/mutation line: an action's [`runMutation` calls run in separate transactions](https://github.com/get-convex/convex-backend/blob/main/npm-packages/docs/docs/functions/actions.mdx) (was `concepts/transactions.mdx`).
+
+**Functions and helpers** (was `concepts/functions.mdx`): Convex recommends helpers that take the whole `ctx`, and advises using `ctx.runQuery` and `ctx.runMutation` sparingly, preferring plain TypeScript functions. Ours is the same advice within a module.
+
+**Feature flags** (was `concepts/feature-flags.mdx`): "the Convex way": a flag is a row, and a query reads it.
+
+**Meta** (was `concepts/meta.mdx`): a config-declared shape, then per-function values, is the same split as tRPC's `initTRPC.meta<Meta>()` and `.meta({ ... })`.
+
+**Testing** (was `04-testing.mdx`): `t.jobs.perform` is Oban's `perform_job` and Rails' `perform_now`. `drain({ until })`, which runs each job at the time it was due, is Rails' `perform_enqueued_jobs(at:)` and Oban's `with_scheduled`.

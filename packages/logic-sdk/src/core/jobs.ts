@@ -2,6 +2,7 @@ import { CaughtNestedFailure, describeIssues, isDomainError, StalePayload } from
 import { isDue, parseSchedule } from "./schedule.ts";
 import type {
   ActionCtx,
+  AdapterSetup,
   Call,
   CallJob,
   CronJob,
@@ -18,6 +19,7 @@ import type {
   Jobs,
   CronRun,
   ListenerEvent,
+  LocalWorker,
   RegisteredCron,
   RegisteredFn,
   RegisteredListener,
@@ -44,10 +46,12 @@ const canonical = (value: unknown): string =>
 export const replaceKeyOf = (job: Job): string | undefined => (job.kind === "call" && job.replace ? `${job.fn}@${canonical(job.input)}` : undefined);
 
 /**
- * `replaceKeyOf`, as adapters that replace (`replaces: true`) store it: `<function id>@<sha-256 of the input>`, so a
- * large input still fits an index and the function stays readable.
+ * The key adapters that keep one waiting job per key (`replaces: true`) store: a delivery's `unique` as it is, a call's
+ * `replaceKeyOf` as `<function id>@<sha-256 of the input>`, so a large input still fits an index and the function
+ * stays readable. Undefined for every other job.
  */
-export async function storedReplaceKey(job: Job): Promise<string | undefined> {
+export async function storedUniqueKey(job: Job): Promise<string | undefined> {
+  if (job.kind === "delivery") return job.unique;
   if (job.kind !== "call" || !job.replace) return undefined;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical(job.input)));
   return `${job.fn}@${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")}`;
@@ -84,6 +88,24 @@ export const defaultBackoff = (attempt: number) => Math.exp(Math.min(attempt, 10
 /** Where the docs list each adapter and what it can do. */
 export const ADAPTERS = "see Jobs, Adapters in the docs";
 
+/** The loops running each adapter's jobs in this process (`work()`), by adapter: every registry on it shares them. */
+const localWorkers = new WeakMap<JobsAdapter, Set<LocalWorker>>();
+const workerSet = (adapter: JobsAdapter) => {
+  let set = localWorkers.get(adapter);
+  if (!set) localWorkers.set(adapter, (set = new Set()));
+  return set;
+};
+/** What an adapter's `connect` gets as `setup.workers`: does a loop here take this job, and wake them. */
+export function workersOf(adapter: JobsAdapter): AdapterSetup["workers"] {
+  const set = workerSet(adapter);
+  return {
+    takes: (job) => [...set].some((w) => !w.queues || w.queues.includes(job.queue ?? "default")),
+    wake: (count) => {
+      for (const worker of set) worker.wake(count);
+    },
+  };
+}
+
 /** The minute `at` falls in, and its stamp for a job id: `20261123T0900Z` (no `:`, which BullMQ rejects). */
 function minuteOf(at: Date, what: string) {
   if (Number.isNaN(at.getTime())) throw new Error(`[logic-sdk] ${what} needs a valid date (got ${String(at)}).`);
@@ -100,6 +122,27 @@ export const deliveryOf = (l: RegisteredListener, e: Envelope): Delivery => ({
   attempts: l.listener.attempts ?? 1,
 });
 
+/**
+ * A try that runs past its timeout: aborts its signal (its `ctx.signal`, and no new `ctx.run` starts) and fails the try,
+ * as Laravel's `$timeout` and Oban's `timeout/1` count it. JavaScript can't kill it, so what it still does is ignored.
+ */
+async function stopAfter<T>(work: Promise<T>, seconds: number, stop: AbortController, why: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`[logic-sdk] ${why}`);
+      stop.abort(error);
+      reject(error);
+    }, seconds * 1000);
+  });
+  work.catch(() => {}); // it may still settle after the timeout: not this try's anymore
+  try {
+    return await Promise.race([work, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** What running jobs needs from the registry: its definitions, and how it runs a function or a listener's handler. */
 export interface JobsDeps {
   listeners: readonly RegisteredListener[];
@@ -112,13 +155,15 @@ export interface JobsDeps {
   /** `jobs.failed`: where failed jobs are kept when the adapter keeps none. */
   failedStore: FailedJobs | undefined;
   maxEventDepth: number;
+  /** `jobs.queues`: the queues besides `"default"`. */
+  queues: readonly string[];
   now(): Date;
   wrap(call: Call, next: () => Promise<unknown>): Promise<unknown>;
   report(error: unknown, info: FailureInfo): void;
   /** Run a function as `scope`, like `registry.as(scope).run`. `eventDepth`: the chain's hops so far (a scheduled call's `depth`). */
   runAs(fn: Fn, input: unknown, scope: object, eventDepth: number, queued: Job[] | undefined, job: { id: string; attempt: number }): Promise<unknown>;
-  /** The ctx a listener's or cron's handler gets, as `scope`, in an event chain `eventDepth` deep. */
-  handlerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined): ActionCtx<any>;
+  /** The ctx a listener's or cron's handler gets, as `scope`, in an event chain `eventDepth` deep. `stop`: its timeout. */
+  handlerCtx(scope: object, eventDepth: number, id: string, queued: Job[] | undefined, stop?: AbortSignal): ActionCtx<any>;
 }
 
 /**
@@ -126,12 +171,28 @@ export interface JobsDeps {
  * calls into jobs, runs one (with its tries), and is what `registry.jobs` calls.
  */
 export function makeJobs(deps: JobsDeps) {
-  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, failedStore, maxEventDepth, now, wrap, report, runAs, handlerCtx } = deps;
-  // the adapter's own, or the store's: a job that failed for good is kept by whichever there is
-  const keepFailed = jobsAdapter.fail?.bind(jobsAdapter) ?? failedStore?.fail.bind(failedStore);
+  const { listeners, crons, functions, idOf, jobsAdapter, database, jobScope, failedStore, maxEventDepth, queues, now, wrap, report, runAs, handlerCtx } = deps;
   /** Your adapter, as messages name it: by what it can't do, and by its own name. */
   const yours = jobsAdapter.name ? `your jobs adapter, ${jobsAdapter.name},` : "your jobs adapter";
-  if (failedStore && jobsAdapter.fail) throw new Error(`[logic-sdk] ${yours} keeps failed jobs itself, so jobs.failed has nothing to keep: drop it.`);
+
+  // ── queues ───────────────────────────────────────────────────────────────
+  for (const q of queues)
+    if (typeof q !== "string" || !q || q === "default") throw new Error(`[logic-sdk] jobs.queues takes names besides "default" (got ${JSON.stringify(q)}).`);
+  if (new Set(queues).size !== queues.length) throw new Error(`[logic-sdk] jobs.queues lists a queue twice: ${queues.join(", ")}.`);
+  const queueNames = ["default", ...queues];
+  if (queues.length && !jobsAdapter.queues)
+    throw new Error(`[logic-sdk] jobs.queues declares ${queues.join(", ")}, but ${yours} keeps every job in one queue. Use one that keeps them apart (${ADAPTERS}).`);
+  if (typeof jobsAdapter.queues === "object")
+    for (const q of queueNames)
+      if (!jobsAdapter.queues.includes(q)) throw new Error(`[logic-sdk] ${yours} has no queue for "${q}": give it one (it has ${jobsAdapter.queues.join(", ") || "none"}).`);
+  /** A queue someone named: one of `jobs.queues`, or `"default"`. */
+  function checkQueue(what: string, queue: string | undefined) {
+    if (queue !== undefined && !queueNames.includes(queue))
+      throw new Error(`[logic-sdk] ${what} has queue ${JSON.stringify(queue)}, which jobs.queues doesn't declare (${queueNames.join(", ")}).`);
+  }
+  for (const l of listeners) checkQueue(l.id, l.listener.queue);
+  for (const c of crons) checkQueue(c.id, c.cron.queue);
+  if (failedStore && jobsAdapter.failed) throw new Error(`[logic-sdk] ${yours} keeps failed jobs itself, so jobs.failed has nothing to keep: drop it.`);
   const enqueue = jobsAdapter.enqueue?.bind(jobsAdapter);
   if (enqueue && crons.length && !database)
     throw new Error(`[logic-sdk] Crons need \`database\` with ${yours}: their runs are written in a transaction of their own.`);
@@ -171,6 +232,13 @@ export function makeJobs(deps: JobsDeps) {
   for (const l of listeners) if (l.listener.delay) checkHold(l.id, l.listener.delay);
   for (const l of listeners) checkRetries(l.id, l.listener.attempts ?? 1);
   for (const c of crons) checkRetries(c.id, c.cron.attempts ?? 1);
+  for (const l of listeners) {
+    if (l.listener.key && !jobsAdapter.orders)
+      throw new Error(`[logic-sdk] ${l.id} has a key, but ${yours} can't run jobs one at a time by key. Use one that can (see Jobs, "key" in the docs).`);
+    // nothing waits on an adapter that runs jobs at once, so there's nothing to drop
+    if (l.listener.unique && jobsAdapter.holds && !jobsAdapter.replaces)
+      throw new Error(`[logic-sdk] ${l.id} is unique, but ${yours} can't drop a job it already has. Use one that can (see Jobs, "unique" in the docs).`);
+  }
 
   /**
    * What a commit queues: one delivery per listener of each event that its `when` lets through, and the calls it
@@ -186,18 +254,39 @@ export function makeJobs(deps: JobsDeps) {
         throw new Error(`[logic-sdk] ${l.id}'s when threw on ${e.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     };
+    /** Its `key` or `unique`, as `<listener id>@<value>`. A throw or an empty value is a bug in the app: it fails the mutation. */
+    const valueOf = (l: RegisteredListener, option: "key" | "unique", e: Envelope, payload: unknown) => {
+      const of = l.listener[option];
+      if (!of) return undefined;
+      let value: unknown;
+      try {
+        value = of(payload);
+      } catch (error) {
+        throw new Error(`[logic-sdk] ${l.id}'s ${option} threw on ${e.name}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+      if (typeof value !== "string" || !value) throw new Error(`[logic-sdk] ${l.id}'s ${option} must return a non-empty string (got ${JSON.stringify(value)}) on ${e.name}.`);
+      return `${l.id}@${value}`;
+    };
     const fits = (job: { depth: number }) => job.depth <= maxEventDepth;
     const deepEvent = envelopes.find((e) => !fits(e));
     const deepCall = calls.find((c) => !fits(c));
     const loop = (what: string) => new Error(`[logic-sdk] chain of events and calls deeper than ${maxEventDepth} (jobs.maxEventDepth): stopped queueing ${what} (a loop?)`);
     if (deepEvent) report(loop(deepEvent.name), { source: deepEvent.name });
     else if (deepCall) report(loop(deepCall.fn), infoOf(deepCall));
+    const unique = new Set<string>();
     const deliveries = envelopes.filter(fits).flatMap((e) =>
-      (byEvent.get(e.name) ?? []).filter((l) => wants(l, e, parsed.get(e))).map((l): Delivery => {
+      (byEvent.get(e.name) ?? []).filter((l) => wants(l, e, parsed.get(e))).flatMap((l): Delivery[] => {
         const job = deliveryOf(l, e);
         const delay = l.listener.delay;
         if (delay) job.runAt = new Date(Date.parse(e.occurredAt) + delay * 1000).toISOString();
-        return job;
+        const key = valueOf(l, "key", e, parsed.get(e));
+        if (key) job.key = key;
+        if (l.listener.queue) job.queue = l.listener.queue;
+        job.unique = valueOf(l, "unique", e, parsed.get(e));
+        if (!job.unique) return [job];
+        if (unique.has(job.unique)) return []; // the same commit's first one waits; adapters drop later commits' ones
+        unique.add(job.unique);
+        return [job];
       }),
     );
     return [...deliveries, ...calls.filter(fits)];
@@ -232,9 +321,13 @@ export function makeJobs(deps: JobsDeps) {
     const info = infoOf(job, attempt);
     // read before narrowing: a job queued by another version can have a kind this one doesn't know
     const { id, kind }: { id: string; kind: string } = job;
+    /** Its definition's `failed`, once its last try failed: after it's kept, at most once. A throw is reported. */
+    let afterFailed: ((error: unknown) => Promise<unknown>) | undefined;
     const failed = async (error: unknown) => {
       report(error, { ...info, outcome: "failed" });
       await fail?.(error);
+      if (afterFailed)
+        await afterFailed(error).catch((e) => report(e, { source: `${info.source} (failed)`, job, attempt }));
       return "failed" as const;
     };
     /** One try of the job's `attempts`. */
@@ -268,10 +361,12 @@ export function makeJobs(deps: JobsDeps) {
     if (job.kind === "cron") {
       const c = cronById.get(job.cron);
       if (!c) return missing("cron", job.cron);
+      const run: CronRun = { id: c.id, scheduledAt: job.scheduledAt, attempt };
+      const hook = c.cron.failed;
+      if (hook) afterFailed = (error) => hook({ ...handlerCtx(c.cron.scope, 0, c.id, queued), cron: run } as never, error); // SAFETY: as below
       return attemptOnce(async () => {
         // its scope comes from the code each time, never stored, so jobs.scope store and load don't apply
         const { scope, meta, handler } = c.cron;
-        const run: CronRun = { id: c.id, scheduledAt: job.scheduledAt, attempt };
         await wrap({ id: c.id, kind: "cron", job: { id: job.id, attempt }, meta, input: undefined, scope, depth: 0 }, () =>
           handler({ ...handlerCtx(scope, 0, c.id, queued), cron: run } as never), // SAFETY: as for listeners: the ctx was built for a cron
         );
@@ -292,10 +387,23 @@ export function makeJobs(deps: JobsDeps) {
     const l = listenerById.get(job.listener);
     if (!l) return missing("listener", job.listener);
     const { envelope } = job;
+    const { timeout } = l.listener;
+    const stop = timeout ? new AbortController() : undefined;
+    const hook = l.listener.failed;
+    // with today's scope and the parsed payload, as its handler would get them; a stale job or a scope that's gone has neither
+    if (hook)
+      afterFailed = async (error) => {
+        if (error instanceof StalePayload) return;
+        const scope = jobScope?.load ? await jobScope.load(envelope.scope) : envelope.scope;
+        const r = await l.event.payload["~standard"].validate(envelope.payload);
+        if (!scope || r.issues || idOf(l.event) !== envelope.name) return;
+        const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload: r.value, occurredAt: envelope.occurredAt, attempt };
+        return hook({ ...handlerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, r.value, error); // SAFETY: as the handler's
+      };
     return attemptOnce(async () => {
       const scope = await scopeOf(job, envelope.scope, attempt);
       if (!scope) return "discarded";
-      await wrap({ id: l.id, kind: "listener", job: { id: job.id, attempt }, meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
+      const handled = wrap({ id: l.id, kind: "listener", job: { id: job.id, attempt }, meta: l.listener.meta, input: envelope.payload, scope, depth: 0 }, async () => {
         // its listener's event now: one renamed without an `id`, or a listener moved to another event, leaves stale jobs
         if (idOf(l.event) !== envelope.name)
           throw new StalePayload(`[logic-sdk] ${l.id} now listens to ${idOf(l.event)}, and this job is for ${envelope.name}.`);
@@ -303,8 +411,9 @@ export function makeJobs(deps: JobsDeps) {
         if (r.issues) throw new StalePayload(`[logic-sdk] ${envelope.name} payload no longer matches its schema: ${JSON.stringify(describeIssues(r.issues))}`);
         const payload = r.value;
         const ctxEvent: ListenerEvent = { id: envelope.id, name: envelope.name, payload, occurredAt: envelope.occurredAt, attempt };
-        return l.listener.handler({ ...handlerCtx(scope, envelope.depth, l.id, queued), event: ctxEvent } as never, payload); // SAFETY: as in registry.ts's invoke: the ctx was built for a listener
+        return l.listener.handler({ ...handlerCtx(scope, envelope.depth, l.id, queued, stop?.signal), event: ctxEvent } as never, payload); // SAFETY: as in registry.ts's invoke: the ctx was built for a listener
       });
+      await (timeout && stop ? stopAfter(handled, timeout, stop, `${l.id} ran past its timeout of ${timeout}s, so this try was stopped.`) : handled);
       return "done";
     });
   }
@@ -336,12 +445,23 @@ export function makeJobs(deps: JobsDeps) {
     const { minute, stamp } = minuteOf(at, "tick");
     return scheduled
       .filter((c) => (only === undefined ? isDue(c.schedule, minute, c.cron.timezone) : c.id === only))
-      .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1 }));
+      .map((c) => ({ kind: "cron", id: `${c.id}@${stamp}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1, ...(c.cron.queue ? { queue: c.cron.queue } : {}) }));
   }
 
   const jobs: Jobs = {
-    // a consumer's own `fail` (pg-boss's work(), which records the reason itself) wins over the adapter's
-    run: (job, options) => runJob(job, { ...options, fail: options?.fail ?? (keepFailed && ((error) => keepFailed(job, error))) }),
+    async run(job, options) {
+      // a signal: the adapter's row says what runs, and records how it went
+      if (jobsAdapter.consume) {
+        const queued: Job[] = [];
+        await jobsAdapter.consume(job, runnerInto(queued)).catch((error) => {
+          report(error, { source: "(jobs adapter)", job }); // the consumer retries the message: nothing else hears of it
+          throw error;
+        });
+        await deliver(queued);
+        return "done";
+      }
+      return runJob(job, { attempt: options?.attempt, fail: failedStore && ((error) => failedStore.fail(job, error)) });
+    },
     async tick(at = now()) {
       const jobs = due(at);
       if (!jobs.length) return [];
@@ -350,10 +470,17 @@ export function makeJobs(deps: JobsDeps) {
       return jobs.map((job) => job.cron);
     },
     async sweep(options) {
+      for (const q of options?.queues ?? []) checkQueue("jobs.sweep({ queues })", q);
       const queued: Job[] = [];
       const result = (await jobsAdapter.sweep?.(runnerInto(queued), options)) ?? { done: 0, failed: 0, discarded: 0, retrying: 0 };
       await deliver(queued);
       return result;
+    },
+    attach(worker) {
+      for (const q of worker.queues ?? []) checkQueue("A worker", q);
+      const set = workerSet(jobsAdapter);
+      set.add(worker);
+      return () => void set.delete(worker);
     },
     async retry(id) {
       if (jobsAdapter.retry) return jobsAdapter.retry(id);
@@ -408,7 +535,7 @@ export function makeJobs(deps: JobsDeps) {
             : "[logic-sdk] jobs.invoke got a cron that isn't registered: export it from its module.",
         );
       const { minute, stamp } = minuteOf(options.at ?? now(), "jobs.invoke({ at })");
-      const job: CronJob = { kind: "cron", id: `${c.id}@${stamp}-${crypto.randomUUID()}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1 };
+      const job: CronJob = { kind: "cron", id: `${c.id}@${stamp}-${crypto.randomUUID()}`, cron: c.id, scheduledAt: minute.toISOString(), attempts: c.cron.attempts ?? 1, ...(c.cron.queue ? { queue: c.cron.queue } : {}) };
       await enqueueAlone([job]);
       const queued: Job[] = [];
       await jobsAdapter.deliver([job], runnerInto(queued)); // unlike a tick, a hand-off that fails throws: whoever invoked it needs to know
@@ -417,5 +544,5 @@ export function makeJobs(deps: JobsDeps) {
     },
   };
 
-  return { toJobs, deliver, jobs, due, checkHold, checkRetries, yours };
+  return { toJobs, deliver, jobs, due, checkHold, checkRetries, checkQueue, yours };
 }

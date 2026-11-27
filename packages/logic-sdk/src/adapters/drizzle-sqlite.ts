@@ -213,14 +213,21 @@ export const jobsTable = sqliteTable(
     /** The last failure, with its stack. */
     lastError: text("last_error"),
     failedAt: integer("failed_at", { mode: "timestamp_ms" }),
-    /** A scheduled call's `replace` key, `<function id>@<sha-256 of its input>`: a newer call with it replaces this row while it waits. */
-    replaceKey: text("replace_key"),
+    /**
+     * One waiting row per key: a scheduled call's `replace` key (`<function id>@<sha-256 of its input>`), which a newer
+     * call replaces, or a listener's `unique` value (`<listener id>@<value>`), which drops later ones.
+     */
+    uniqueKey: text("unique_key"),
+    /** Its listener's `key`, `<listener id>@<key>`: rows with the same one run one at a time, in insert order (`rowid`). */
+    orderKey: text("order_key"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(now),
   },
   (t) => [
     index("logic_jobs_due").on(t.availableAt).where(sql`${t.status} = 'pending'`),
-    // one waiting call per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
-    uniqueIndex("logic_jobs_replace").on(t.replaceKey).where(sql`status = 'pending' and attempts = 0`),
+    // one waiting row per key: a claimed row (attempts > 0) has started, so a newer one doesn't touch it
+    uniqueIndex("logic_jobs_unique").on(t.uniqueKey).where(sql`status = 'pending' and attempts = 0`),
+    // a key's open rows, for the first of each
+    index("logic_jobs_order").on(t.orderKey).where(sql`status = 'pending'`),
     // `registry.jobs.failed()` pages newest first by (failed_at, id)
     index("logic_jobs_failed").on(t.failedAt, t.id).where(sql`status = 'failed'`),
   ],

@@ -18,15 +18,24 @@ const encoder = new TextEncoder();
 /**
  * Send jobs to a Cloudflare Queue after commit. Alone it's lossy (a Worker that dies between commit and send loses
  * them); behind an outbox it's durable: `jobs: { adapter: outbox(cloudflareQueue(env.JOBS)), scope: { store, load } }`.
- * Run them with `handleQueue(registry, batch)` in your consumer.
+ * Run them with `handleQueue(registry, batch)` in your consumer. With `jobs.queues`, one binding per queue, `"default"`
+ * included: `cloudflareQueue({ default: env.JOBS, mail: env.MAIL })`.
  */
-export function cloudflareQueue(queue: QueueBinding): JobsAdapter {
+export function cloudflareQueue(queue: QueueBinding | Readonly<Record<string, QueueBinding>>): JobsAdapter {
+  const one = typeof queue.sendBatch === "function";
+  const bindings = (one ? { default: queue } : queue) as Readonly<Record<string, QueueBinding>>;
   return {
-    name: "cloudflareQueue(queue)",
+    name: one ? "cloudflareQueue(queue)" : `cloudflareQueue({ ${Object.keys(bindings).join(", ")} })`,
     retries: true, // handleQueue retries a message with a backoff
     holds: { max: MAX_DELAY }, // delaySeconds, up to 24 hours
+    ...(one ? {} : { queues: Object.keys(bindings) }),
     async deliver(jobs) {
-      for (const batch of batches(jobs)) await queue.sendBatch(batch);
+      const byQueue = Map.groupBy(jobs, (job) => job.queue ?? "default");
+      for (const [name, some] of byQueue) {
+        const binding = bindings[name];
+        if (!binding) throw new Error(`[logic-sdk] cloudflareQueue has no binding for queue ${JSON.stringify(name)}.`);
+        for (const batch of batches(some)) await binding.sendBatch(batch);
+      }
     },
   };
 }

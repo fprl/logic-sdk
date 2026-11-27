@@ -70,7 +70,7 @@ export default {
 };
 ```
 
-**Node:** create the registry once at startup. Without `waitUntil`, a request waits for its listeners, so a graceful shutdown that drains requests drains them too. With the [database queue](/docs/adapters/drizzle#database-queue) you can answer first, `waitUntil: () => {}`: a restart that cuts a listener off is swept up after its lease: retried if it has `attempts` left, else kept as failed for `registry.jobs.retry(id)`. Not with `inProcess()`: there, work still running at a restart is lost.
+**Node:** create the registry once at startup, with no `waitUntil`. A request waits for its listeners, so a graceful shutdown that drains requests drains them too. To answer first, use the [database queue](/docs/adapters/drizzle#database-queue) and run [`work(registry)`](/docs/concepts/jobs#workers-on-node) in the process: it takes the request's jobs and starts them at once, and a restart that cuts one off is swept up after its lease (retried if it has `attempts` left, else kept as failed for `registry.jobs.retry(id)`).
 
 ## Loops
 

@@ -28,7 +28,7 @@ export interface Config {
    */
   config?: object;
   /**
-   * The shape of `meta`: yours, plus what your adapters read (`AppMeta & AIMeta & PgBossMeta`). Yours goes on functions
+   * The shape of `meta`: yours, plus what your adapters read (`AppMeta & AIMeta`). Yours goes on functions
    * and listeners, each adapter's only where it reads it.
    */
   meta?: object;
@@ -56,7 +56,7 @@ declare const FOR_LISTENERS: unique symbol;
 export interface ForFunctions<M> {
   readonly [FOR_FUNCTIONS]?: M;
 }
-/** An adapter's part of `meta`, read on listeners: `type PgBossMeta = ForListeners<{ pgBoss?: ... }>`. */
+/** An adapter's part of `meta`, read on listeners: `type QueueMeta = ForListeners<{ queue?: ... }>`. */
 export interface ForListeners<M> {
   readonly [FOR_LISTENERS]?: M;
 }
@@ -171,6 +171,12 @@ export interface Delivery {
   attempts: number;
   /** When it may run (ISO), for a listener with a `delay`. Absent: right away. */
   runAt?: string;
+  /** Its listener's `key`, as `<listener id>@<key>`: jobs with the same one run one at a time, in order. */
+  key?: string;
+  /** Its listener's `unique`, as `<listener id>@<value>`: a later job with the same one is dropped while this one waits. */
+  unique?: string;
+  /** Its queue, when it isn't `"default"`: a worker drains its queues in the order it lists them. */
+  queue?: string;
 }
 
 /** One run of a cron: `id` is `<cron id>@<minute>` (`reports.weekly@20261123T0900Z`), so a tick runs once. */
@@ -185,6 +191,8 @@ export interface CronJob {
   attempts: number;
   /** When it may run (ISO), like a delivery's. Absent for crons: they run when ticked. */
   runAt?: string;
+  /** Its queue, when it isn't `"default"`: a worker drains its queues in the order it lists them. */
+  queue?: string;
 }
 
 /** A function `ctx.schedule` asked to run later: `id` is `<function id>@<uuid>`. */
@@ -207,6 +215,8 @@ export interface CallJob {
   replace?: true;
   /** When it may run (ISO). */
   runAt?: string;
+  /** Its queue, when it isn't `"default"`: a worker drains its queues in the order it lists them. */
+  queue?: string;
 }
 
 /**
@@ -224,8 +234,12 @@ export interface Cron<C extends Config = any> extends FromInit<C> {
   readonly timezone?: string;
   readonly scope: object;
   readonly attempts?: number;
+  /** Its queue, one of `jobs.queues`. Default `"default"`. */
+  readonly queue?: string;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never) => Promise<unknown>;
+  /** Runs once its last try has failed: `(ctx, error)`. */
+  readonly failed?: (ctx: never, error: unknown) => Promise<unknown>;
 }
 
 /** The run a cron's handler is doing. No scope here: `ctx.scope` is the one it runs as. */
@@ -281,8 +295,18 @@ export interface Listener<O = unknown, C extends Config = any> extends FromInit<
   readonly delay?: number;
   /** Whether this event gets a job for this listener, from the parsed payload, at commit. Default: every event. */
   readonly when?: (payload: O) => boolean;
+  /** Jobs with the same key run one at a time, in the order their events were emitted. */
+  readonly key?: (payload: O) => string;
+  /** While a job with the same value hasn't started, later ones are dropped. */
+  readonly unique?: (payload: O) => string;
+  /** Seconds a try may run before it's stopped and counted as failed. */
+  readonly timeout?: number;
+  /** Its queue, one of `jobs.queues`. Default `"default"`. */
+  readonly queue?: string;
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly handler: (ctx: never, payload: O) => Promise<unknown>;
+  /** Runs once its last try has failed: `(ctx, payload, error)`. */
+  readonly failed?: (ctx: never, payload: O, error: unknown) => Promise<unknown>;
 }
 
 /** What a single call may change: who it runs as (part of the scope) and when to give up. Nothing else. */
@@ -362,6 +386,8 @@ export type ScheduleOptions<S = object> = ({ at: Date; delay?: never } | { delay
   attempts?: number;
   /** `true`: the call to this function waiting with the same input (not started yet) is replaced by this one. */
   replace?: true;
+  /** Its queue, one of `jobs.queues`. Default `"default"`. */
+  queue?: string;
   /**
    * Who it runs as, whole, never merged, as `ctx.run` takes it: `{ scope: { kind: "system", job: "tasks.wake", organization } }`.
    * Default: this mutation's scope. The function's policy checks it when it runs.
@@ -372,7 +398,7 @@ export interface ActionCtx<C extends Config, S = ScopeOf<C>> extends BaseCtx<C, 
   services: ServicesOf<C>;
   /** Call any function: `await ctx.run(bookings.confirmPaid, { bookingId })`. Each mutation you run commits on its own. */
   run: Run<Kind, ScopeOf<C>>;
-  /** The caller's abort signal: pass it on, `fetch(url, { signal: ctx.signal })`. Always undefined in listeners (they outlive the request). */
+  /** The caller's abort signal: pass it on, `fetch(url, { signal: ctx.signal })`. In a listener, aborted when its `timeout` runs out (else undefined: listeners outlive the request). */
   signal: AbortSignal | undefined;
 }
 export interface ListenerCtx<C extends Config, O = unknown> extends ActionCtx<C> {
@@ -456,7 +482,7 @@ export interface DatabaseAdapter<Db = unknown, Tx = Db> {
   retryable?(error: unknown): boolean;
 }
 
-/** A database adapter that runs SQL: what `databaseQueue()`, `outbox(queue)` and `pgBoss(boss)` need. */
+/** A database adapter that runs SQL: what `databaseQueue()` and `outbox(queue)` need. */
 export interface SqlDatabase<Db = any, Tx = any> extends DatabaseAdapter<Db, Tx> {
   /**
    * One SQL statement (`$1` parameters on Postgres, `?` on SQLite), on the database or on a transaction of it. Resolves
@@ -481,10 +507,7 @@ export type RunJob = (job: Job, options?: RunJobOptions) => Promise<JobOutcome>;
 export interface RunJobOptions {
   /** 1 on the first try; the adapter counts. */
   attempt?: number;
-  /**
-   * Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it. Default: the adapter's
-   * `fail` (`databaseQueue` and `outbox` write a failed row).
-   */
+  /** Called with the error when the job fails for good, before `run` resolves `"failed"`: keep it (a failed row). */
   fail?: (error: unknown) => Promise<void>;
 }
 
@@ -512,6 +535,11 @@ export interface JobsAdapter {
    */
   retries?: true;
   /**
+   * It runs jobs with the same `key` one at a time, in the order they were queued, like an SQS FIFO queue's message
+   * groups. Without it, `createRegistry` refuses a listener with a `key`.
+   */
+  orders?: true;
+  /**
    * It writes jobs with SQL in the mutation's transaction, through the registry's database: `createRegistry` refuses a
    * registry whose `database.adapter` doesn't run SQL (`query`), and `connect` gets it as `setup.sql`.
    */
@@ -523,11 +551,17 @@ export interface JobsAdapter {
    */
   holds?: true | { max: number };
   /**
-   * Can replace a call waiting to run: `enqueue` gets a call with `replace`, and a pending call with the same key
-   * (`storedReplaceKey`) that hasn't started is replaced by it. `databaseQueue` and `outbox` can; a queue that already
-   * has the message can't. Without it, `ctx.schedule` with `replace` is refused.
+   * Can keep one waiting job per key: `enqueue` gets a call with `replace`, and a pending call with the same key
+   * (`storedUniqueKey`) that hasn't started is replaced by it; a delivery with `unique` is dropped while one with the
+   * same key waits. A queue that already has the message can't. Without it, `ctx.schedule` with `replace` is refused,
+   * and so is `unique` on an adapter that holds jobs.
    */
   replaces?: true;
+  /**
+   * It keeps jobs of different queues apart: any name (`true`), or only these (a queue per binding). Without it,
+   * `createRegistry` refuses `jobs.queues`; with a list, a declared queue (or `"default"`) it doesn't have.
+   */
+  queues?: true | readonly string[];
   /**
    * At `createRegistry`, once: take what the adapter needs from the registry (its database, for an adapter that writes
    * jobs in the mutation's transaction), and refuse a setup it can't honour.
@@ -538,7 +572,7 @@ export interface JobsAdapter {
   /** After commit: run them, or hand them to a queue. A throw is reported to `onError`. */
   deliver(jobs: Job[], runner: Runner): Promise<void>;
   /** Run what's due (retries, deliveries whose runner crashed). Only adapters that store deliveries have it. */
-  sweep?(runner: Runner, options?: { limit?: number }): Promise<SweepResult>;
+  sweep?(runner: Runner, options?: SweepOptions): Promise<SweepResult>;
   /** Put a failed job back in line. `false` when there's no failed job with that id. Only adapters that store them. */
   retry?(id: string): Promise<boolean>;
   /** A page of failed jobs, newest first. Only adapters that store them and can filter them. */
@@ -546,10 +580,11 @@ export interface JobsAdapter {
   /** Delete one failed job. `false` when there's no failed job with that id: a waiting or running one is never touched. */
   forget?(id: string): Promise<boolean>;
   /**
-   * Keep a job that failed for good after it left the adapter: `registry.jobs.run` calls it from a queue consumer, so
-   * `outbox` stores the failure Cloudflare would otherwise drop. Not called for jobs the adapter ran itself.
+   * For an adapter that keeps its jobs as rows and sends a queue only signals: a consumer got this job's
+   * message, so run it from the rows (with a `key`, the key's next jobs, in order), recording each outcome itself.
+   * `registry.jobs.run` calls it in place of running the message.
    */
-  fail?(job: Job, error: unknown): Promise<void>;
+  consume?(job: Job, runner: Runner): Promise<void>;
 }
 
 /**
@@ -568,12 +603,29 @@ export interface FailureInfo {
 
 /** What `createRegistry` gives an adapter's `connect`. */
 export interface AdapterSetup {
-  listeners: readonly RegisteredListener[];
-  crons: readonly RegisteredCron[];
-  /** The registry's `database.adapter`. */
-  database: DatabaseAdapter<unknown, unknown> | undefined;
-  /** The same, when it runs SQL: always set for an adapter that declares `sql: true`. */
+  /** The registry's `database.adapter`, when it runs SQL: always set for an adapter that declares `sql: true`. */
   sql: SqlDatabase | undefined;
+  /**
+   * The loops running jobs in this process (`work()`, through `registry.jobs.attach`): whether one takes `job`, so the
+   * request leaves it to them instead of running it, and `wake(count)` once that many are committed.
+   */
+  workers: { takes(job: Job): boolean; wake(count: number): void };
+}
+
+/** What `registry.jobs.sweep` and an adapter's `sweep` take. */
+export interface SweepOptions {
+  /** At most this many jobs. Default 100. */
+  limit?: number;
+  /** Only these queues, in this order: each claim takes the first one with a job due. Default: every queue. */
+  queues?: readonly string[];
+}
+
+/** A loop running jobs in this process: `registry.jobs.attach({ wake, queues })`. */
+export interface LocalWorker {
+  /** How many jobs just committed for it: claim them now. */
+  wake(count: number): void;
+  /** The queues it runs. Default: all. */
+  queues?: readonly string[];
 }
 
 /**
@@ -688,6 +740,12 @@ export type JobsOptions<S = object, T = any> = {
    * are 2 or 3).
    */
   maxEventDepth?: number;
+  /**
+   * Queues besides `"default"`, for listeners, crons and `ctx.schedule` (`queue: "mail"`): `queues: ["mail", "reports"]`.
+   * A worker takes them in the order it lists them (`work(registry, { queues: ["mail", "default"] })`). A name not
+   * declared here is refused, at `createRegistry` or at the call.
+   */
+  queues?: readonly string[];
 } & (
   | {
       /** `inProcess()` (default), or a durable one like `databaseQueue()`. Its own options go in its factory. */
@@ -731,9 +789,8 @@ export interface RegistryOptions<Mods extends Record<string, object>> {
   /**
    * Serverless: let listeners finish after the response. Pass the platform's global:
    * `import { waitUntil } from "cloudflare:workers"` or `import { waitUntil } from "@vercel/functions"`.
-   * Without it, `run` waits for listeners. On a long-lived server with `databaseQueue`, `() => {}` answers first (a restart
-   * is swept up after its lease: retried, or failed when it was out of attempts); with `inProcess()`, don't: work
-   * still running at a restart is lost.
+   * Without it, `run` waits for listeners, unless a worker in this process takes them (`work(registry)` on Node or Bun,
+   * with `databaseQueue`): then the request answers at once.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Failures no caller waits for: jobs, and the work after commit that runs them. They never fail the caller. */
@@ -791,11 +848,12 @@ export interface RegisteredCron extends Registered {
  */
 export interface Jobs {
   /**
-   * Run one stored job (queue consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
+   * Run one job from a queue message (consumers): `await registry.jobs.run(message.body, { attempt: message.attempts })`.
    * Resolves `"done"`, `"failed"` or `"discarded"` (acknowledge all three); throws when a retry might help and the
-   * job has tries left. A `failed` job goes to `fail`: yours, or your adapter's (`databaseQueue` and `outbox` keep it).
+   * job has tries left. A `failed` job is kept by `jobs.failed`, if you have one. On an adapter that only sends
+   * signals, the job runs from its row, which records how it went, and `run` resolves `"done"`.
    */
-  run(job: Job, options?: RunJobOptions): Promise<JobOutcome>;
+  run(job: Job, options?: { attempt?: number }): Promise<JobOutcome>;
   /**
    * Run the crons due in `at`'s minute (default now), from a timer or your platform's cron trigger:
    * `await registry.jobs.tick(new Date(controller.scheduledTime))`. Resolves the ids of the crons that were due. Each run
@@ -804,10 +862,15 @@ export interface Jobs {
   tick(at?: Date): Promise<string[]>;
   /**
    * Run what your adapter has due, from a cron or an interval: `await registry.jobs.sweep()`. With `databaseQueue()`, that's
-   * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing, or maintain themselves
-   * (pg-boss), resolve zeros.
+   * retries whose backoff is over and jobs whose runner crashed. Adapters that keep nothing resolve zeros.
    */
-  sweep(options?: { limit?: number }): Promise<SweepResult>;
+  sweep(options?: SweepOptions): Promise<SweepResult>;
+  /**
+   * For a host that runs jobs in this process, like `work()`: requests leave their jobs due now to it (in its `queues`,
+   * or all) and answer at once, and `wake(count)` tells it how many just committed, so it claims them right away rather
+   * than at its next poll. Returns the detach, for its stop. Throws on a queue `jobs.queues` doesn't declare.
+   */
+  attach(worker: LocalWorker): () => void;
   /**
    * Put a failed job back in line with a fresh set of attempts. `false` when no failed job has that id (it's pending,
    * running, done, or never existed). Throws when your adapter keeps no jobs, like `inProcess()`.
@@ -816,7 +879,7 @@ export interface Jobs {
   /**
    * Failed jobs, newest first, a page at a time: `await registry.jobs.failed({ source: "emails.send", scope: { organizationId } })`.
    * Then `retry` or `forget` each. Pass your stored scope's type to check the filter: `failed<Stored>({ scope })`. Throws
-   * when your adapter keeps none (a queue alone without `jobs.failed`) or can't list them: its message says where they are.
+   * when your adapter keeps none (a queue alone without `jobs.failed`).
    */
   failed<Stored = Record<string, unknown>>(options?: FailedOptions<Stored>): Promise<FailedPage<Stored>>;
   /**
