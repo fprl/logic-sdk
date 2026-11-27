@@ -10,6 +10,7 @@ import type {
   CallMetaOf,
   Config,
   ConfigOf,
+  ReaderOf,
   Constructor,
   Cron,
   CronCtx,
@@ -52,7 +53,7 @@ import type {
 
 type TypedOptions<C extends Config, Mods extends Record<string, object>, T> = Omit<RegistryOptions<Mods>, "wrap" | "jobs"> & {
   /** Background work: `jobs: { adapter: databaseQueue(), scope: { store, load } }`. Default: in-process, scope as-is (nothing waits). */
-  jobs?: JobsOptions<ScopeOf<C>, T>;
+  jobs?: JobsOptions<ScopeOf<C>, T, ReaderOf<C>, Frozen<ConfigOf<C>>>;
   /** Wraps every call, including ones that fail validation or authorization: logging, tracing, audit. */
   wrap?: (call: Call<CallMetaOf<C>>, next: () => Promise<unknown>) => Promise<unknown>;
 } &
@@ -382,7 +383,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
   if (appAdapter && !runsNow(appAdapter) && !jobScope?.load)
     throw new Error(
       "[logic-sdk] Your jobs adapter keeps jobs to run later, so set jobs.scope.load: it rebuilds the scope when a job runs, with today's " +
-        "roles (null discards the job). Add `store` to save only ids. To keep the scope as it was, `load: (saved) => saved`.",
+        "roles (null discards the job). Add `store` to save only ids. To keep the scope as it was, `load: (_ctx, saved) => saved`.",
     );
   const now = o.now ?? options.now ?? (() => new Date());
   const wrap = options.wrap ?? ((_c, next) => next());
@@ -563,6 +564,7 @@ function build<S extends object, Mods extends Record<string, object>, Cf = unkno
     wrap,
     report,
     runAs: (fn, input, scope, eventDepth, queued, job) => invoke(fn, input, enter({ scope, trail: [], eventDepth, queued, job }, undefined), ["query", "mutation", "action"]),
+    loadCtx: () => ({ db: database?.db, config }),
     handlerCtx: (scope, eventDepth, id, queued, stop) => actionCtx({ scope, trail: [id], eventDepth, queued, signal: stop, stop }, id),
   });
 

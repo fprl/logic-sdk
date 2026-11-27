@@ -27,7 +27,7 @@ test("crons: tick runs what's due that minute, as the cron's scope, and what it 
 test("crons: a run is a job, `<cron id>@<minute>`, through the jobs adapter, with the cron's attempts", async () => {
   const sent: Job[] = [];
   const reported: FailureInfo[] = [];
-  const { registry, ran } = cronSetup({ jobs: { adapter: { retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (saved) => saved } }, onError: (_e, info) => reported.push(info) });
+  const { registry, ran } = cronSetup({ jobs: { adapter: { retries: true, async deliver(jobs) { sent.push(...jobs); } }, scope: { load: (_ctx, saved) => saved } }, onError: (_e, info) => reported.push(info) });
   await registry.jobs.tick(new Date("2026-11-23T09:00:00Z"));
   expect(sent).toEqual([
     { kind: "cron", id: "reports.weekly@20261123T0900Z", cron: "reports.weekly", scheduledAt: "2026-11-23T09:00:00.000Z", attempts: 1 },
@@ -86,7 +86,7 @@ test("crons: invoke is a run now, its own job (`<cron>@<minute>-<uuid>`), throug
           sent.push(...jobs);
         },
       },
-      scope: { load: (saved) => saved },
+      scope: { load: (_ctx, saved) => saved },
     },
     onError: () => {},
   });
@@ -125,7 +125,7 @@ test("a cron starts a chain: what its function emits is the first hop", async ()
           }
         },
       },
-      scope: { load: (saved) => saved },
+      scope: { load: (_ctx, saved) => saved },
     },
   });
   await r.jobs.tick(new Date("2026-11-23T03:00:00Z"));

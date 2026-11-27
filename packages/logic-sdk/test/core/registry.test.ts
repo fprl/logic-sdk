@@ -72,7 +72,7 @@ test("ids: an explicit id is local to its module, and jobs store it", async () =
   const r = createRegistry<Scope>({
     modules: { notifications: { renamedEvent: happened, renamedFn: doIt, renamedListener: send } },
     database: { adapter: memoryDatabase() },
-    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...deliveriesIn(d)); for (const j of d) await run(j); } }, scope: { load: (saved) => saved } },
+    jobs: { adapter: { async deliver(d, { run }) { jobs.push(...deliveriesIn(d)); for (const j of d) await run(j); } }, scope: { load: (_ctx, saved) => saved } },
   });
   expect(r.idOf(doIt)).toBe("notifications.do");
   expect(r.definitions.listeners.map((l) => [l.id, l.name])).toEqual([["notifications.send", "renamedListener"]]);

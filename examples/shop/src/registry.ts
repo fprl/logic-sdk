@@ -21,7 +21,7 @@ export const createShop = (options: {
     jobs: {
       adapter: options.jobs ?? databaseQueue(),
       // demo auth has no users table. In your app: `store` the ids, `load` the user with today's role
-      scope: { load: (saved) => saved },
+      scope: { load: (_ctx, saved) => saved },
     },
     waitUntil: options.waitUntil,
   });

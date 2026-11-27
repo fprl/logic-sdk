@@ -75,7 +75,7 @@ export function jobsTableSuite(name: string, target: Target) {
       const registry = createRegistry({
         modules: { x: { added, add, react, remind, book, tidy, nightly } },
         database: { adapter: database },
-        jobs: { adapter: (adapter ?? target.databaseQueue)(), scope: { load: (saved) => saved } },
+        jobs: { adapter: (adapter ?? target.databaseQueue)(), scope: { load: (_ctx, saved) => saved } },
         onError: () => {},
       });
       return { registry, as: registry.as({ who: "ana" }), add, book, nightly, ran, state };
@@ -127,7 +127,7 @@ export function jobsTableSuite(name: string, target: Target) {
       const registry = createRegistry({
         modules: { x: { said, say, sayAll, reply, changed, change, reindex } },
         database: { adapter: database },
-        jobs: { adapter: adapter(), scope: { load: (saved) => saved } },
+        jobs: { adapter: adapter(), scope: { load: (_ctx, saved) => saved } },
         onError: () => {},
       });
       return { registry, as: registry.as({ who: "ana" }), say, sayAll, change, ran, failing, hold, open, does };
@@ -315,7 +315,7 @@ export function jobsTableSuite(name: string, target: Target) {
       const send = mutation({ input: sent.payload, async handler(ctx, input) { ctx.emit(sent, input); } });
       const mail = listener({ event: () => sent, queue: "mail", async handler(_ctx, { to }) { ran.push(`mail ${to}`); } });
       const index = listener({ event: () => sent, async handler(_ctx, { to }) { ran.push(`index ${to}`); } });
-      const registry = createRegistry({ modules: { x: { sent, send, mail, index } }, database: { adapter: database }, jobs: { adapter: target.databaseQueue(), queues: ["mail"], scope: { load: (s) => s } }, onError: () => {} });
+      const registry = createRegistry({ modules: { x: { sent, send, mail, index } }, database: { adapter: database }, jobs: { adapter: target.databaseQueue(), queues: ["mail"], scope: { load: (_ctx, s) => s } }, onError: () => {} });
       const detach = registry.jobs.attach({ wake: () => {}, queues: ["mail"] });
       await registry.as({ who: "ana" }).run(send, { to: "bo" }); // one of its jobs isn't the worker's: all run here
       detach();
@@ -335,7 +335,7 @@ export function jobsTableSuite(name: string, target: Target) {
       const registry = createRegistry({
         modules: { x: { sent, send, index, mail, report } },
         database: { adapter: database },
-        jobs: { adapter: target.databaseQueue({ runIn: "worker" }), queues: ["mail", "reports"], scope: { load: (s) => s } },
+        jobs: { adapter: target.databaseQueue({ runIn: "worker" }), queues: ["mail", "reports"], scope: { load: (_ctx, s) => s } },
         onError: () => {},
       });
       await registry.as({ who: "ana" }).run(send, { to: "bo" });

@@ -168,7 +168,7 @@ test("testing: drain runs each waiting job at the time it was due, so one that r
     },
   });
   const rearm = mutation({ async handler(ctx) { ctx.schedule(pulse, undefined, { delay: 3600 }); } });
-  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: { adapter: memoryDatabase() }, jobs: { adapter: { holds: true, async deliver() {} }, scope: { load: (saved) => saved } } });
+  const registry = createRegistry<Scope>({ modules: { x: { pulse, rearm } }, database: { adapter: memoryDatabase() }, jobs: { adapter: { holds: true, async deliver() {} }, scope: { load: (_ctx, saved) => saved } } });
   const t = createTestRegistry(registry, { now: "2026-07-01T10:00:00Z" });
   await t.begin();
   await t.as({ actor: "a", locale: "es" }).run(rearm);
@@ -219,5 +219,39 @@ test("testing: a unique listener's job is dropped while one with its value waits
   await app.run(change, { product: "p2" });
   await t.jobs.drain();
   expect(ran).toEqual(["p1", "p2"]);
+  await t.rollback();
+});
+
+test("testing: jobs.scope.load reads the test's transaction, so a job for rows the test wrote isn't discarded", async () => {
+  const { mutation, event, listener, createRegistry } = init<{ scope: Scope; db: Store }>();
+  const opened = event({ payload: z.object({ org: z.string() }) });
+  const open = mutation({
+    input: z.object({ org: z.string() }),
+    async handler(ctx, { org }) {
+      ctx.db.rows.members = [...(ctx.db.rows.members ?? []), { org, actor: ctx.scope.actor }];
+      ctx.emit(opened, { org });
+    },
+  });
+  const welcomed: string[] = [];
+  const welcome = listener({ event: () => opened, async handler(ctx, { org }) { welcomed.push(`${org} as ${ctx.scope.actor}`); } });
+  const registry = createRegistry({
+    modules: { orgs: { opened, open, welcome } },
+    database: { adapter: memoryDatabase() },
+    jobs: {
+      adapter: { holds: true, async deliver() {} }, // keeps jobs, like a database queue: load is required
+      scope: {
+        store: (s) => ({ actor: s.actor }),
+        // a member today, read as a query reads: through ctx.db
+        load: (ctx, saved) => (ctx.db.rows.members?.some((m) => m.actor === saved.actor) ? { actor: saved.actor, locale: "es" } : null),
+      },
+    },
+  });
+  const t = createTestRegistry(registry, { jobs: "manual" });
+  await t.begin();
+  const ana = { actor: "ana", locale: "es" };
+  await t.as(ana).run(open, { org: "acme" }); // uncommitted: only the test's transaction has her membership
+  expect(await t.jobs.perform(welcome, { org: "acme" }, { scope: ana })).toEqual("done");
+  expect(await t.jobs.perform(welcome, { org: "acme" }, { scope: { actor: "bo", locale: "es" } })).toEqual("discarded"); // not a member
+  expect(welcomed).toEqual(["acme as ana"]);
   await t.rollback();
 });

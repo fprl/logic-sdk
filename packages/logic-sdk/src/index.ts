@@ -38,6 +38,7 @@ export type {
   JobOutcome,
   JobsAdapter,
   JobScope,
+  LoadCtx,
   Jobs,
   JobsOptions,
   Kind,

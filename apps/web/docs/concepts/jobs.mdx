@@ -13,7 +13,7 @@ createRegistry({
     adapter: databaseQueue(),                           // where jobs go; default inProcess()
     scope: {
       store: (s) => ({ userId: s.user?.id ?? null, accountId: s.accountId }), // what's saved with each job
-      load: (saved) => scopeFor(saved),                         // rebuilt when it runs; null discards it
+      load: (ctx, saved) => scopeFor(ctx.db, saved),                  // rebuilt when it runs; null discards it
     },
   },
 });
@@ -342,9 +342,9 @@ export const sendAll = listener({
 A job runs as the scope that emitted or scheduled it, so policies check it again and tenant-scoped helpers keep working. A job that waits in a table or a queue would run with the roles of the day it was queued, so every adapter but `inProcess()` needs `jobs.scope.load`. TypeScript asks for `scope`, and `createRegistry` throws without `load`:
 
 - **`inProcess()` needs nothing:** it runs each job right after commit, so no scope waits.
-- **Keeping the scope as it was is a choice you write down:** `load: (saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
+- **Keeping the scope as it was is a choice you write down:** `load: (_ctx, saved) => saved`. Fine for a scope with nothing that changes (an id and a locale); not for roles.
 - **`store` picks what's saved:** ids, not whole objects. It has to be plain JSON, and that's checked when you emit, in tests too.
-- **`load` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles.
+- **`load(ctx, saved)` rebuilds the scope when the job runs,** so every `ctx.run` checks policies against today's roles. Read through `ctx.db`, as a query does (`ctx.config` too): in tests it's the test's transaction, so a job for rows the test wrote finds them.
 - **`load` returning `null` discards the job** (reported to `onError`, deleted from the table). Use it when what the job ran as is gone, like an offboarded account. Check membership here too: a user who left the account gets `null`.
 - **Keep the system:** a [system scope](/docs/concepts/scope#the-system) (a cron's) is stored like any other, so `store` keeps its `system` field and `load` rebuilds it.
 - **`load` throwing counts as a try,** like the listener throwing: with tries left it's retried, at the default of one it's `failed`. So does returning `undefined`, which is almost always a missing `return`.

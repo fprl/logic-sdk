@@ -81,7 +81,7 @@ const mail = listener({ event: () => placed, queue: "mail", async handler() {} }
 const index = listener({ event: () => placed, async handler() {} });
 const keeps = (queues: JobsAdapter["queues"], sent: Job[] = []): JobsAdapter => ({ queues, async deliver(jobs) { sent.push(...jobs); } });
 const make = (adapter: JobsAdapter, queues?: string[], modules: object = { place, placed, mail, index, remind, later }) =>
-  createRegistry<Scope>({ modules: { x: modules as never }, database: { adapter: memoryDatabase() }, jobs: { adapter, queues, scope: { load: (s) => s } } });
+  createRegistry<Scope>({ modules: { x: modules as never }, database: { adapter: memoryDatabase() }, jobs: { adapter, queues, scope: { load: (_ctx, s) => s } } });
 
 test("queues: a job carries its queue; default carries none", async () => {
   const sent: Job[] = [];
